@@ -25,7 +25,7 @@
    | NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED |
    | OF THE POSSIBILITY OF SUCH DAMAGE.                                                           |
    +----------------------------------------------------------------------------------------------+
-   | Module: ucache_lock.c                                                                      |
+   | Module: ucache_lock.c                                                                        |
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
@@ -41,6 +41,10 @@
 #define LOCK_SUFFIX_FORMAT              "_%u_%u_%u_"
 #define LOCK_NAMESALT_SUFFIX_FORMAT     "_%u_%s_%u_%u_"
 #endif /* _WIN64 */
+
+/* Prefix of every named lock object, so that lock (and init event) */
+/* names never match the ones created by another extension */
+#define LOCK_NAME_PREFIX                "UCACHE_"
 
 
 /* Globals */
@@ -150,19 +154,20 @@ int lock_get_nameprefix(
             pid = UCG(fmapgdata)->pid;
             namelen += PID_MAX_LENGTH;
             break;
-        case LOCK_TYPE_GLOBAL:
-            break;
         default:
             result = FATAL_LOCK_INVALID_TYPE;
             goto Finished;
     }
 
     /* Add 6 for underscores, 1 for null termination, */
-    /* LOCK_NUMBER_MAX_STRLEN for adding cachekey, 2 for 0 (for global), */
+    /* LOCK_NUMBER_MAX_STRLEN for adding cachekey, 2 for 0 (unused pid/ppid), */
     /* PHP_UCACHE_VERSION_LEN, plus the length of the PHP Maj.Min version. */
     namelen  = namelen + LOCK_NUMBER_MAX_STRLEN + 9;
     namelen += sizeof(STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION));
     namelen += PHP_UCACHE_VERSION_LEN;
+
+    /* Add the length of LOCK_NAME_PREFIX */
+    namelen += sizeof(LOCK_NAME_PREFIX) - 1;
 
     /* Add 2 for lock-type padding.  The buffer will be used to tack on
      * an extra char for the lock type by the caller. */
@@ -187,11 +192,11 @@ int lock_get_nameprefix(
     /* Create nameprefix as name_pid_ppid_ */
     if(UCG(namesalt) == NULL)
     {
-        actual_len = _snprintf_s(objname, namelen + 1, namelen, "%s_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION LOCK_SUFFIX_FORMAT, name, cachekey, pid, ppid);
+        actual_len = _snprintf_s(objname, namelen + 1, namelen, LOCK_NAME_PREFIX "%s_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION LOCK_SUFFIX_FORMAT, name, cachekey, pid, ppid);
     }
     else
     {
-        actual_len = _snprintf_s(objname, namelen + 1, namelen, "%s_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION LOCK_NAMESALT_SUFFIX_FORMAT, name, cachekey, UCG(namesalt), pid, ppid);
+        actual_len = _snprintf_s(objname, namelen + 1, namelen, LOCK_NAME_PREFIX "%s_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION LOCK_NAMESALT_SUFFIX_FORMAT, name, cachekey, UCG(namesalt), pid, ppid);
     }
 
     if (-1 == actual_len)
@@ -220,7 +225,7 @@ Arguments:
     plock           pointer to lock_context to be initialized
     name            unique name for this lock
     cachekey        ?
-    type            scope of this lock (Local/Shared/Global)
+    type            scope of this lock (Local/Shared)
     plast_owner     Optional pointer to unsigned int that will receive the PID
                     of the process which last successfully acquired the lock.
 
@@ -340,8 +345,6 @@ void lock_terminate(lock_context * plock)
 void lock_lock(lock_context * plock)
 {
     DWORD  ret       = 0;
-    const char *filename;
-    uint   lineno;
     unsigned int last_owner = 0;
 
     dprintverbose("start lock_lock   %p", plock);
@@ -352,6 +355,7 @@ void lock_lock(lock_context * plock)
     /* Simple case. Just lock hxwrite */
     ret = WaitForSingleObject(plock->hxlock, INFINITE);
 
+    /* PID of the process which got the lock before, for the messages below */
     if (plock->last_owner)
     {
         last_owner = *plock->last_owner;
@@ -360,21 +364,15 @@ void lock_lock(lock_context * plock)
     if (ret == WAIT_ABANDONED)
     {
         error_setlasterror();
-        dprintcritical("lock_lock: acquired abandoned mutex %s. Something bad happend in another process!",
-                        plock->nameprefix);
-        utils_get_filename_and_line(&filename, &lineno);
-        EventWriteLockAbandonedMutex(plock->nameprefix,
-            last_owner, last_owner, filename, lineno);
+        dprintcritical("lock_lock: acquired abandoned mutex %s (last owner pid %u). Something bad happend in another process!",
+                        plock->nameprefix, last_owner);
         goto Finished;
     }
 
     if (ret == WAIT_FAILED)
     {
-        dprintcritical("lock_lock: Failure waiting on lock %s (%d). Something bad happened!", 
-                        plock->nameprefix, error_setlasterror());
-        utils_get_filename_and_line(&filename, &lineno);
-        EventWriteLockFailedWaitForLock(plock->nameprefix,
-            last_owner, last_owner, filename, lineno);
+        dprintcritical("lock_lock: Failure waiting on lock %s (%d, last owner pid %u). Something bad happened!",
+                        plock->nameprefix, error_setlasterror(), last_owner);
         goto Finished;
     }
 

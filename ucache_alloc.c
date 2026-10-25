@@ -25,7 +25,7 @@
    | NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED |
    | OF THE POSSIBILITY OF SUCH DAMAGE.                                                           |
    +----------------------------------------------------------------------------------------------+
-   | Module: ucache_alloc.c                                                                     |
+   | Module: ucache_alloc.c                                                                       |
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
@@ -91,9 +91,6 @@ static int allocate_memory(alloc_context * palloc, size_t size, void ** ppaddr)
     alloc_free_header *    pfree   = NULL;
     alloc_used_header *    usedh   = NULL;
 
-    const char *           filename;
-    uint                   lineno;
-
     dprintdecorate("start allocate_memory");
 
     _ASSERT(palloc         != NULL);
@@ -138,9 +135,6 @@ static int allocate_memory(alloc_context * palloc, size_t size, void ** ppaddr)
         dprintcritical("allocate_memory: First block is not BLOCK_ISFREE_FIRST");
         result = FATAL_ALLOC_SEGMENT_CORRUPT;
 
-        utils_get_filename_and_line(&filename, &lineno);
-        EventWriteMemFreeListCorrupt(freeh, palloc, filename, lineno);
-
         goto Finished;
     }
 
@@ -150,9 +144,6 @@ static int allocate_memory(alloc_context * palloc, size_t size, void ** ppaddr)
     {
         dprintcritical("allocate_memory: Free block is not BLOCK_ISFREE_FREE or BLOCK_ISFREE_LAST");
         result = FATAL_ALLOC_SEGMENT_CORRUPT;
-
-        utils_get_filename_and_line(&filename, &lineno);
-        EventWriteMemFreeListCorrupt(freeh, palloc, filename, lineno);
 
         goto Finished;
     }
@@ -165,9 +156,6 @@ static int allocate_memory(alloc_context * palloc, size_t size, void ** ppaddr)
         {
             dprintcritical("allocate_memory: Free block is not BLOCK_ISFREE_FREE");
             result = FATAL_ALLOC_SEGMENT_CORRUPT;
-
-            utils_get_filename_and_line(&filename, &lineno);
-            EventWriteMemFreeListCorrupt(freeh, palloc, filename, lineno);
 
             goto Finished;
         }
@@ -296,9 +284,6 @@ static void free_memory(alloc_context * palloc, void * paddr)
     alloc_free_header *    freeh  = NULL;
     alloc_free_header *    pfree  = NULL;
 
-    const char *           filename;
-    uint                   lineno;
-
     dprintdecorate("start free_memory");
 
     _ASSERT(palloc != NULL);
@@ -328,9 +313,6 @@ static void free_memory(alloc_context * palloc, void * paddr)
         dprintcritical("free_memory: Address %p not in segment %p (size %d)",
             paddr, segaddr, palloc->size);
 
-        utils_get_filename_and_line(&filename, &lineno);
-        EventWriteMemFreeAddrNotInSegment(paddr, palloc, filename, lineno);
-
         goto Finished;
     }
 
@@ -340,9 +322,6 @@ static void free_memory(alloc_context * palloc, void * paddr)
     {
         dprintcritical("free_memory: Address %p not in use in segment %p (size %d)",
             paddr, segaddr, palloc->size);
-
-        utils_get_filename_and_line(&filename, &lineno);
-        EventWriteMemBlockNotInUse(paddr, palloc, filename, lineno);
 
         goto Finished;
     }
@@ -427,9 +406,6 @@ static void free_memory(alloc_context * palloc, void * paddr)
         {
             dprintcritical("free_memory: Free block %p is not free in segment %p (size %d) - CORRUPTION IMMINENT",
                 freeh, segaddr, palloc->size);
-
-            utils_get_filename_and_line(&filename, &lineno);
-            EventWriteMemCombineNonFreeBlock(freeh, palloc, filename, lineno);
         }
 
         pfree = (alloc_free_header *)usedh;
@@ -746,7 +722,6 @@ int alloc_initialize(alloc_context * palloc, unsigned short islocal, char * name
             header->free_size  = fremid->size;
 
             header->cacheheader1 = 0;
-            header->cacheheader2 = 0;
             header->usedcount    = 0;
             header->freecount    = 1;
         }
@@ -929,17 +904,8 @@ void * alloc_get_cacheheader(alloc_context * palloc, unsigned int msize, unsigne
 
     switch(type)
     {
-        case CACHE_TYPE_FILELIST:
-        case CACHE_TYPE_RESPATHS:
-        case CACHE_TYPE_FILECONTENT:
-        case CACHE_TYPE_BYTECODES:
         case CACHE_TYPE_USERZVALS:
-        case CACHE_TYPE_SESSZVALS:
             pcvalue = &header->cacheheader1;
-            break;
-
-        case CACHE_TYPE_FCNOTIFY:
-            pcvalue = &header->cacheheader2;
             break;
 
         default:

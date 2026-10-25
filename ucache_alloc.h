@@ -25,7 +25,7 @@
    | NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED |
    | OF THE POSSIBILITY OF SUCH DAMAGE.                                                           |
    +----------------------------------------------------------------------------------------------+
-   | Module: ucache_alloc.h                                                                     |
+   | Module: ucache_alloc.h                                                                       |
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
@@ -71,7 +71,6 @@ struct alloc_segment_header
     size_t       total_size;  /* Total size of shared memory segment */
     size_t       free_size;   /* Bytes left to be allocated */
     size_t       cacheheader1;/* Offset to memory which contains 1st cache_header */
-    size_t       cacheheader2;/* Offset to memory which contains 2nd cache header */
 };
 
 /* Each free block will have following information */

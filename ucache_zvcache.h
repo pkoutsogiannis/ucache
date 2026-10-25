@@ -25,7 +25,7 @@
    | NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED |
    | OF THE POSSIBILITY OF SUCH DAMAGE.                                                           |
    +----------------------------------------------------------------------------------------------+
-   | Module: ucache_zvcache.h                                                                   |
+   | Module: ucache_zvcache.h                                                                     |
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
@@ -94,7 +94,6 @@ typedef struct zvcache_context zvcache_context;
 struct zvcache_context
 {
     unsigned int      id;                /* unique identifier for cache */
-    unsigned int      issession;         /* session cache or user cache */
     unsigned short    islocal;           /* is the cache local or shared */
     unsigned short    cachekey;          /* unique cache key used in names */
     HANDLE            hinitdone;         /* event indicating if memory is initialized */
@@ -135,11 +134,9 @@ extern void zvcache_destroy(zvcache_context * pcache);
 
 extern int  zvcache_initialize(
     zvcache_context * pcache,
-    unsigned int issession,
     unsigned short islocal,
     unsigned short cachekey,
-    unsigned int cachesize,
-    char * shmfilepath
+    unsigned int cachesize
     );
 
 extern void zvcache_terminate(zvcache_context * pcache);

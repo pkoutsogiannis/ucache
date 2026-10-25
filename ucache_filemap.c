@@ -25,7 +25,7 @@
    | NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED |
    | OF THE POSSIBILITY OF SUCH DAMAGE.                                                           |
    +----------------------------------------------------------------------------------------------+
-   | Module: ucache_filemap.c                                                                   |
+   | Module: ucache_filemap.c                                                                     |
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
@@ -44,18 +44,6 @@ static int create_file_mapping(char * name, char * shmfilepath, unsigned char is
 static void * map_viewof_file(HANDLE handle, void * baseaddr);
 static int create_information_filemap(filemap_information ** ppinfo);
 static void destroy_information_filemap(filemap_information * pinfo);
-
-/* Array of filemap prefixes, in the same order & value as FILEMAP_TYPE_*
- * definitions. */
-static char * g_filemap_prefix[] = {
-    "UCACHE_FILEMAP_INVALID", /* FILEMAP_TYPE_INVALID     */
-    FILEMAP_FILELIST_PREFIX,    /* FILEMAP_TYPE_FILELIST    */
-    FILEMAP_RESPATHS_PREFIX,    /* FILEMAP_TYPE_RESPATHS    */
-    FILEMAP_FILECONTENT_PREFIX, /* FILEMAP_TYPE_FILECONTENT */
-    FILEMAP_BYTECODES_PREFIX,   /* FILEMAP_TYPE_BYTECODES   */
-    FILEMAP_USERZVALS_PREFIX,   /* FILEMAP_TYPE_USERZVALS   */
-    FILEMAP_SESSZVALS_PREFIX,   /* FILEMAP_TYPE_SESSZVALS   */
-};
 
 #ifdef _WIN64
 #define FILEMAP_PREFIX_FORMAT           "%s_%u_%u_x64"
@@ -175,11 +163,12 @@ static char * get_filemap_prefix(
     unsigned short fmaptype
     )
 {
-    if (fmaptype > FILEMAP_TYPE_SESSZVALS)
+    /* FILEMAP_TYPE_USERZVALS is the only valid filemap type */
+    if (fmaptype != FILEMAP_TYPE_USERZVALS)
     {
-        fmaptype = FILEMAP_TYPE_INVALID;
+        return "UCACHE_FILEMAP_INVALID";
     }
-    return g_filemap_prefix[fmaptype];
+    return FILEMAP_USERZVALS_PREFIX;
 }
 
 static int build_filemap_name(
@@ -604,10 +593,10 @@ static int create_information_filemap(filemap_information ** ppinfo)
 
     pinfo->infonlen = infonamelen;
 
-    result = utils_create_init_event(pinfo->infoname, "_FCACHE_INIT", &pinfo->hinitdone, &isfirst);
+    result = utils_create_init_event(pinfo->infoname, "_FILEMAP_INIT", &pinfo->hinitdone, &isfirst);
     if (FAILED(result))
     {
-        result = FATAL_FCACHE_INIT_EVENT;
+        result = FATAL_FILEMAP_INIT_EVENT;
         goto Finished;
     }
 
@@ -940,7 +929,7 @@ void filemap_destroy(filemap_context * pfilemap)
     return;
 }
 
-int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsigned short cachekey, unsigned short fmclass, unsigned int size_mb, unsigned char isfirst, char * shmfilepath)
+int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsigned short cachekey, unsigned short fmclass, unsigned int size_mb, unsigned char isfirst)
 {
     int           result  = NONFATAL;
     unsigned int  ffree   = 0;
@@ -950,7 +939,7 @@ int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsi
     void *        mapaddr = NULL;
     unsigned char flock   = 0;
     unsigned int  fcreate_file_for_sm = 1;
-    char *        sm_file_path        = shmfilepath;
+    char *        sm_file_path        = NULL;
     HANDLE        hOriginalToken      = NULL;
 
     filemap_information *        pinfo  = NULL;
@@ -966,11 +955,10 @@ int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsi
 
     size = size_mb * 1024 * 1024;
 
-    /* If parentpid is greater than 99999, use shmfilepath */
+    /* If parentpid is greater than 99999, use file backed shared memory */
     /* Else don't create file backed shared memory */
     if(UCG(fmapgdata)->ppid <= 99999)
     {
-        sm_file_path = NULL;
         fcreate_file_for_sm = 0;
     }
 
@@ -1052,9 +1040,8 @@ int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsi
             }
         }
 
-        /* If we should have a temp file for shared memory, but we don't have a
-         * file name yet, build one. */
-        if (fcreate_file_for_sm && sm_file_path == NULL)
+        /* If we should have a temp file for shared memory, build its name. */
+        if (fcreate_file_for_sm)
         {
             sm_file_path = utils_build_temp_filename(pentry->name);
         }
@@ -1071,8 +1058,7 @@ int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsi
         result = create_file_mapping(
                     pentry->name,
                     sm_file_path,
-                    /* Session files shouldn't get deleted */
-                    (fmaptype == FILEMAP_TYPE_SESSZVALS) ? 0 : isfirst,
+                    isfirst,
                     pentry->size,
                     &pfilemap->hshmfile,
                     &pfilemap->existing,
@@ -1180,7 +1166,7 @@ Finished:
         flock = 0;
     }
 
-    if (sm_file_path && sm_file_path != shmfilepath)
+    if (sm_file_path)
     {
         alloc_pefree(sm_file_path);
         sm_file_path = NULL;
@@ -1226,7 +1212,6 @@ Finished:
 void filemap_terminate(filemap_context * pfilemap)
 {
     char * sm_file_path = NULL;
-    unsigned short fmaptype = FILEMAP_TYPE_UNUSED;
 
     dprintverbose("start filemap_terminate");
 
@@ -1245,16 +1230,13 @@ void filemap_terminate(filemap_context * pfilemap)
                 /* remove the entry from information list */
                 if(pfilemap->infoentry->mapcount == 0)
                 {
-                    fmaptype = pfilemap->infoentry->fmaptype;
                     pfilemap->infoentry->fmaptype = FILEMAP_TYPE_UNUSED;
                     pfilemap->infoentry->cachekey = 0;
                     UCG(fmapgdata)->info->header->entry_count--;
 
                     /* Get the name of the backing file, so we can delete it
-                     * after we close the handle.
-                     * Oh, and DO NOT delete session files! */
-                    if (pfilemap->hshmfile != INVALID_HANDLE_VALUE &&
-                        fmaptype != FILEMAP_TYPE_SESSZVALS)
+                     * after we close the handle. */
+                    if (pfilemap->hshmfile != INVALID_HANDLE_VALUE)
                     {
                         sm_file_path = utils_build_temp_filename(pfilemap->infoentry->name);
                     }
@@ -1403,7 +1385,7 @@ void filemap_runtest()
         goto Finished;
     }
 
-    result = filemap_initialize(pfilemap1, FILEMAP_TYPE_FILECONTENT, 58, FILEMAP_MAP_SRANDOM, 20, TRUE, NULL);
+    result = filemap_initialize(pfilemap1, FILEMAP_TYPE_USERZVALS, 58, FILEMAP_MAP_SRANDOM, 20, TRUE);
     if(FAILED(result))
     {
         goto Finished;
@@ -1415,7 +1397,7 @@ void filemap_runtest()
 
     pentry = pfilemap1->infoentry;
 
-    _ASSERT(pentry->fmaptype == FILEMAP_TYPE_FILECONTENT);
+    _ASSERT(pentry->fmaptype == FILEMAP_TYPE_USERZVALS);
     _ASSERT(pentry->cachekey == 58);
     _ASSERT(pentry->size     == 20 * 1024 * 1024);
     _ASSERT(pentry->mapcount == 1);
@@ -1432,7 +1414,7 @@ void filemap_runtest()
         goto Finished;
     }
 
-    result = filemap_initialize(pfilemap2, FILEMAP_TYPE_BYTECODES, 59, FILEMAP_MAP_SFIXED, 10, TRUE, NULL);
+    result = filemap_initialize(pfilemap2, FILEMAP_TYPE_USERZVALS, 59, FILEMAP_MAP_SFIXED, 10, TRUE);
     if(FAILED(result))
     {
         goto Finished;
@@ -1444,7 +1426,7 @@ void filemap_runtest()
 
     pentry = pfilemap2->infoentry;
 
-    _ASSERT(pentry->fmaptype == FILEMAP_TYPE_BYTECODES);
+    _ASSERT(pentry->fmaptype == FILEMAP_TYPE_USERZVALS);
     _ASSERT(pentry->cachekey == 59);
     _ASSERT(pentry->size     == 10 * 1024 * 1024);
     _ASSERT(pentry->mapcount == 1);
@@ -1472,7 +1454,7 @@ void filemap_runtest()
         goto Finished;
     }
 
-    result = filemap_initialize(pfilemap1, FILEMAP_TYPE_BYTECODES, 58, FILEMAP_MAP_SFIXED, 10, TRUE, NULL);
+    result = filemap_initialize(pfilemap1, FILEMAP_TYPE_USERZVALS, 58, FILEMAP_MAP_SFIXED, 10, TRUE);
     if(FAILED(result))
     {
         goto Finished;

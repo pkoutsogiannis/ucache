@@ -25,7 +25,7 @@
    | NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED |
    | OF THE POSSIBILITY OF SUCH DAMAGE.                                                           |
    +----------------------------------------------------------------------------------------------+
-   | Module: ucache_filemap.h                                                                   |
+   | Module: ucache_filemap.h                                                                     |
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
@@ -34,16 +34,6 @@
 
 #ifndef _UCACHE_FILEMAP_H_
 #define _UCACHE_FILEMAP_H_
-
-/* TBD?? Below are the types of shared memory segments we will create. Their */
-/* names will have corresponding prefix. Only one INFORMATION and FILELIST */
-/* segment will be there but there will be multiple OPCODES segments. If */
-/* FILELIST is finished, we will clean entries which aren't used for a while */
-
-/* TBD?? Maintaining multiple segments will require one segment to not refer */
-/* memory from other or would require using parts of pointer values to */
-/* calculate segement number. For now I will go with one segment to keep */
-/* opcodes. Will look into multiple segments later */
 
 /* TBD?? Should we look at commandline arguments of the process to find what */
 /* all processes got launched for a single fastcgi process pool. Using ppid */
@@ -54,12 +44,7 @@
 #define READWRITE_LOCK_MAX_COUNT                20  /* NOT USED */
 
 #define FILEMAP_TYPE_INVALID                    0   /* Invalid value */
-#define FILEMAP_TYPE_FILELIST                   1   /* File list map */
-#define FILEMAP_TYPE_RESPATHS                   2   /* Resolve path cache */
-#define FILEMAP_TYPE_FILECONTENT                3   /* File cache map */
-#define FILEMAP_TYPE_BYTECODES                  4   /* Byte code map */
 #define FILEMAP_TYPE_USERZVALS                  5   /* User cache map */
-#define FILEMAP_TYPE_SESSZVALS                  6   /* Session cache map */
 #define FILEMAP_TYPE_UNUSED                     255 /* UNUSED SEGMENT MARKER */
 #define FILEMAP_TYPE_MAX                        255
 
@@ -76,23 +61,8 @@
 #define FILEMAP_INFORMATION_PREFIX              "UCACHE_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION "_FILEMAP_INFORMATION"
 #define FILEMAP_INFORMATION_PREFIX_LENGTH       (sizeof(FILEMAP_INFORMATION_PREFIX))
 
-#define FILEMAP_FILELIST_PREFIX                 "UCACHE_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION "_FILEMAP_FILELIST"
-#define FILEMAP_FILELIST_PREFIX_LENGTH          (sizeof(FILEMAP_FILELIST_PREFIX))
-
-#define FILEMAP_RESPATHS_PREFIX                 "UCACHE_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION "_FILEMAP_RESPATHS"
-#define FILEMAP_RESPATHS_PREFIX_LENGTH          (sizeof(FILEMAP_RESPATHS_PREFIX))
-
-#define FILEMAP_FILECONTENT_PREFIX              "UCACHE_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION "_FILEMAP_FILECONTENT"
-#define FILEMAP_FILECONTENT_PREFIX_LENGTH       (sizeof(FILEMAP_FILECONTENT_PREFIX))
-
-#define FILEMAP_BYTECODES_PREFIX                "UCACHE_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION "_FILEMAP_BYTECODES"
-#define FILEMAP_BYTECODES_PREFIX_LENGTH         (sizeof(FILEMAP_BYTECODES_PREFIX))
-
 #define FILEMAP_USERZVALS_PREFIX                "UCACHE_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION "_FILEMAP_USERZVALS"
 #define FILEMAP_USERZVALS_PREFIX_LENGTH         (sizeof(FILEMAP_USERZVALS_PREFIX))
-
-#define FILEMAP_SESSZVALS_PREFIX                "UCACHE_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION "_FILEMAP_SESSZVALS"
-#define FILEMAP_SESSZVALS_PREFIX_LENGTH         (sizeof(FILEMAP_SESSZVALS_PREFIX))
 
 /* filemap_information_header - SHARED - 16 bytes */
 /* filemap_information_entry  - SHARED - 276 bytes */
@@ -168,8 +138,7 @@ filemap_initialize(
     unsigned short cachekey,
     unsigned short fmclass,
     unsigned int size_mb,
-    unsigned char isfirst,
-    char * shmfilepath);
+    unsigned char isfirst);
 
 extern void   filemap_terminate(filemap_context * pfilemap);
 

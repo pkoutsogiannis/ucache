@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{9D903586-2A84-440E-B532-A0815D29EBBF}</ProjectGuid>
+    <RootNamespace>PHPUCache</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>php_ucache</ProjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <!-- Not Unicode: ucache passes char strings to the generic Win32 APIs (CreateFileMapping, ...),
+         and PHP itself is built with _MBCS -->
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="php_ucache.props" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <LinkIncremental>false</LinkIncremental>
+    <OutDir>$(ProjectDir)bin\Release\</OutDir>
+    <IntDir>$(ProjectDir)obj\Release\</IntDir>
+    <TargetName>php_ucache</TargetName>
+    <TargetExt>.dll</TargetExt>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>PHP_WIN32;ZEND_WIN32;WIN32;_WINDOWS;NDEBUG;ZEND_DEBUG=0;ZEND_WIN32_FORCE_INLINE;COMPILE_DL_UCACHE;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4996;4244;4146</DisableSpecificWarnings>
+      <ConformanceMode>true</ConformanceMode>
+      <CompileAs>CompileAsC</CompileAs>
+      <Optimization>MaxSpeed</Optimization>
+      <AdditionalIncludeDirectories>$(PhpSdkRoot);$(PhpSdkRoot)\main;$(PhpSdkRoot)\Zend;$(PhpSdkRoot)\TSRM;$(PhpSdkRoot)\ext;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <ResourceCompile>
+      <!-- template.rc: version info (needs FILE_NAME, and main/php_version.h from the devel pack) -->
+      <PreprocessorDefinitions>FILE_NAME=\"php_ucache.dll\";%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(PhpSdkRoot);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>$(PhpLibName);%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="php_ucache.c" />
+    <ClCompile Include="ucache_alloc.c" />
+    <ClCompile Include="ucache_debug.c" />
+    <ClCompile Include="ucache_error.c" />
+    <ClCompile Include="ucache_filemap.c" />
+    <ClCompile Include="ucache_lock.c" />
+    <ClCompile Include="ucache_utils.c" />
+    <ClCompile Include="ucache_zvcache.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="php_ucache.h" />
+    <ClInclude Include="precomp.h" />
+    <ClInclude Include="ucache_alloc.h" />
+    <ClInclude Include="ucache_debug.h" />
+    <ClInclude Include="ucache_error.h" />
+    <ClInclude Include="ucache_filemap.h" />
+    <ClInclude Include="ucache_lock.h" />
+    <ClInclude Include="ucache_utils.h" />
+    <ClInclude Include="ucache_zvcache.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="template.rc" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

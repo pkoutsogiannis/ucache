@@ -1,59 +1,42 @@
-Installation Instructions for UCache
---------------------------------------
+Installation Instructions for ucache
+------------------------------------
 
 Requirements
 ------------
-The extension is currently supported only on the following 
-configurations: 
+ - Windows x64
+ - PHP 7.2, non-thread-safe (NTS) x64 build
 
-Windows OS:
- - Windows XP SP3 with IIS 5.1 and FastCGI Extension 
- - Windows Server 2003 with IIS 6.0 and FastCGI Extension 
- - Windows Vista SP1 with IIS 7.0 and FastCGI Module 
- - Windows Server 2008 with IIS 7.0 and FastCGI Module 
+Building
+--------
+build.bat builds bin\Release\php_ucache.dll with MSBuild (Visual Studio 2022)
+against the PHP 7.2 NTS x64 devel pack, then runs test-build.php with the PHP
+found in PHP_DIR. Adjust MSBUILD, DEVEL_DIR and PHP_DIR at the top of
+build.bat first.
 
-PHP:
- - PHP 5.2.X, Non-thread-safe build 
- - PHP 5.3 X86, Non-thread-safe VC9 build 
+  build.bat           build and test
+  build.bat install   build, copy php_ucache.dll into %PHP_DIR%\ext, delete
+                      the bin folder, and test the installed DLL
 
- Note: The UCache Extension can only be used when IIS is 
- configured to run PHP via FastCGI.
- 
 Installation
 ------------
-There are two packages for this extension: one package is for PHP 
-versions 5.2.X, and the other package is for PHP 5.3.X. Select the 
-package that is appropriate for the PHP version being used. 
+1. Copy php_ucache.dll into the PHP extensions folder (the "ext" folder next
+   to php.exe, or the folder set by extension_dir in php.ini).
 
-To install and enable the extension, follow these steps: 
+2. Add this line to php.ini:
 
-1.Unpack the package into some temporary location. 
+     extension=php_ucache.dll
 
-2.Copy the php_ucache.dll file into the PHP extensions folder. Typically 
-this folder is called "ext" and it is located in the same folder with 
-all PHP binary files. For example: C:\Program Files\PHP\ext. 
+3. Restart the web server, or recycle the IIS application pool that runs PHP.
 
-3.Using a text editor, open the php.ini file, which is usually located 
-in the same folder where all PHP binary files are. For example: 
-C:\Program Files\PHP\php.ini. 
+4. Check that the extension is loaded: "php -m" lists ucache, and phpinfo()
+   has a ucache section with the ucache.* settings.
 
-4.Add the following line at the end of the php.ini file: extension = 
-php_ucache.dll. 
+Command line (CLI)
+------------------
+Under the CLI the cache is only created when ucache.enablecli=1, either in
+php.ini or on the command line:
 
-5.Save and close the php.ini file. 
+  php -d ucache.enablecli=1 script.php
 
-6.Recycle the IIS Application Pools for PHP to pick up the configuration 
-changes. To check that the extension has been enabled, create a file 
-called phpinfo.php with a PHP code that calls phpinfo function. 
-
-7.Save the phpinfo.php file in the root folder of a IIS web site that 
-uses PHP, then open a browser and make a request to 
-http://localhost/phpinfo.php. Search within the returned web page for a 
-section called ucache. If the extension is enabled, then the phpinfo 
-output will list the configuration settings provided by the UCache. 
-
-Note: Do not forget to remove phpinfo.php file from the web site's root 
-folder after verifying that extension has been enabled.
-
-For instructions on how to use the extension refer to 
-http://docs.php.net/ucache.
+See README.md for the functions, the ucache.* settings and the ucache.php
+statistics page (change its default password before use).

@@ -36,7 +36,7 @@
 #define _PRECOMP_H_
 
 #define PHP_UCACHE_EXTNAME   "ucache"
-#define PHP_UCACHE_VERSION    "2.0.0.8"
+#define PHP_UCACHE_VERSION    "1.0.0.0"
 #define PHP_UCACHE_VERSION_LEN (sizeof(PHP_UCACHE_VERSION)-1)
 
 /* comment following line for release builds */
@@ -61,9 +61,7 @@
 #include "sapi.h"
 #include "ext/standard/info.h"
 #include "zend_smart_str.h"
-#include "ext/session/php_session.h"
-#include "zend_extensions.h"
-#include "php_open_temporary_file.h"
+#include "ext/standard/php_var.h"
 
 #include <tlhelp32.h>
 
@@ -93,33 +91,11 @@
 # define strcpy_s(src, size, dst) strcpy(src, dst)
 #endif
 
-#define CACHE_TYPE_FILELIST        1
-#define CACHE_TYPE_RESPATHS        2
-#define CACHE_TYPE_FILECONTENT     3
-#define CACHE_TYPE_BYTECODES       4
 #define CACHE_TYPE_USERZVALS       5
-#define CACHE_TYPE_SESSZVALS       6
-#define CACHE_TYPE_FCNOTIFY        7
 
-#define APLIST_TYPE_INVALID        255
-#define APLIST_TYPE_GLOBAL         0
-
-#define NUM_FILES_MINIMUM          1024
-#define NUM_FILES_MAXIMUM          16384
-#define FCACHE_SIZE_MINIMUM        5
-#define FCACHE_SIZE_MAXIMUM        255
 #define ZCACHE_SIZE_MINIMUM        5
 #define ZCACHE_SIZE_MAXIMUM        930
-#define SCACHE_SIZE_MINIMUM        5
-#define SCACHE_SIZE_MAXIMUM        85
-#define FILE_SIZE_MINIMUM          10
-#define FILE_SIZE_MAXIMUM          4096
-#define FCHECK_FREQ_MINIMUM        2
-#define FCHECK_FREQ_MAXIMUM        300
-#define TTL_VALUE_MINIMUM          60
-#define TTL_VALUE_MAXIMUM          7200
 
-#define FIVE_SECOND_WAIT           5000
 #define MAX_INIT_EVENT_WAIT        30000
 
 #include "ucache_error.h"
@@ -128,19 +104,7 @@
 #include "ucache_lock.h"
 #include "ucache_filemap.h"
 #include "ucache_alloc.h"
-#include "ucache_fcnotify.h"
-#include "ucache_fcache.h"
-#include "ucache_rplist.h"
-#include "ucache_aplist.h"
 #include "ucache_zvcache.h"
-#include "ucache_session.h"
-
-#if (_MSC_VER >= 1700)
-#include "ucache_etw.h"
-#else
-/* PHP 5.4 supports XP, which *doesn't* support Manifest based ETW events*/
-#include "ucache_dummy_etw.h"
-#endif /* _MSC_VER 1700 */
 
 #include "php_ucache.h"
 

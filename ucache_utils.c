@@ -25,7 +25,7 @@
    | NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED |
    | OF THE POSSIBILITY OF SUCH DAMAGE.                                                           |
    +----------------------------------------------------------------------------------------------+
-   | Module: ucache_utils.c                                                                     |
+   | Module: ucache_utils.c                                                                       |
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
@@ -39,7 +39,7 @@
 #define DWORD_MAX    0xFFFFFFFF
 
 /* Temp files are in the format of "ucache_" + suffix + ".tmp" */
-#define TEMP_FILE_PREFIX_CHARS 13
+#define TEMP_FILE_PREFIX_CHARS 11
 
 /* IIS App Pool defines */
 
@@ -221,162 +221,6 @@ Finished:
     return hash;
 }
 
-const char * utils_filepath(zend_file_handle * file_handle)
-{
-    const char * pchar = NULL;
-
-    dprintverbose("start utils_filepath");
-    _ASSERT(file_handle != NULL);
-
-    /* Use filename if opened_path is null */
-    if(file_handle->opened_path != NULL)
-    {
-        pchar = ZSTR_VAL(file_handle->opened_path);
-    }
-    else if(file_handle->filename != NULL)
-    {
-        pchar = file_handle->filename;
-    }
-
-    dprintverbose("end utils_filepath");
-    return pchar;
-}
-
-char * utils_fullpath(const char * filename, size_t filename_len)
-{
-    char *       filepath = NULL;
-    unsigned int fplength = 0;
-    unsigned int index    = 0;
-
-    dprintverbose("start utils_fullpath");
-    _ASSERT(filename != NULL);
-
-    /* If the filename is too big, just bail out. */
-    if (filename_len >= MAX_PATH || filename_len < 0)
-    {
-        goto Finished;
-    }
-
-    /* Get fullpath in a standardized format */
-    filepath = alloc_emalloc(MAX_PATH);
-    if(filepath == NULL)
-    {
-        goto Finished;
-    }
-
-    ZeroMemory(filepath, MAX_PATH);
-    fplength = GetFullPathName(filename, MAX_PATH, filepath, NULL);
-    if(!fplength)
-    {
-        /* Return the filename which was passed */
-        strcpy(filepath, filename);
-    }
-
-    for(index = 0; index < fplength; index++)
-    {
-        if(filepath[index] == '/')
-        {
-            filepath[index] = '\\';
-        }
-    }
-
-Finished:
-
-    dprintverbose("end utils_fullpath");
-
-    return filepath;
-}
-
-int utils_cwdcexec(char * buffer, size_t length)
-{
-    int          result   = NONFATAL;
-    unsigned int cwdlen   = 0;
-    const char * execname = NULL;
-    size_t       execlen  = 0;
-
-    dprintverbose("start utils_cwdcxec");
-
-    _ASSERT(buffer != NULL);
-    _ASSERT(length >  MAX_PATH);
-
-    ZeroMemory(buffer, length);
-
-    cwdlen = GetCurrentDirectory((DWORD)length, buffer);
-    *(buffer + cwdlen) = '|';
-
-    if(zend_is_executing())
-    {
-        execname = zend_get_executed_filename();
-        execlen = strlen(execname);
-
-        if((length - cwdlen - 2) < execlen)
-        {
-            result = FATAL_NEED_MORE_MEMORY;
-            goto Finished;
-        }
-
-        strncpy(buffer + cwdlen + 1, execname, execlen);
-    }
-
-Finished:
-
-    if(FAILED(result))
-    {
-        dprintimportant("failure %d in utils_cwdcxec", result);
-    }
-
-    dprintverbose("end utils_cwdcexec");
-
-    return result;
-}
-
-int utils_filefolder(const char * filepath, size_t flength, char * pbuffer, size_t length)
-{
-    int    result  = NONFATAL;
-    char * pbslash = NULL;
-    size_t folderlen = 0;
-
-    _ASSERT(filepath != NULL);
-    _ASSERT(pbuffer  != NULL);
-    _ASSERT(IS_ABSOLUTE_PATH(filepath, flength));
-
-    if(length < flength)
-    {
-        result = FATAL_NEED_MORE_MEMORY;
-        goto Finished;
-    }
-
-    ZeroMemory(pbuffer, length);
-
-    /* NOTE: By the time we get here, filepath must not contain '/' as the */
-    /* directory separator char */
-    pbslash = strrchr(filepath, '\\');
-    if (pbslash == NULL)
-    {
-        result = FATAL_INVALID_ARGUMENT;
-        goto Finished;
-    }
-
-    /* length does not include backslash */
-    folderlen = pbslash - filepath;
-    if (folderlen > (size_t)length)
-    {
-        result = FATAL_INVALID_ARGUMENT;
-        goto Finished;
-    }
-
-    memcpy_s(pbuffer, folderlen, filepath, folderlen);
-
-Finished:
-
-    if(FAILED(result))
-    {
-        dprintimportant("failure %d in utils_filefolder", result);
-    }
-
-    return result;
-}
-
 int utils_apoolpid()
 {
     int          retval = -1;
@@ -454,151 +298,6 @@ unsigned int utils_ticksdiff(unsigned int present, unsigned int past)
     }
 
     return ticksdiff;
-}
-
-/* Copy of php_resolve_path from PHP 5.3 branch for use in PHP 5.2 */
-char * utils_resolve_path(const char *filename, size_t filename_length, const char *path)
-{
-    char resolved_path[MAXPATHLEN];
-    char trypath[MAXPATHLEN];
-    const char *ptr, *end, *p;
-    char *actual_path;
-    php_stream_wrapper *wrapper;
-
-    if (!filename) {
-        return NULL;
-    }
-
-    /* Don't resolve paths which contain protocol (except of file://) */
-    for (p = filename; isalnum((int)*p) || *p == '+' || *p == '-' || *p == '.'; p++);
-    if ((*p == ':') && (p - filename > 1) && (p[1] == '/') && (p[2] == '/')) {
-        wrapper = php_stream_locate_url_wrapper(filename, &actual_path, STREAM_OPEN_FOR_INCLUDE);
-        if (wrapper == &php_plain_files_wrapper) {
-            if (tsrm_realpath(actual_path, resolved_path)) {
-                return alloc_estrdup(resolved_path);
-            }
-        }
-        return NULL;
-    }
-
-    /*
-     * if filename starts with: "." or "..\"
-     * --OR--
-     * if filename starts with: "X:" or "\\"
-     * --OR--
-     * if filename starts with: "\" (root on current drive)
-     * --OR--
-     * path is NULL or empty
-     * --THEN--
-     * this is an absolute path.
-     */
-    if ((*filename == '.' &&
-         (IS_SLASH(filename[1]) ||
-          ((filename[1] == '.') && IS_SLASH(filename[2])))) ||
-         (IS_ABSOLUTE_PATH(filename, filename_length) || IS_SLASH(filename[0])) ||
-        !path ||
-        !*path) {
-        if (tsrm_realpath(filename, resolved_path)) {
-            return alloc_estrdup(resolved_path);
-        } else {
-            return NULL;
-        }
-    }
-
-    ptr = path;
-    while (ptr && *ptr) {
-        /* Check for stream wrapper */
-        int is_stream_wrapper = 0;
-
-        for (p = ptr; isalnum((int)*p) || *p == '+' || *p == '-' || *p == '.'; p++);
-        if ((*p == ':') && (p - ptr > 1) && (p[1] == '/') && (p[2] == '/')) {
-            /* .:// or ..:// is not a stream wrapper */
-            if (p[-1] != '.' || p[-2] != '.' || p - 2 != ptr) {
-                p += 3;
-                is_stream_wrapper = 1;
-            }
-        }
-        end = strchr(p, DEFAULT_DIR_SEPARATOR);
-        if (end) {
-            if ((end-ptr) + 1 + filename_length + 1 >= MAXPATHLEN) {
-                ptr = end + 1;
-                continue;
-            }
-            memcpy(trypath, ptr, end-ptr);
-            trypath[end-ptr] = '/';
-            memcpy(trypath+(end-ptr)+1, filename, filename_length+1);
-            ptr = end+1;
-        } else {
-            size_t len = strlen(ptr);
-
-            if (len + 1 + filename_length + 1 >= MAXPATHLEN) {
-                break;
-            }
-            memcpy(trypath, ptr, len);
-            trypath[len] = '/';
-            memcpy(trypath+len+1, filename, filename_length+1);
-            ptr = NULL;
-        }
-        actual_path = trypath;
-        if (is_stream_wrapper) {
-            wrapper = php_stream_locate_url_wrapper(trypath, &actual_path, STREAM_OPEN_FOR_INCLUDE);
-            if (!wrapper) {
-                continue;
-            } else if (wrapper != &php_plain_files_wrapper) {
-                if (wrapper->wops->url_stat) {
-                    php_stream_statbuf ssb;
-
-                    if (SUCCESS == wrapper->wops->url_stat(wrapper, trypath, 0, &ssb, NULL)) {
-                        return alloc_estrdup(trypath);
-                    }
-                }
-                continue;
-            }
-        }
-        if (tsrm_realpath(actual_path, resolved_path)) {
-            return alloc_estrdup(resolved_path);
-        }
-    } /* end provided path */
-
-    /* check in calling scripts' current working directory as a fall back case
-     */
-    if (zend_is_executing()) {
-        const char *exec_fname = zend_get_executed_filename();
-        size_t exec_fname_length = strlen(exec_fname);
-
-        while ((--exec_fname_length >= 0) && !IS_SLASH(exec_fname[exec_fname_length]));
-        if (exec_fname && exec_fname[0] != '[' &&
-            exec_fname_length > 0 &&
-            exec_fname_length + 1 + filename_length + 1 < MAXPATHLEN) {
-            memcpy(trypath, exec_fname, exec_fname_length + 1);
-            memcpy(trypath+exec_fname_length + 1, filename, filename_length+1);
-            actual_path = trypath;
-
-            /* Check for stream wrapper */
-            for (p = trypath; isalnum((int)*p) || *p == '+' || *p == '-' || *p == '.'; p++);
-            if ((*p == ':') && (p - trypath > 1) && (p[1] == '/') && (p[2] == '/')) {
-                wrapper = php_stream_locate_url_wrapper(trypath, &actual_path, STREAM_OPEN_FOR_INCLUDE);
-                if (!wrapper) {
-                    return NULL;
-                } else if (wrapper != &php_plain_files_wrapper) {
-                    if (wrapper->wops->url_stat) {
-                        php_stream_statbuf ssb;
-
-                        if (SUCCESS == wrapper->wops->url_stat(wrapper, trypath, 0, &ssb, NULL)) {
-                            return alloc_estrdup(trypath);
-                        }
-                    }
-                    return NULL;
-                }
-            }
-
-            if (tsrm_realpath(actual_path, resolved_path)) {
-                return alloc_estrdup(resolved_path);
-            }
-        }
-    }
-
-    return NULL;
 }
 
 /*
@@ -683,7 +382,6 @@ int utils_create_init_event(
         if (ret == WAIT_TIMEOUT)
         {
             dprintcritical("Timed out waiting for other process to release %s", evtname);
-            EventWriteInitMutexErrorEvent(name, hinitdone);
             result = FATAL_ALLOC_INIT_EVENT;
             goto Finished;
         }
@@ -691,7 +389,6 @@ int utils_create_init_event(
         if (ret == WAIT_FAILED)
         {
             dprintcritical("Failed waiting for other process to release %s: (%d)", evtname, error_setlasterror());
-            EventWriteInitMutexErrorEvent(name, hinitdone);
             result = FATAL_ALLOC_INIT_EVENT;
             goto Finished;
         }
@@ -1246,34 +943,6 @@ void utils_reimpersonate_if_necessary(HANDLE hOriginalToken)
     }
 }
 
-void utils_get_filename_and_line(
-    const char **filename,
-    uint *linenumber
-    )
-{
-    const char *error_filename;
-    uint error_lineno = 0;
-
-    if (zend_is_compiling()) {
-        error_filename = ZSTR_VAL(zend_get_compiled_filename());
-        error_lineno = zend_get_compiled_lineno();
-    } else if (EG(current_execute_data) &&
-               EG(current_execute_data)->func &&
-               EG(current_execute_data)->func->type == ZEND_USER_FUNCTION) {
-        error_filename = ZSTR_VAL(EG(current_execute_data)->func->op_array.filename);
-        error_lineno = (EG(current_execute_data)->opline ? EG(current_execute_data)->opline->lineno : 0);
-    } else {
-        error_filename = NULL;
-    }
-
-    if (!error_filename) {
-        error_filename = "Unknown";
-    }
-
-    *filename = error_filename;
-    *linenumber = error_lineno;
-}
-
 const char * utils_get_typename(zend_uchar type)
 {
     const char *valuetype;
@@ -1323,51 +992,6 @@ const char * utils_get_typename(zend_uchar type)
     }
 
     return valuetype;
-}
-
-void utils_wait_for_listener(const char * respath, unsigned int timeout)
-{
-    int            result        = NONFATAL;
-    unsigned int   sticks        = 0;
-    unsigned char  lexists       = 0;
-
-    if (UCG(lfcache)->pnotify != NULL)
-    {
-        sticks = GetTickCount();
-
-        while(1)
-        {
-            lexists = 1;
-
-            result = fcnotify_listenerexists(UCG(lfcache)->pnotify, respath, &lexists);
-            if(FAILED(result))
-            {
-                goto Finished;
-            }
-
-            if (lexists)
-            {
-                /* If listener still exists then wait until it is cleared out by file change notification thread */
-                dprintverbose("utils_wait_for_listener: Waiting for file change listener to close");
-                Sleep(50);
-            }
-            else
-            {
-                /* If listener does not exist for this directory then stop waiting. */
-                break;
-            }
-
-            /* If it takes more than 1 second then exit to prevent process hangs. */
-            if(utils_ticksdiff(0, sticks) >= timeout)
-            {
-                dprintimportant("utils_wait_for_listener: Timed out while waiting for file change listener to close");
-                break;
-            }
-        }
-    }
-
-Finished:
-    return;
 }
 
 /*

@@ -25,7 +25,7 @@
    | NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED |
    | OF THE POSSIBILITY OF SUCH DAMAGE.                                                           |
    +----------------------------------------------------------------------------------------------+
-   | Module: php_ucache.h                                                                       |
+   | Module: php_ucache.h                                                                         |
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
@@ -44,75 +44,22 @@ extern zend_module_entry ucache_module_entry;
 #include "precomp.h"
 #endif
 
-typedef struct wclock_context wclock_context;
-struct wclock_context
-{
-    lock_context *           lockobj;     /* Internal lock context for this wclock */
-    unsigned int             tcreate;     /* Tick count when this was created */
-    unsigned int             tuse;        /* Tick count when this was last used */
-};
-
 /* Module globals */
+/* Fields backed by OnUpdateLong ini entries are zend_long because */
+/* OnUpdateLong writes a full zend_long at the field address */
 ZEND_BEGIN_MODULE_GLOBALS(ucache)
-    aplist_context *         lfcache;     /* Shared memory for fcache filelist */
     zvcache_context *        zvucache;    /* User controlled user cache */
-    zvcache_context *        zvscache;    /* Zval cache used to store session data */
-    HashTable *              phscache;    /* Hashtable for session caches for modified savepaths */
-    unsigned int             numfiles;    /* Configured number of files to handle */
-    unsigned int             fcchkfreq;   /* File change check frequency in seconds */
-    unsigned int             ttlmax;      /* Seconds a cache entry can stay dormant */
-                                          /* Pointer to the original rmdir function */
-    void                    (*orig_rmdir)(INTERNAL_FUNCTION_PARAMETERS);
-                                          /* Pointer to the original file_exists function */
-    void                    (*orig_file_exists)(INTERNAL_FUNCTION_PARAMETERS);
-                                          /* Pointer to the original file_get_contents function */
-    void                    (*orig_file_get_contents)(INTERNAL_FUNCTION_PARAMETERS);
-                                          /* Pointer to the original filesize function */
-    void                    (*orig_filesize)(INTERNAL_FUNCTION_PARAMETERS);
-                                          /* Pointer to the original is_dir function */
-    void                    (*orig_is_dir)(INTERNAL_FUNCTION_PARAMETERS);
-                                          /* Pointer to the original is_file function */
-    void                    (*orig_is_file)(INTERNAL_FUNCTION_PARAMETERS);
-                                          /* Pointer to the original is_readable function */
-    void                    (*orig_is_readable)(INTERNAL_FUNCTION_PARAMETERS);
-                                          /* Pointer to the original is_writable function */
-    void                    (*orig_is_writable)(INTERNAL_FUNCTION_PARAMETERS);
-                                          /* Pointer to the original is_writeable function */
-    void                    (*orig_is_writeable)(INTERNAL_FUNCTION_PARAMETERS);
-                                          /* Pointer to the original readfile function */
-    void                    (*orig_readfile)(INTERNAL_FUNCTION_PARAMETERS);
-                                          /* Pointer to the original realpath function */
-    void                    (*orig_realpath)(INTERNAL_FUNCTION_PARAMETERS);
-                                          /* Pointer to the original unlink function */
-    void                    (*orig_unlink)(INTERNAL_FUNCTION_PARAMETERS);
-                                          /* Pointer to the original rename function */
-    void                    (*orig_rename)(INTERNAL_FUNCTION_PARAMETERS);
     zend_bool                enablecli;   /* Enable ucache for command line sapi */
-    zend_bool                fcenabled;   /* File cache enabled or disabled */
-    unsigned int             fcachesize;  /* File cache size in MBs */
-    unsigned int             maxfilesize; /* Max file size (kb) allowed in fcache */
     zend_bool                ucenabled;   /* User cache enabled or disabled */
-    unsigned int             ucachesize;  /* User cache size in MBs */
-    unsigned int             scachesize;  /* Session cache size in MBs */
+    zend_long                ucachesize;  /* User cache size in MBs */
     unsigned int             debuglevel;  /* Debug dump level (0/101/201/301/401/501) */
-    char *                   ignorelist;  /* Pipe-separated list of files to ignore */
-    char *                   fcefilter;   /* Comma-separated sitelist having fcenabled toggled */
     char *                   namesalt;    /* Salt to use in all the names */
-    zend_bool                fcndetect;   /* File change notication detection enabled */
     zend_bool                localheap;   /* Local heap is enabled or disabled */
 
-    HashTable *              wclocks;     /* Locks created using ucache_lock call */
     HashTable *              zvcopied;    /* Copied zvals to make refcounting work */
-    unsigned int             lasterror;   /* Last error value */
     unsigned int             uclasterror; /* Last error value encountered by user cache */
     unsigned int             parentpid;   /* Parent process identifier */
     filemap_global_context * fmapgdata;   /* Global data for filemap */
-    zend_llist *             errmsglist;  /* List of errors generated by PHP */
-    zend_ini_entry *         inifce;      /* fcenabled ini_entry in ini_directives */
-    zend_ini_entry *         inisavepath; /* save_path ini_entry in ini_directives */
-    unsigned char            dofctoggle;  /* Do toggle of fcenabled due to filter settigns */
-                                          /* Enable wrapper functions around standard PHP functions */
-    zend_bool                reroute_enabled;
     const char *             apppoolid;   /* The application id. */
     char *                   filemapdir;  /* Directory where temp filemap files should be created */
 ZEND_END_MODULE_GLOBALS(ucache)
@@ -127,20 +74,5 @@ ZEND_TSRMLS_CACHE_EXTERN();
 #else
 #define UCG(v) (ucache_globals.v)
 #endif
-
-typedef zend_string *(*fn_zend_resolve_path)(const char *filename, int filename_len);
-typedef int (*fn_zend_stream_open_function)(const char * filename, zend_file_handle *handle);
-typedef zend_op_array * (*fn_zend_compile_file)(zend_file_handle *, int);
-typedef void (*fn_zend_error_cb)(int type, const char *error_filename, const uint error_lineno, const char *format, va_list args);
-
-fn_zend_resolve_path original_resolve_path;
-fn_zend_stream_open_function original_stream_open_function;
-
-extern zend_string * ucache_resolve_path(const char * filename, int filename_len);
-extern int ucache_stream_open_function(const char * filename, zend_file_handle * file_handle);
-
-extern void ucache_intercept_functions_init();
-extern void ucache_intercept_functions_shutdown();
-extern void ucache_save_orig_functions();
 
 #endif /* _PHP_UCACHE_H_ */

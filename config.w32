@@ -32,25 +32,19 @@
    +----------------------------------------------------------------------------------------------+
 */
 
-ARG_ENABLE("ucache", "Windows PHP Cache 2", "no");
+ARG_ENABLE("ucache", "ucache shared-memory user cache", "no");
 
 if (PHP_UCACHE != "no") {
     if (PHP_ZTS != "no") {
-        WARNING("UCache module requires --disable-zts build of PHP on windows");
+        WARNING("ucache module requires --disable-zts build of PHP on windows");
     } else {
         EXTENSION('ucache', "php_ucache.c ucache_utils.c ucache_error.c         \
-                               ucache_debug.c ucache_lock.c ucache_filemap.c      \
-                               ucache_alloc.c \
-                               ucache_fcache.c ucache_rplist.c ucache_aplist.c    \
-                               ucache_zvcache.c ucache_session.c                    \
-                               ucache_fcnotify.c",
-                               true,
-                               "/DZEND_ENABLE_STATIC_TSRMLS_CACHE=1");
+                             ucache_debug.c ucache_lock.c ucache_filemap.c      \
+                             ucache_alloc.c ucache_zvcache.c",
+                             true,
+                             "/DZEND_ENABLE_STATIC_TSRMLS_CACHE=1");
 
-        ADD_EXTENSION_DEP('ucache', 'session');
         AC_DEFINE('HAVE_UCACHE', 1);
-
-        DEFINE('UCACHE_ETW_RC', configure_module_dirname + '\\ucache_etw.rc');
 
         ADD_FLAG('LDFLAGS_UCACHE', '/NXCOMPAT');
         if (!X64) {
@@ -66,8 +60,6 @@ if (PHP_UCACHE != "no") {
             ADD_FLAG('CFLAGS_UCACHE', '/Zi');
             ADD_FLAG('CFLAGS_UCACHE', '/WX');
         }
-
-        ADD_FLAG('DEPS_UCACHE', configure_module_dirname + '\\ucache_etw.rc');
 
         CHECK_LIB("Kernel32.lib", "ucache", PHP_UCACHE);
     }

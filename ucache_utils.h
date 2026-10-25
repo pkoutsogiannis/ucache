@@ -25,7 +25,7 @@
    | NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED |
    | OF THE POSSIBILITY OF SUCH DAMAGE.                                                           |
    +----------------------------------------------------------------------------------------------+
-   | Module: ucache_utils.h                                                                     |
+   | Module: ucache_utils.h                                                                       |
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
@@ -37,16 +37,9 @@
 
 extern uint32_t     utils_hashcalc(const char * str, size_t strlen);
 extern uint32_t     utils_getindex(const char * filename, unsigned int numfiles);
-extern const char * utils_filepath(zend_file_handle * file_handle);
-extern char *       utils_fullpath(const char * filename, size_t filename_len);
-extern int          utils_cwdcexec(char * buffer, size_t length);
-extern int          utils_filefolder(const char * filepath, size_t flength, char * pbuffer, size_t length);
 extern int          utils_apoolpid();
 extern unsigned int utils_ticksdiff(unsigned int present, unsigned int past);
-extern char *       utils_resolve_path(const char *filename, size_t filename_length, const char *path);
 extern char *       utils_build_temp_filename(char * suffix);
-extern void         utils_get_filename_and_line(const char **filename, uint *linenumber);
-extern void         utils_wait_for_listener(const char * respath, unsigned int timeout);
 extern unsigned int utils_get_prime_less_than(size_t num);
 
 extern int

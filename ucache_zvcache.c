@@ -25,7 +25,7 @@
    | NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED |
    | OF THE POSSIBILITY OF SUCH DAMAGE.                                                           |
    +----------------------------------------------------------------------------------------------+
-   | Module: ucache_zvcache.c                                                                   |
+   | Module: ucache_zvcache.c                                                                     |
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Revised: Eric Stenson <ericsten@microsoft.com>                                               |
@@ -58,7 +58,7 @@ C_ASSERT(SIZEOF_SIZE_T <= SIZEOF_ZEND_LONG);
 #define PER_RUN_SCAVENGE_COUNT       16
 
 #ifndef UCACHE_MAX_ZVKEY_LENGTH
-#define UCACHE_MAX_ZVKEY_LENGTH    0xFFFF
+#define UCACHE_MAX_ZVKEY_LENGTH      0xFFFF
 #endif /* UCACHE_MAX_ZVKEY_LENGTH */
 
 
@@ -1025,10 +1025,8 @@ static int find_zvcache_entry(zvcache_context * pcache, const char * key, unsign
         {
             if(pvalue->ttlive > 0)
             {
-                /* NOTE: Session cache calculates ttl from last use, whereas
-                 * User cache calculates from the time the entry was added
-                 */
-                ticks = (pcache->issession ? pvalue->use_ticks : pvalue->add_ticks);
+                /* NOTE: User cache calculates ttl from the time the entry was added */
+                ticks = pvalue->add_ticks;
 
                 /* Check if the entry is not expired and */
                 /* Stop looking only if entry is not stale */
@@ -1291,7 +1289,7 @@ static void remove_zvcache_entry(zvcache_context * pcache, unsigned int index, z
         }
     }
 
-    /* Destroy aplist data now that fcache is deleted */
+    /* Destroy zvcache data now that the entry is removed */
     destroy_zvcache_data(pcache, pvalue);
     pvalue = NULL;
 
@@ -1375,7 +1373,9 @@ Finished:
     return;
 }
 
+
 /* Public functions */
+
 int zvcache_create(zvcache_context ** ppcache)
 {
     int               result = NONFATAL;
@@ -1397,7 +1397,6 @@ int zvcache_create(zvcache_context ** ppcache)
     pcache->islocal     = 0;
     pcache->cachekey    = 0;
     pcache->hinitdone   = NULL;
-    pcache->issession   = 0;
 
     pcache->incopy      = NULL;
     pcache->outcopy     = NULL;
@@ -1437,7 +1436,7 @@ void zvcache_destroy(zvcache_context * pcache)
     return;
 }
 
-int zvcache_initialize(zvcache_context * pcache, unsigned int issession, unsigned short islocal, unsigned short cachekey, unsigned int cachesize, char * shmfilepath)
+int zvcache_initialize(zvcache_context * pcache, unsigned short islocal, unsigned short cachekey, unsigned int cachesize)
 {
     int              result    = NONFATAL;
     size_t           segsize   = 0;
@@ -1452,7 +1451,7 @@ int zvcache_initialize(zvcache_context * pcache, unsigned int issession, unsigne
     unsigned char   islocked   = 0;
     unsigned int    initmemory = 0;
     DWORD           ret        = 0;
-    char *          lockname   = ((issession) ? "SESSZVALS_CACHE" : "USERZVALS_CACHE");
+    char *          lockname   = "USERZVALS_CACHE";
     char *          prefix     = NULL;
     size_t          cchprefix  = 0;
 
@@ -1461,9 +1460,7 @@ int zvcache_initialize(zvcache_context * pcache, unsigned int issession, unsigne
     _ASSERT(pcache    != NULL);
     _ASSERT(cachesize >= 2   && cachesize <= 1024);
 
-    pcache->issession = issession;
-
-    /* Initialize memory map to store file list */
+    /* Initialize memory map to store the user cache */
     result = filemap_create(&pcache->zvfilemap);
     if(FAILED(result))
     {
@@ -1496,8 +1493,7 @@ int zvcache_initialize(zvcache_context * pcache, unsigned int issession, unsigne
 
     islocked = 1;
 
-    /* If a shmfilepath is passed, use that to create filemap */
-    result = filemap_initialize(pcache->zvfilemap, ((issession) ? FILEMAP_TYPE_SESSZVALS : FILEMAP_TYPE_USERZVALS), cachekey, mapclass, cachesize, isfirst, shmfilepath);
+    result = filemap_initialize(pcache->zvfilemap, FILEMAP_TYPE_USERZVALS, cachekey, mapclass, cachesize, isfirst);
     if(FAILED(result))
     {
         goto Finished;
@@ -1508,14 +1504,14 @@ int zvcache_initialize(zvcache_context * pcache, unsigned int issession, unsigne
     _ASSERT(segsize != 0);
     initmemory = (pcache->zvfilemap->existing == 0);
 
-    /* Create allocator for file list segment */
+    /* Create allocator for zvcache segment */
     result = alloc_create(&pcache->zvalloc);
     if(FAILED(result))
     {
         goto Finished;
     }
 
-    result = alloc_initialize(pcache->zvalloc, islocal, ((issession) ? "SESSZVALS_SEGMENT" : "USERZVALS_SEGMENT"), cachekey, pcache->zvfilemap->mapaddr, segsize, initmemory);
+    result = alloc_initialize(pcache->zvalloc, islocal, "USERZVALS_SEGMENT", cachekey, pcache->zvfilemap->mapaddr, segsize, initmemory);
     if(FAILED(result))
     {
         goto Finished;
@@ -1524,7 +1520,7 @@ int zvcache_initialize(zvcache_context * pcache, unsigned int issession, unsigne
     /* Get memory for cache header */
     zvcount = utils_get_prime_less_than(segsize / (32 * 1024));
     msize = sizeof(zvcache_header) + ((zvcount - 1) * sizeof(size_t));
-    pcache->zvheader = (zvcache_header *)alloc_get_cacheheader(pcache->zvalloc, msize, ((issession) ? CACHE_TYPE_SESSZVALS : CACHE_TYPE_USERZVALS));
+    pcache->zvheader = (zvcache_header *)alloc_get_cacheheader(pcache->zvalloc, msize, CACHE_TYPE_USERZVALS);
     if(pcache->zvheader == NULL)
     {
         result = FATAL_ZVCACHE_INITIALIZE;
@@ -1802,9 +1798,7 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
     unsigned char   flock   = 0;
     zvcache_value * pentry  = NULL;
     zvcache_value * pnewval = NULL;
-    zval *          pcopied = NULL;
     char *          pchar   = NULL;
-    zend_string *   zstr    = NULL;
 
     dprintverbose("start zvcache_set");
 
@@ -1835,26 +1829,6 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
         }
 
         InterlockedExchange(&pentry->use_ticks, GetTickCount());
-    }
-
-    /* Only update the session entry if the value changed */
-    if(pcache->issession)
-    {
-        _ASSERT((Z_TYPE_P(pzval) == IS_STRING));
-
-        if(pentry != NULL)
-        {
-            pcopied = (zval *)ZVALUE(pcache->incopy, pentry->zvalue);
-            _ASSERT(Z_TYPE_P(pcopied) == IS_STRING);
-
-            zstr = (zend_string *)ZVALUE(pcache->incopy, (size_t)Z_STR_P(pcopied));
-
-            if(Z_STRLEN_P(pzval) == ZSTR_LEN(zstr) && zend_string_equals(Z_STR_P(pzval), zstr))
-            {
-                /* Shortcircuit set as value stored in existing entry is the same */
-                goto Finished;
-            }
-        }
     }
 
     /* If entry wasn't found or set was called, create new data */

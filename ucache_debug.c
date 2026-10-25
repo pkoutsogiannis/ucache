@@ -25,7 +25,7 @@
    | NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED |
    | OF THE POSSIBILITY OF SUCH DAMAGE.                                                           |
    +----------------------------------------------------------------------------------------------+
-   | Module: ucache_debug.c                                                                     |
+   | Module: ucache_debug.c                                                                       |
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    +----------------------------------------------------------------------------------------------+
@@ -62,7 +62,7 @@ void dprintmessage(char * format, va_list args)
     char debug_message[255];
 
     sprintf_s(debug_message, 255, "UCACHE: ");
-    vsprintf_s(debug_message + 10, 245, format, args);
+    vsprintf_s(debug_message + 8, 247, format, args);
 
     OutputDebugStringA(debug_message);
     if(IsDebuggerPresent())

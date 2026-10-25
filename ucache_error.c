@@ -25,7 +25,7 @@
    | NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED |
    | OF THE POSSIBILITY OF SUCH DAMAGE.                                                           |
    +----------------------------------------------------------------------------------------------+
-   | Module: ucache_error.c                                                                     |
+   | Module: ucache_error.c                                                                       |
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    +----------------------------------------------------------------------------------------------+
@@ -47,15 +47,7 @@ error_context ucache_errors[] =
     { FATAL_FILEMAP_CREATE_SNAPSHOT, "Fatal: CreateToolhelp32Snapshot call failed unexpectedly" },
     { FATAL_FILEMAP_INITIALIZE, "Fatal: New filemap couldn't be created" },
     { FATAL_FILEMAP_NOFREE, "Fatal: No free filemap_information_entry found in info filemap" },
-    { FATAL_ALLOC_NO_MEMORY, "Fatal: Shared memory segment is completely full" },
-    { FATAL_FCACHE_CREATION, "" },
-    { FATAL_FCACHE_CREATEFILE, "Fatal: CreateFile call failed" },
-    { FATAL_FCACHE_GETFILETYPE, "Fatal: GetFileType call failed" },
-    { FATAL_FCACHE_GETFILESIZE, "Fatal: GetFileSize call failed" },
-    { FATAL_FCACHE_READFILE, "Fatal: ReadFile call failed" },
-    { FATAL_FCACHE_INITIALIZE, "Fatal: Failure while initializing file cache module" },
-    { WARNING_FCACHE_TOOBIG, "Warning: File too big for file cache" },
-    { FATAL_FCACHE_FILEINFO, "Fatal: Failure in FileInfo" }
+    { FATAL_ALLOC_NO_MEMORY, "Fatal: Shared memory segment is completely full" }
 };
 
 /* Windows maintain last error code for each thread */
@@ -70,7 +62,6 @@ unsigned int error_getlasterror()
 unsigned int error_setlasterror()
 {
     error_glerror = GetLastError();
-    UCG(lasterror) = error_glerror;
     return error_glerror;
 }
 
