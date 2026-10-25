@@ -11,7 +11,7 @@ the same arguments and return the same values as the original `wincache_ucache_*
 (see [Migrating from WinCache](#migrating-from-wincache)).
 
 - Platform: Windows x64, PHP 7.2 NTS.
-- Extension name `ucache`, file `php_ucache.dll`, version 1.0.0.0.
+- Extension name `ucache`, file `php_ucache.dll`, version 1.0.0.1.
 - License: see [LICENSE](LICENSE) (the original Microsoft license).
 
 ## Behaviour
@@ -25,8 +25,7 @@ the same arguments and return the same values as the original `wincache_ucache_*
   (and then read with `ucache_get('')`).
 - An entry stored with a ttl expires `ttl` seconds after it was stored; reads do not extend it. Expired entries can
   no longer be read, but they keep their memory, and still appear in the full `ucache_info()` listing, until the
-  scavenger removes them: every write (set, add, delete, inc, dec, cas) runs a scavenger step at most every 10
-  seconds, which looks at 16 hash buckets and removes their entries whose ttl has passed since they were last used.
+  scavenger removes them (`ucache_gc()`, or automatically with `ucache.gc.threshold`).
 - Processes share a cache when they have the same parent process id, or the same `ucache.apppoolid` (default: the
   `APP_POOL_ID` environment variable set by IIS). There is no private per-process cache: `ucache.localheap` is a
   debugging setting that makes the cache unusable (see [Settings](#settings)). The cache is not persistent: it starts
@@ -47,6 +46,7 @@ bool|array  ucache_add(mixed $key, mixed $value [, int $ttl = 0])
 bool|array  ucache_add(array $values [, mixed $unused = null [, int $ttl = 0]])
 bool|array  ucache_delete(mixed $key)
 bool        ucache_clear()
+int|false   ucache_gc(int $interval, int $step, int $ttl)
 bool        ucache_exists(string $key)
 array|false ucache_info([bool $summaryonly = false [, string $key]])
 array|null  ucache_meminfo()
@@ -90,6 +90,13 @@ bool        ucache_cas(string $key, int $cvalue, int $nvalue)
   if it is missing or expired), whatever `$summaryonly` is.
 - `ucache_meminfo()`: returns `memory_total`, `memory_free`, `num_used_blks`, `num_free_blks` and `memory_overhead`
   for the shared memory segment.
+- `ucache_gc($interval, $step, $ttl)`: runs the scavenger once and returns the number of entries it removed. All three
+  arguments are required. It does nothing (returns 0) if less than `$interval` seconds have passed since the cache was
+  created or since the last scavenger run by any process sharing the cache (automatic runs included), or while
+  `ucache.gc.threshold` is set and more than that percentage of memory is free. It examines `$step` hash
+  buckets, continuing where the previous run stopped, and removes the entries that have a ttl and were not read or
+  stored for that long or, if `$ttl` > 0, every entry not read or stored for `$ttl` seconds. The three values also
+  replace `ucache.gc.interval`, `ucache.gc.step` and `ucache.gc.ttl` for the rest of the process's life.
 
 Builds compiled with `UCACHE_DEBUG` (which defines `UCACHE_TEST`) also have `ucache_lasterror()`, the last internal
 error code of the user cache in this process, and `ucache_runtests()`, which runs the internal self tests (results go
@@ -107,6 +114,10 @@ to the debug trace).
 | `ucache.apppoolid` | (none) | PHP_INI_SYSTEM | Name that decides which processes share a cache, instead of the parent process id. If not set, the `APP_POOL_ID` environment variable is used when IIS sets it. |
 | `ucache.filemapdir` | (none) | PHP_INI_SYSTEM | Directory for a file that backs the shared memory instead of the paging file. Only used when the process group id (the parent process id, or the hash of the app pool id) is above 99999. |
 | `ucache.debuglevel` | 0 | PHP_INI_ALL | Debug trace written with OutputDebugString: 0 (off), 101, 201, 301, 401 or 501 (most detailed). Other values are ignored. |
+| `ucache.gc.threshold` | 0 | PHP_INI_SYSTEM | Free memory percentage. When > 0, every write (set, add, delete, inc, dec, cas) runs one scavenger step while free memory is at or below this percentage. 0: only `ucache_gc()` scavenges. |
+| `ucache.gc.interval` | 10 | PHP_INI_SYSTEM | Minimum seconds between scavenger runs started by `ucache_gc()`. Since `ucache_gc()` replaces it with its own `$interval` argument, and automatic runs do not check it, this setting has no effect in practice. |
+| `ucache.gc.step` | 16 | PHP_INI_SYSTEM | Hash buckets examined per scavenger step. |
+| `ucache.gc.ttl` | 0 | PHP_INI_SYSTEM | When > 0, the scavenger removes every entry not read or stored for this many seconds, whatever its own ttl. |
 
 ## Statistics page
 
@@ -158,6 +169,7 @@ prints one `OK`/`FAIL` line per check and exits with 1 if a check failed. It cle
 | `wincache_ucache_add()` | `ucache_add()` |
 | `wincache_ucache_delete()` | `ucache_delete()` |
 | `wincache_ucache_clear()` | `ucache_clear()` |
+| `wincache_ucache_gc()` | `ucache_gc()` |
 | `wincache_ucache_exists()` | `ucache_exists()` |
 | `wincache_ucache_info()` | `ucache_info()` |
 | `wincache_ucache_meminfo()` | `ucache_meminfo()` |
@@ -173,6 +185,7 @@ prints one `OK`/`FAIL` line per check and exits with 1 if a check failed. It cle
 | `wincache.apppoolid` | `ucache.apppoolid` |
 | `wincache.filemapdir` | `ucache.filemapdir` |
 | `wincache.debuglevel` | `ucache.debuglevel` |
+| `wincache.ucache.gc.threshold`, `.interval`, `.step`, `.ttl` | `ucache.gc.threshold`, `.interval`, `.step`, `.ttl` |
 | `wincache.php` (statistics page) | `ucache.php` (see [Statistics page](#statistics-page)) |
 
 Not carried over: the file and resolve-path caches (`wincache.fcenabled`, `fcachesize`, `maxfilesize`, `filecount`,

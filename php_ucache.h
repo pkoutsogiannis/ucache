@@ -3,6 +3,7 @@
    | Windows Cache for PHP                                                                        |
    +----------------------------------------------------------------------------------------------+
    | Copyright (c) 2009, Microsoft Corporation. All rights reserved.                              |
+   | Copyright (c) 2018-2026, Datasteam Technologies. All rights reserved.                        |
    |                                                                                              |
    | Redistribution and use in source and binary forms, with or without modification, are         |
    | permitted provided that the following conditions are met:                                    |
@@ -29,6 +30,7 @@
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
+   | Modified: Periklis Koutsogiannis <pkoutsogiannis@datasteam.com>                              |
    +----------------------------------------------------------------------------------------------+
 */
 
@@ -49,6 +51,10 @@ extern zend_module_entry ucache_module_entry;
 /* OnUpdateLong writes a full zend_long at the field address */
 ZEND_BEGIN_MODULE_GLOBALS(ucache)
     zvcache_context *        zvucache;    /* User controlled user cache */
+    zend_long                ucgc_threshold;  /* Free memory % at or below which writes run the scavenger, 0 = off */
+    zend_long                ucgc_interval;  /* Minimum seconds between forced (ucache_gc) scavenger runs */
+    zend_long                ucgc_ttl;  /* Scavenger ttl in seconds, 0 = use each entry's ttl */
+    zend_long                ucgc_step;  /* Hash buckets the scavenger scans per run */
     zend_bool                enablecli;   /* Enable ucache for command line sapi */
     zend_bool                ucenabled;   /* User cache enabled or disabled */
     zend_long                ucachesize;  /* User cache size in MBs */

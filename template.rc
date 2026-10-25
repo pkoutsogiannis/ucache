@@ -3,6 +3,7 @@
    | Windows Cache for PHP                                                                        |
    +----------------------------------------------------------------------------------------------+
    | Copyright (c) 2009, Microsoft Corporation. All rights reserved.                              |
+   | Copyright (c) 2018-2026, Datasteam Technologies. All rights reserved.                        |
    |                                                                                              |
    | Redistribution and use in source and binary forms, with or without modification, are         |
    | permitted provided that the following conditions are met:                                    |
@@ -29,6 +30,7 @@
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
+   | Modified: Periklis Koutsogiannis <pkoutsogiannis@datasteam.com>                              |
    +----------------------------------------------------------------------------------------------+
 */
 
@@ -42,7 +44,7 @@
 #define UCACHE_VMAJOR       1
 #define UCACHE_VMINOR       0
 #define UCACHE_VMMDD        0
-#define UCACHE_VREVISION    0
+#define UCACHE_VREVISION    1
 
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 #pragma code_page(1252)
@@ -81,7 +83,7 @@ BEGIN
             VALUE "CompanyName", "Datasteam Technologies\0"
             VALUE "FileDescription", "ucache - shared memory user cache for PHP\0"
             VALUE "FileVersion", STRVER4(UCACHE_VMAJOR,UCACHE_VMINOR,UCACHE_VMMDD,UCACHE_VREVISION)
-            VALUE "LegalCopyright", "Copyright (c) 2009 Microsoft Corporation.\0"
+            VALUE "LegalCopyright", "Copyright (c) 2009 Microsoft Corporation. Modifications copyright (c) 2018-2026 Datasteam Technologies.\0"
             VALUE "OriginalFilename", FILE_NAME "\0"
             VALUE "ProductName", "ucache " STRVER2(UCACHE_VMAJOR,UCACHE_VMINOR) " for PHP " STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION)
             VALUE "ProductVersion", STRVER2(UCACHE_VMAJOR,UCACHE_VMINOR)

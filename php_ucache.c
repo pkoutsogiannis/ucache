@@ -3,6 +3,7 @@
    | Windows Cache for PHP                                                                        |
    +----------------------------------------------------------------------------------------------+
    | Copyright (c) 2009, Microsoft Corporation. All rights reserved.                              |
+   | Copyright (c) 2018-2026, Datasteam Technologies. All rights reserved.                        |
    |                                                                                              |
    | Redistribution and use in source and binary forms, with or without modification, are         |
    | permitted provided that the following conditions are met:                                    |
@@ -29,6 +30,7 @@
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
+   | Modified: Periklis Koutsogiannis <pkoutsogiannis@datasteam.com>                              |
    +----------------------------------------------------------------------------------------------+
 */
 
@@ -51,6 +53,7 @@ PHP_FUNCTION(ucache_set);
 PHP_FUNCTION(ucache_add);
 PHP_FUNCTION(ucache_delete);
 PHP_FUNCTION(ucache_clear);
+PHP_FUNCTION(ucache_gc);
 PHP_FUNCTION(ucache_exists);
 PHP_FUNCTION(ucache_info);
 PHP_FUNCTION(ucache_inc);
@@ -89,6 +92,12 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_delete, 0, 0, 1)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_clear, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_gc, 0, 0, 3)
+    ZEND_ARG_INFO(0, interval)
+    ZEND_ARG_INFO(0, step)
+    ZEND_ARG_INFO(0, ttl)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_exists, 0, 0, 1)
@@ -134,6 +143,7 @@ zend_function_entry ucache_functions[] = {
     PHP_FE(ucache_add, arginfo_ucache_add)
     PHP_FE(ucache_delete, arginfo_ucache_delete)
     PHP_FE(ucache_clear, arginfo_ucache_clear)
+    PHP_FE(ucache_gc, arginfo_ucache_gc)
     PHP_FE(ucache_exists, arginfo_ucache_exists)
     PHP_FE(ucache_info, arginfo_ucache_info)
     PHP_FE(ucache_inc, arginfo_ucache_inc)
@@ -173,6 +183,10 @@ PHP_INI_BEGIN()
 /* index 5 */  STD_PHP_INI_ENTRY("ucache.apppoolid", NULL, PHP_INI_SYSTEM, OnUpdateString, apppoolid, zend_ucache_globals, ucache_globals)
 /* index 6 */  STD_PHP_INI_ENTRY("ucache.filemapdir", NULL, PHP_INI_SYSTEM, OnUpdateString, filemapdir, zend_ucache_globals, ucache_globals)
 /* index 7 */  STD_PHP_INI_ENTRY("ucache.debuglevel", "0", PHP_INI_ALL, ucache_modify_debuglevel, debuglevel, zend_ucache_globals, ucache_globals)
+/* index --*/  STD_PHP_INI_ENTRY("ucache.gc.threshold", "0", PHP_INI_SYSTEM, OnUpdateLong, ucgc_threshold, zend_ucache_globals, ucache_globals)
+/* index --*/  STD_PHP_INI_ENTRY("ucache.gc.interval", "10", PHP_INI_SYSTEM, OnUpdateLong, ucgc_interval, zend_ucache_globals, ucache_globals)
+/* index --*/  STD_PHP_INI_ENTRY("ucache.gc.step", "16", PHP_INI_SYSTEM, OnUpdateLong, ucgc_step, zend_ucache_globals, ucache_globals)
+/* index --*/  STD_PHP_INI_ENTRY("ucache.gc.ttl", "0", PHP_INI_SYSTEM, OnUpdateLong, ucgc_ttl, zend_ucache_globals, ucache_globals)
 PHP_INI_END()
 
 /* END OF PHP EXTENSION MACROS STUFF */
@@ -193,6 +207,10 @@ static void globals_initialize(zend_ucache_globals * globals)
     UCG(ucenabled)   = 1;    /* User cache enabled by default */
     UCG(enablecli)   = 0;    /* ucache not enabled by default for CLI */
     UCG(ucachesize)  = 8;    /* User cache size is 8 MB by default */
+    UCG(ucgc_threshold) = 0;   /* Automatic scavenging disabled by default */
+    UCG(ucgc_interval)  = 10;   /* Minimum secs between forced scavenger runs */
+    UCG(ucgc_ttl)       = 0;   /* Scavenger uses each entry's own ttl */
+    UCG(ucgc_step)      = 16;   /* Hash buckets scanned per scavenger run */
     UCG(debuglevel)  = 0;    /* Debug dump not enabled by default */
     UCG(namesalt)    = NULL; /* Salt to use in names used by ucache */
     UCG(localheap)   = 0;    /* Local heap is disabled by default */
@@ -987,6 +1005,69 @@ Finished:
     }
 
     RETURN_TRUE;
+}
+
+PHP_FUNCTION(ucache_gc)
+{
+    int result = NONFATAL; 
+
+    zvcache_context *  pcache  = UCG(zvucache);
+
+    unsigned char  flock     = 0;
+    unsigned int count = 0;
+    zend_long    interval = 0;  /* zend_long: "l" stores a full zend_long */
+    zend_long    step     = 0;
+    zend_long    ttl      = 0;
+
+    /* If user cache is enabled, return false */
+    if(!UCG(ucenabled))
+    {
+        RETURN_FALSE;
+    }
+        
+
+    if(pcache == NULL)
+    {
+        result = FATAL_UNEXPECTED_FCALL;
+        goto Finished;
+    }
+
+
+    if(zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "lll", &interval, &step, &ttl) == FAILURE)
+    {
+        result = FATAL_INVALID_ARGUMENT;
+        goto Finished;
+    }
+
+    UCG(ucgc_interval) = interval;
+    UCG(ucgc_step) = step;
+    UCG(ucgc_ttl) = ttl;
+
+    lock_lock(pcache->zvlock);
+    flock = 1;
+
+    count = zvcache_run_scavenger(pcache,1);
+
+Finished:
+
+
+    if(flock)
+    {
+        lock_unlock(pcache->zvlock);
+        flock = 0;
+    }
+
+
+    if(FAILED(result))
+    {
+        UCG(uclasterror) = result;
+
+        dprintimportant("failure %d in ucache_gc", result);
+
+        RETURN_FALSE;
+    }
+	
+   RETURN_LONG(count);
 }
 
 PHP_FUNCTION(ucache_exists)

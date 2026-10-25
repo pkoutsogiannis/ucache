@@ -3,6 +3,7 @@
    | Windows Cache for PHP                                                                        |
    +----------------------------------------------------------------------------------------------+
    | Copyright (c) 2009, Microsoft Corporation. All rights reserved.                              |
+   | Copyright (c) 2018-2026, Datasteam Technologies. All rights reserved.                        |
    |                                                                                              |
    | Redistribution and use in source and binary forms, with or without modification, are         |
    | permitted provided that the following conditions are met:                                    |
@@ -29,6 +30,7 @@
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Revised: Eric Stenson <ericsten@microsoft.com>                                               |
+   | Modified: Periklis Koutsogiannis <pkoutsogiannis@datasteam.com>                              |
    +----------------------------------------------------------------------------------------------+
 */
 
@@ -73,6 +75,7 @@ C_ASSERT(SIZEOF_SIZE_T <= SIZEOF_ZEND_LONG);
 #define ZVALUE_HT_GET_DATA_ADDR(pcopy, ht) \
   ((char*)(ZVALUE((pcopy),(size_t)(ht)->arData)) - HT_HASH_SIZE((ht)->nTableMask))
 
+
 static int  copyin_memory(zvcopy_context * pcopy, HashTable * phtable, void * src, size_t size, void **ppdest, zend_uchar *pallocated);
 static int  copyin_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * phtable, zval * poriginal, zval ** ppcopied);
 static int  copyin_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * phtable, HashTable * poriginal, HashTable ** ppcopied);
@@ -88,7 +91,6 @@ static int  create_zvcache_data(zvcache_context * pcache, const char * key, zval
 static void destroy_zvcache_data(zvcache_context * pcache, zvcache_value * pvalue);
 static void add_zvcache_entry(zvcache_context * pcache, unsigned int index, zvcache_value * pvalue);
 static void remove_zvcache_entry(zvcache_context * pcache, unsigned int index, zvcache_value * pvalue);
-static void run_zvcache_scavenger(zvcache_context * pcache);
 
 /* Globals */
 static unsigned short gzvcacheid = 1;
@@ -1297,38 +1299,69 @@ static void remove_zvcache_entry(zvcache_context * pcache, unsigned int index, z
     return;
 }
 
+/* Public functions */
+
 /* Call this method under lock */
-static void run_zvcache_scavenger(zvcache_context * pcache)
+int zvcache_run_scavenger(zvcache_context * pcache, unsigned int force)
 {
-    unsigned int sindex   = 0;
-    unsigned int eindex   = 0;
-    unsigned int ticks    = 0;
-    unsigned int tickdiff = 0;
+    int count = 0;
+
+    int result = NONFATAL;
+    alloc_info * pinfo  = NULL;
+
+    unsigned int threshold = 0;
+    unsigned int sindex    = 0;
+    unsigned int eindex    = 0;
+    unsigned int tickdiff  = 0;
+    unsigned int ticks     = GetTickCount();
+
+    unsigned int step      = UCG(ucgc_step);
+    unsigned int interval  = UCG(ucgc_interval);
+    unsigned int ttl       = UCG(ucgc_ttl);
 
     zvcache_header * pheader = NULL;
     alloc_context *  palloc  = NULL;
     zvcache_value *  pvalue  = NULL;
     zvcache_value *  ptemp   = NULL;
 
-    dprintverbose("start run_zvcache_scavenger");
-
     _ASSERT(pcache != NULL);
+
+    dprintverbose("start zvcache_run_scavenger");
 
     pheader = pcache->zvheader;
     palloc  = pcache->zvalloc;
-    ticks   = GetTickCount();
 
-    /* Only run if lscavenge happened atleast 10 seconds ago */
-    if(utils_ticksdiff(ticks, pheader->lscavenge) < 10000)
+    if ((!force && (UCG(ucgc_threshold) == 0)) || (force && utils_ticksdiff(ticks, pheader->lscavenge) < (interval*1000)))
+    {
+	goto Finished;
+    }
+
+    result = alloc_getinfo(palloc, &pinfo);
+
+    if(FAILED(result))
     {
         goto Finished;
     }
+    
+    if (UCG(ucgc_threshold) > 0) {
+        threshold = (unsigned int) ((100*pinfo->free_size)/pinfo->total_size);
+
+        if (threshold > UCG(ucgc_threshold))
+        {
+            goto Finished;
+        }
+    }
+    
+    dprintimportant("sindex = %d, eindex = %d, count=%d, step=%d, ttl=%d, interval=%d, threshold=%d", sindex, eindex, pheader->valuecount, step, ttl, interval, threshold);
 
     pheader->lscavenge = ticks;
 
     /* Run scavenger starting from start */
+
+    step = MIN(pheader->valuecount, MAX(1, step));
+
     sindex = pheader->scstart;
-    eindex = sindex + PER_RUN_SCAVENGE_COUNT;
+    eindex = sindex + step;
     pheader->scstart = eindex;
 
     if(eindex >= pheader->valuecount)
@@ -1337,7 +1370,8 @@ static void run_zvcache_scavenger(zvcache_context * pcache)
         pheader->scstart = 0;
     }
 
-    dprintimportant("zvcache scavenger sindex = %d, eindex = %d", sindex, eindex);
+    dprintimportant("sindex = %d, eindex = %d, count=%d, step=%d, ttl=%d, interval=%d, threshold=%d", sindex, eindex, pheader->valuecount, step, ttl, interval, threshold);
+
     for( ;sindex < eindex; sindex++)
     {
         if(pheader->values[sindex] == 0)
@@ -1352,29 +1386,37 @@ static void run_zvcache_scavenger(zvcache_context * pcache)
             pvalue = ZVCACHE_VALUE(palloc, pvalue->next_value);
 
             /* If ttlive is 0, entry will stay unless deleted */
-            if(ptemp->ttlive == 0)
-            {
-                continue;
-            }
+
+            if(!ttl && (ptemp->ttlive == 0)) continue;
 
             /* Remove the entry from cache if its expired */
+		
             tickdiff = utils_ticksdiff(ticks, ptemp->use_ticks) / 1000;
-            if(tickdiff >= ptemp->ttlive)
+
+	    
+            if(tickdiff >= (!ttl ? ptemp->ttlive : ttl))
             {
-                remove_zvcache_entry(pcache, sindex, ptemp);
+		count++;
+		
+		remove_zvcache_entry(pcache, sindex, ptemp);
                 ptemp = NULL;
             }
         }
     }
 
+
 Finished:
 
-    dprintverbose("end run_aplist_scavenger");
-    return;
+    if(pinfo != NULL)
+    {
+        alloc_freeinfo(pinfo);
+        pinfo = NULL;
+    }
+
+    dprintverbose("end zvcache_run_scavenger");
+
+    return count;
 }
-
-
-/* Public functions */
 
 int zvcache_create(zvcache_context ** ppcache)
 {
@@ -1838,7 +1880,7 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
         goto Finished;
     }
 
-    run_zvcache_scavenger(pcache);
+    zvcache_run_scavenger(pcache,0);
 
     /* Check again after scavenging */
     result = find_zvcache_entry(pcache, key, index, &pentry);
@@ -1910,7 +1952,7 @@ int zvcache_delete(zvcache_context * pcache, const char * key)
     lock_lock(pcache->zvlock);
     flock = 1;
 
-    run_zvcache_scavenger(pcache);
+    zvcache_run_scavenger(pcache,0);
 
     result = find_zvcache_entry(pcache, key, index, &pentry);
     if(FAILED(result))
@@ -2203,7 +2245,7 @@ int zvcache_change(zvcache_context * pcache, const char * key, zend_long delta, 
     lock_lock(pcache->zvlock);
     flock = 1;
 
-    run_zvcache_scavenger(pcache);
+    zvcache_run_scavenger(pcache,0);
 
     result = find_zvcache_entry(pcache, key, index, &pvalue);
     if(FAILED(result))
@@ -2265,7 +2307,7 @@ int zvcache_compswitch(zvcache_context * pcache, const char * key, zend_long old
     lock_lock(pcache->zvlock);
     flock = 1;
 
-    run_zvcache_scavenger(pcache);
+    zvcache_run_scavenger(pcache,0);
 
     result = find_zvcache_entry(pcache, key, index, &pentry);
     if(FAILED(result))

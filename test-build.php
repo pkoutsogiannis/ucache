@@ -102,7 +102,7 @@ $version = phpversion('ucache');
 check("phpversion('ucache') is a version string ($version)", is_string($version) && preg_match('/^\d+(\.\d+)+$/', $version) === 1, $version);
 
 $expectedFuncs = ['ucache_add', 'ucache_cas', 'ucache_clear', 'ucache_dec', 'ucache_delete', 'ucache_exists',
-                  'ucache_get', 'ucache_inc', 'ucache_info', 'ucache_meminfo', 'ucache_set'];
+                  'ucache_gc', 'ucache_get', 'ucache_inc', 'ucache_info', 'ucache_meminfo', 'ucache_set'];
 $testOnlyFuncs = ['ucache_lasterror', 'ucache_runtests'];   /* only in UCACHE_TEST (debug) builds */
 
 $funcs = get_extension_funcs('ucache');
@@ -125,6 +125,10 @@ $expectedIni = [
     'ucache.apppoolid'    => ['',   INI_SYSTEM],
     'ucache.filemapdir'   => ['',   INI_SYSTEM],
     'ucache.debuglevel'   => ['0',  INI_ALL],
+    'ucache.gc.threshold' => ['0',  INI_SYSTEM],
+    'ucache.gc.interval'  => ['10', INI_SYSTEM],
+    'ucache.gc.step'      => ['16', INI_SYSTEM],
+    'ucache.gc.ttl'       => ['0',  INI_SYSTEM],
 ];
 
 $ini = ini_get_all('ucache');
@@ -432,7 +436,7 @@ check('with ucache.enabled=0 the cache functions return false',
       ['old' => $old, 'results' => $r]);
 
 /*
- * TTL expiry
+ * TTL expiry and ucache_gc
  */
 
 $wait = 2.5 - (microtime(true) - $ttlSetAt);
@@ -444,6 +448,32 @@ $success = 'unset';
 $r = ucache_get('smoke_ttl', $success);
 check('an entry cannot be read once its ttl expired', $r === false && $success === false && ucache_exists('smoke_ttl') === false,
       ['get' => $r, 'success' => $success]);
+
+$listedBefore = find_entry(ucache_info(), 'smoke_ttl') !== null;
+/* gc(interval, step, ttl): the cache was created when this process started, which counts as the last
+   scavenger run, so with interval 3600 the scavenger does not run and the expired entry stays */
+$skipped = ucache_gc(3600, 1000000, 0);
+$listedSkipped = find_entry(ucache_info(), 'smoke_ttl') !== null;
+check('ucache_gc() does nothing if the cache was created less than interval ago',
+      $skipped === 0 && $listedBefore && $listedSkipped,
+      ['removed' => $skipped, 'listed before' => $listedBefore, 'listed after' => $listedSkipped]);
+/* interval 0 = run now; a large step scans the whole table; two calls
+   cover the table even if a previous scavenge stopped part way */
+$removed  = ucache_gc(0, 1000000, 0);
+$removed2 = ucache_gc(0, 1000000, 0);
+$listedAfter = find_entry(ucache_info(), 'smoke_ttl') !== null;
+check('ucache_gc() removes the expired entry and returns the number removed',
+      is_int($removed) && is_int($removed2) && $removed + $removed2 === 1 && $listedBefore && !$listedAfter,
+      ['removed' => [$removed, $removed2], 'listed before' => $listedBefore, 'listed after' => $listedAfter]);
+check('ucache_gc() keeps entries that did not expire',
+      ucache_exists('smoke_long') === true && ucache_exists('smoke_mttl') === true && ucache_exists('smoke_addttl') === true);
+/* ttl 1 would remove every entry not read or stored in the last second, but the scavenger ran just now */
+$itemsBefore = ucache_info(true)['total_item_count'];
+$skipped = ucache_gc(3600, 1000000, 1);
+$itemsAfter = ucache_info(true)['total_item_count'];
+check('ucache_gc() does nothing if the last run is more recent than interval',
+      $skipped === 0 && $itemsAfter === $itemsBefore && $itemsBefore > 0,
+      ['removed' => $skipped, 'items' => [$itemsBefore, $itemsAfter]]);
 
 /*
  * ucache_clear
