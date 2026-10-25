@@ -39,10 +39,10 @@
 #include "winresrc.h"
 #include "main/php_version.h"
 
-#define WINCACHE_VMAJOR     2
-#define WINCACHE_VMINOR     0
-#define WINCACHE_VMMDD      0
-#define WINCACHE_VREVISION  8
+#define UCACHE_VMAJOR     2
+#define UCACHE_VMINOR     0
+#define UCACHE_VMMDD      0
+#define UCACHE_VREVISION  8
 
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 #pragma code_page(1252)
@@ -61,8 +61,8 @@ LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 #define STRVER2(maj, min)              XSTRVER2(maj, min)
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION WINCACHE_VMAJOR,WINCACHE_VMINOR,WINCACHE_VMMDD,WINCACHE_VREVISION
- PRODUCTVERSION WINCACHE_VMAJOR,WINCACHE_VMINOR
+ FILEVERSION UCACHE_VMAJOR,UCACHE_VMINOR,UCACHE_VMMDD,UCACHE_VREVISION
+ PRODUCTVERSION UCACHE_VMAJOR,UCACHE_VMINOR
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS (VS_FF_DEBUG)
@@ -80,11 +80,11 @@ BEGIN
             VALUE "Comments", THANKS_GUYS "\0"
             VALUE "CompanyName", "Microsoft Corp.\0"
             VALUE "FileDescription", "Windows Cache Extension for PHP\0"
-            VALUE "FileVersion", STRVER4(WINCACHE_VMAJOR,WINCACHE_VMINOR,WINCACHE_VMMDD,WINCACHE_VREVISION)
+            VALUE "FileVersion", STRVER4(UCACHE_VMAJOR,UCACHE_VMINOR,UCACHE_VMMDD,UCACHE_VREVISION)
             VALUE "LegalCopyright", "Copyright © 2016 Microsoft Corp. All Rights Reserved.\0"
             VALUE "OriginalFilename", FILE_NAME "\0"
-            VALUE "ProductName", "Windows Cache Extension" STRVER2(WINCACHE_VMAJOR,WINCACHE_VMINOR) " for PHP " STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION)
-            VALUE "ProductVersion", STRVER2(WINCACHE_VMAJOR,WINCACHE_VMINOR)
+            VALUE "ProductName", "Windows Cache Extension" STRVER2(UCACHE_VMAJOR,UCACHE_VMINOR) " for PHP " STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION)
+            VALUE "ProductVersion", STRVER2(UCACHE_VMAJOR,UCACHE_VMINOR)
             VALUE "URL", "http://www.microsoft.com\0"
         END
     END
@@ -95,7 +95,7 @@ BEGIN
 END
 
 #pragma message("Including ETW RC")
-#include "wincache_etw.rc"
+#include "ucache_etw.rc"
 
 #ifdef MC_INCLUDE
 #include MC_INCLUDE

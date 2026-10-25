@@ -35,17 +35,17 @@
 #ifndef _PRECOMP_H_
 #define _PRECOMP_H_
 
-#define PHP_WINCACHE_EXTNAME   "wincache"
-#define PHP_WINCACHE_VERSION    "2.0.0.8"
-#define PHP_WINCACHE_VERSION_LEN (sizeof(PHP_WINCACHE_VERSION)-1)
+#define PHP_UCACHE_EXTNAME   "ucache"
+#define PHP_UCACHE_VERSION    "2.0.0.8"
+#define PHP_UCACHE_VERSION_LEN (sizeof(PHP_UCACHE_VERSION)-1)
 
 /* comment following line for release builds */
-/* #define WINCACHE_DEBUG */
+/* #define UCACHE_DEBUG */
 
 #ifdef PHP_WIN32
- #define PHP_WINCACHE_API __declspec(dllexport)
+ #define PHP_UCACHE_API __declspec(dllexport)
 #else
- #define PHP_WINCACHE_API
+ #define PHP_UCACHE_API
 #endif
 
 #ifdef HAVE_CONFIG_H
@@ -77,8 +77,8 @@
  #undef _ASSERT
 #endif
 
-#ifdef WINCACHE_DEBUG
-# define WINCACHE_TEST
+#ifdef UCACHE_DEBUG
+# define UCACHE_TEST
 # define _ASSERT(x)   if(!(x)) { dprintalways("%s(%d): " #x "\n", __FILE__, __LINE__ ); if(IsDebuggerPresent()) { DebugBreak(); } }
 #else
 # define _ASSERT(x)
@@ -88,7 +88,7 @@
 # define IsDebuggerPresent() (0)
 # define memcpy_s(dst, size, src, cnt) memcpy(dst, src, cnt)
 # define sprintf_s(buffer, size, format) sprintf(buffer, format)
-# define _snprintf_s wincache_php_snprintf_s
+# define _snprintf_s ucache_php_snprintf_s
 # define vsprintf_s(buffer, size, format, va_alist) vsprintf(buffer, format, va_alist)
 # define strcpy_s(src, size, dst) strcpy(src, dst)
 #endif
@@ -122,26 +122,26 @@
 #define FIVE_SECOND_WAIT           5000
 #define MAX_INIT_EVENT_WAIT        30000
 
-#include "wincache_error.h"
-#include "wincache_debug.h"
-#include "wincache_utils.h"
-#include "wincache_lock.h"
-#include "wincache_filemap.h"
-#include "wincache_alloc.h"
-#include "wincache_fcnotify.h"
-#include "wincache_fcache.h"
-#include "wincache_rplist.h"
-#include "wincache_aplist.h"
-#include "wincache_zvcache.h"
-#include "wincache_session.h"
+#include "ucache_error.h"
+#include "ucache_debug.h"
+#include "ucache_utils.h"
+#include "ucache_lock.h"
+#include "ucache_filemap.h"
+#include "ucache_alloc.h"
+#include "ucache_fcnotify.h"
+#include "ucache_fcache.h"
+#include "ucache_rplist.h"
+#include "ucache_aplist.h"
+#include "ucache_zvcache.h"
+#include "ucache_session.h"
 
 #if (_MSC_VER >= 1700)
-#include "wincache_etw.h"
+#include "ucache_etw.h"
 #else
 /* PHP 5.4 supports XP, which *doesn't* support Manifest based ETW events*/
-#include "wincache_dummy_etw.h"
+#include "ucache_dummy_etw.h"
 #endif /* _MSC_VER 1700 */
 
-#include "php_wincache.h"
+#include "php_ucache.h"
 
 #endif /* _PRECOMP_H_ */

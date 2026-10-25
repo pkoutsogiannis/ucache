@@ -1,6 +1,6 @@
 <?php
 
-    if (!extension_loaded("wincache"))
+    if (!extension_loaded("ucache"))
     {
         die("Skipped: filter extension required.");
     }

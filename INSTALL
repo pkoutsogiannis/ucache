@@ -1,4 +1,4 @@
-Installation Instructions for WinCache
+Installation Instructions for UCache
 --------------------------------------
 
 Requirements
@@ -16,7 +16,7 @@ PHP:
  - PHP 5.2.X, Non-thread-safe build 
  - PHP 5.3 X86, Non-thread-safe VC9 build 
 
- Note: The WinCache Extension can only be used when IIS is 
+ Note: The UCache Extension can only be used when IIS is 
  configured to run PHP via FastCGI.
  
 Installation
@@ -29,7 +29,7 @@ To install and enable the extension, follow these steps:
 
 1.Unpack the package into some temporary location. 
 
-2.Copy the php_wincache.dll file into the PHP extensions folder. Typically 
+2.Copy the php_ucache.dll file into the PHP extensions folder. Typically 
 this folder is called "ext" and it is located in the same folder with 
 all PHP binary files. For example: C:\Program Files\PHP\ext. 
 
@@ -38,7 +38,7 @@ in the same folder where all PHP binary files are. For example:
 C:\Program Files\PHP\php.ini. 
 
 4.Add the following line at the end of the php.ini file: extension = 
-php_wincache.dll. 
+php_ucache.dll. 
 
 5.Save and close the php.ini file. 
 
@@ -49,11 +49,11 @@ called phpinfo.php with a PHP code that calls phpinfo function.
 7.Save the phpinfo.php file in the root folder of a IIS web site that 
 uses PHP, then open a browser and make a request to 
 http://localhost/phpinfo.php. Search within the returned web page for a 
-section called wincache. If the extension is enabled, then the phpinfo 
-output will list the configuration settings provided by the WinCache. 
+section called ucache. If the extension is enabled, then the phpinfo 
+output will list the configuration settings provided by the UCache. 
 
 Note: Do not forget to remove phpinfo.php file from the web site's root 
 folder after verifying that extension has been enabled.
 
 For instructions on how to use the extension refer to 
-http://docs.php.net/wincache.
+http://docs.php.net/ucache.
