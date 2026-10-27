@@ -70,12 +70,27 @@ struct zvcache_header
     unsigned int      init_ticks;        /* Tick count when the cache first got created */
     unsigned int      last_owner;        /* PID of last owner for lock */
 
-    unsigned int      lscavenge;         /* Ticks when last scavenger run happened */
+    unsigned int      lscavenge;         /* Ticks when last scavenger run happened (or was skipped, see zvcache_run_scavenger) */
     unsigned int      scstart;           /* Index from where scavenger should start */
     unsigned int      itemcount;         /* Number of active items in zval cache */
     unsigned int      valuecount;        /* Total values starting from last entry */
+    unsigned int      scticks;           /* Ticks when the last scavenger step ran */
+    unsigned int      sccount;           /* Entries the last scavenger step removed */
+    size_t            scruns;            /* Scavenger steps run since the cache was created */
+    size_t            scremoved;         /* Entries the scavenger removed since the cache was created */
+    size_t            scevicted;         /* Of those, entries evicted before their time (ucache.gc.evict) */
+    unsigned int      rcticks;           /* Ticks of the last full pass for a full cache that left no room */
+    unsigned int      rcfutile;          /* 1: that pass removed nothing and the write still did not fit */
+    unsigned int      rcwait;            /* Milliseconds the processes skip the full pass after such a pass */
+    unsigned int      rcgen;             /* Full passes run since the cache was created */
     size_t            values[1];         /* valuecount zvcache_value offsets */
 };
+
+/* What phase 1 of a copy-in collected (see copyin_prepare in ucache_zvcache.c) */
+typedef struct zvcopy_prepared zvcopy_prepared;
+
+/* The C stack that the walk of a top-level copy may use (see ucache_stack_exhausted in ucache_zvcache.c) */
+typedef struct zvcopy_stack zvcopy_stack;
 
 typedef struct zvcopy_context zvcopy_context;
 struct zvcopy_context
@@ -90,6 +105,20 @@ struct zvcopy_context
     fn_realloc        fnrealloc;         /* Function to use for realloc */
     fn_strdup         fnstrdup;          /* Function to use for strdup */
     fn_free           fnfree;            /* Function to use for free */
+
+    /* In the private copies of incopy and outcopy that create_zvcache_data() and zvcache_get() use */
+    zvcopy_stack *    pstack;            /* The C stack of the copy */
+
+    /*
+     * Copy-in only, in the private copy of incopy that create_zvcache_data() uses. The last four
+     * record what the copy has allocated so far, so that a fatal error (zend_bailout) during the
+     * copy can give it back (copyin_rollback).
+     */
+    zvcopy_prepared * pprepared;         /* Serialized objects and reference values of the value */
+    zvcache_value *   pnewvalue;         /* The entry being created */
+    zval *            pnewzval;          /* Its top-level zval */
+    zvcache_hashtable_pool_tracker * ptracker; /* Pool tracker of a top-level array */
+    size_t            mpool;             /* Memory pool of a top-level array (offset) */
 };
 
 typedef struct zvcache_context zvcache_context;
@@ -108,6 +137,8 @@ struct zvcache_context
     filemap_context * zvfilemap;         /* filemap where zvcache is kept */
     lock_context *    zvlock;            /* lock for zvcache header */
     alloc_context *   zvalloc;           /* alloc context for zvcache segment */
+    size_t            freelist;          /* Entries unlinked under the lock, freed once it is released (chained by next_value) */
+    unsigned int      freecount;         /* How many entries freelist holds */
 };
 
 typedef struct zvcache_info zvcache_info;
@@ -118,6 +149,11 @@ struct zvcache_info
     unsigned int      hitcount;          /* Cumulative hitcount of zvcache */
     unsigned int      misscount;         /* Cumulative misscount of zvcache */
     unsigned int      itemcount;         /* Number of items including stale ones */
+    zend_bool         scavenged;         /* A scavenger step ran since the cache was created */
+    unsigned int      scage;             /* Seconds since the last scavenger step */
+    unsigned int      sccount;           /* Entries the last scavenger step removed */
+    size_t            scremoved;         /* Entries the scavenger removed since the cache was created */
+    size_t            scevicted;         /* Of those, entries evicted before their time */
 };
 
 typedef struct zvcache_info_entry zvcache_info_entry;
@@ -152,5 +188,8 @@ extern int  zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char *
 extern int  zvcache_change(zvcache_context * pcache, const char * key, zend_long delta, zend_long * newvalue);
 extern int  zvcache_compswitch(zvcache_context * pcache, const char * key, zend_long oldvalue, zend_long newvalue);
 extern int  zvcache_run_scavenger(zvcache_context * pcache, unsigned int force);
+extern void zvcache_scavenge_periodic(zvcache_context * pcache);
+extern zend_bool zvcache_over_memory_limit(void);
+extern zend_bool zvcache_peak_over_memory_limit(size_t peak0);
 
 #endif /* _UCACHE_ZVCACHE_H_ */

@@ -79,13 +79,6 @@ static unsigned int getppid()
 
     pid = GetCurrentProcessId();
 
-    /* If localheap setting is set, set ppid as pid */
-    if(UCG(localheap) != 0)
-    {
-        UCG(parentpid) = pid;
-        goto Finished;
-    }
-
     /* Use CRC of user provided apppoolid as ppid if available */
     poolpid = utils_apoolpid();
     if(poolpid != -1)

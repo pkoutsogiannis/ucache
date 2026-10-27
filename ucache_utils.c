@@ -38,7 +38,10 @@
 #include <Sddl.h>
 #include <Aclapi.h>
 
+/* intsafe.h (included by the PHP 8.5 headers) defines DWORD_MAX as 0xffffffffUL */
+#ifndef DWORD_MAX
 #define DWORD_MAX    0xFFFFFFFF
+#endif
 
 /* Temp files are in the format of "ucache_" + suffix + ".tmp" */
 #define TEMP_FILE_PREFIX_CHARS 11
@@ -979,7 +982,9 @@ const char * utils_get_typename(zend_uchar type)
         case IS_REFERENCE:
             valuetype = "reference";
             break;
-        case IS_CONSTANT:
+#if PHP_VERSION_ID < 70300
+        case IS_CONSTANT:   /* removed in PHP 7.3 */
+#endif
         case IS_CONSTANT_AST:
             valuetype = "constant";
             break;

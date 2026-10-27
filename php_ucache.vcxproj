@@ -47,8 +47,15 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>PHP_WIN32;ZEND_WIN32;WIN32;_WINDOWS;NDEBUG;ZEND_DEBUG=0;ZEND_WIN32_FORCE_INLINE;COMPILE_DL_UCACHE;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <DisableSpecificWarnings>4996;4244;4146</DisableSpecificWarnings>
+      <!-- As PHP's own builds (devel pack script\confutils.js): ENABLE_INTSAFE_SIGNED_FUNCTIONS because the
+           PHP 8.5 headers call LongLongAdd/LongLongSub from intsafe.h (harmless for older versions);
+           ZEND_COMPILE_DL_EXT as for any shared extension; ZEND_WIN32_FORCE_INLINE is only read up to PHP 8.0 -->
+      <PreprocessorDefinitions>PHP_WIN32;ZEND_WIN32;WIN32;_WINDOWS;NDEBUG;ZEND_DEBUG=0;ZEND_WIN32_FORCE_INLINE;ENABLE_INTSAFE_SIGNED_FUNCTIONS;ZEND_COMPILE_DL_EXT=1;COMPILE_DL_UCACHE;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_DEPRECATE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <!-- /guard:cf, which PHP's builds use (security flags); the link gets /guard:cf from it -->
+      <ControlFlowGuard>Guard</ControlFlowGuard>
+      <!-- 4267 as well: the PHP 8.2.35, 8.3.36, 8.4.27 and 8.5.12 headers pass a size_t as a uint32_t in inline
+           functions (_array_finit() in zend_API.h), which every source file includes -->
+      <DisableSpecificWarnings>4996;4244;4146;4267</DisableSpecificWarnings>
       <ConformanceMode>true</ConformanceMode>
       <CompileAs>CompileAsC</CompileAs>
       <Optimization>MaxSpeed</Optimization>
@@ -83,6 +90,7 @@
     <ClInclude Include="php_ucache.h" />
     <ClInclude Include="precomp.h" />
     <ClInclude Include="ucache_alloc.h" />
+    <ClInclude Include="ucache_compat.h" />
     <ClInclude Include="ucache_debug.h" />
     <ClInclude Include="ucache_error.h" />
     <ClInclude Include="ucache_filemap.h" />
@@ -96,4 +104,12 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <!-- ucache is NTS only. A thread-safe devel pack compiles cleanly (its headers do not define ZTS, see
+       precomp.h) and the link then fails with unresolved symbols such as executor_globals, so refuse its
+       import library (php7ts.lib, php8ts.lib) before compiling. PhpLibName is a file name (build.bat,
+       php_ucache.props) or a full path. -->
+  <Target Name="UcacheRequireNts" BeforeTargets="ClCompile">
+    <Error Condition="$(PhpLibName.ToLowerInvariant().EndsWith('ts.lib'))"
+           Text="ucache requires a non-thread-safe (NTS) PHP, but PhpLibName ($(PhpLibName)) is the import library of a thread-safe one. Use an NTS devel pack (php-devel-pack-&lt;version&gt;-nts-...) and its php7.lib or php8.lib." />
+  </Target>
 </Project>

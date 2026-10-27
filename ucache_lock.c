@@ -363,12 +363,12 @@ void lock_lock(lock_context * plock)
         last_owner = *plock->last_owner;
     }
 
+    /* The mutex is ours all the same: record it as for WAIT_OBJECT_0 below, so that lock_unlock() finds it locked */
     if (ret == WAIT_ABANDONED)
     {
         error_setlasterror();
         dprintcritical("lock_lock: acquired abandoned mutex %s (last owner pid %u). Something bad happend in another process!",
                         plock->nameprefix, last_owner);
-        goto Finished;
     }
 
     if (ret == WAIT_FAILED)

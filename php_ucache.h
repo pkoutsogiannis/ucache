@@ -51,18 +51,18 @@ extern zend_module_entry ucache_module_entry;
 /* OnUpdateLong writes a full zend_long at the field address */
 ZEND_BEGIN_MODULE_GLOBALS(ucache)
     zvcache_context *        zvucache;    /* User controlled user cache */
-    zend_long                ucgc_threshold;  /* Free memory % at or below which writes run the scavenger, 0 = off */
-    zend_long                ucgc_interval;  /* Minimum seconds between forced (ucache_gc) scavenger runs */
-    zend_long                ucgc_ttl;  /* Scavenger ttl in seconds, 0 = use each entry's ttl */
-    zend_long                ucgc_step;  /* Hash buckets the scavenger scans per run */
+    zend_long                ucgc_threshold;  /* Free memory % at or below which the scavenger runs, also on writes; 0 = always, not on writes */
+    zend_long                ucgc_interval;  /* Seconds between scavenger runs at the end of requests, 0 = none */
+    zend_long                ucgc_ttl;  /* Seconds without use after which the scavenger also removes an entry, 0 = never */
+    zend_long                ucgc_step;  /* Hash buckets the scavenger scans per step, 0 = automatic */
+    zend_long                ucgc_evict;  /* Free memory % that a full cache evicts idle entries up to, 0 = no eviction */
     zend_bool                enablecli;   /* Enable ucache for command line sapi */
     zend_bool                ucenabled;   /* User cache enabled or disabled */
     zend_long                ucachesize;  /* User cache size in MBs */
     unsigned int             debuglevel;  /* Debug dump level (0/101/201/301/401/501) */
     char *                   namesalt;    /* Salt to use in all the names */
-    zend_bool                localheap;   /* Local heap is enabled or disabled */
+    char *                   prefix;      /* Prefix of the PHP function names, in place of "ucache_" */
 
-    HashTable *              zvcopied;    /* Copied zvals to make refcounting work */
     unsigned int             uclasterror; /* Last error value encountered by user cache */
     unsigned int             parentpid;   /* Parent process identifier */
     filemap_global_context * fmapgdata;   /* Global data for filemap */

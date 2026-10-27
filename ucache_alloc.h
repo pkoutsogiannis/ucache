@@ -126,7 +126,6 @@ struct alloc_context
     size_t                 size;      /* Size of memory segment to be allocated */
     lock_context *         lock;      /* Lock to acquire before manipulating segment */
     alloc_segment_header * header;    /* Address of header for this alloc_context */
-    unsigned int           localheap; /* Set to 1 when localheap should be used */
 };
 
 typedef struct alloc_info alloc_info;
@@ -149,8 +148,7 @@ extern void   alloc_free_mpool(alloc_context * palloc, size_t hoffset);
 extern void * alloc_get_cacheheader(alloc_context * palloc, unsigned int msize, unsigned int type);
 extern void * alloc_get_cachevalue(alloc_context * palloc, size_t offset);
 extern size_t alloc_get_valueoffset(alloc_context * palloc, void * value);
-extern int    alloc_getinfo(alloc_context * palloc, alloc_info ** ppinfo);
-extern void   alloc_freeinfo(alloc_info * pinfo);
+extern void   alloc_getinfo(alloc_context * palloc, alloc_info * pinfo);
 
 extern void * alloc_emalloc(size_t size);
 extern void * alloc_pemalloc(size_t size);
