@@ -47,8 +47,8 @@ until it expires or is deleted.
 UCache is the user cache of WinCache 2.0.0.8, extracted and renamed. The file cache, resolve-path cache, file change
 notification, session handler, `wincache_lock()`/`wincache_unlock()`, PHP function rerouting and ETW tracing have been
 removed. The functions take the same arguments and return the same values as the `wincache_ucache_*` functions of
-WinCache 2.0.0.8, apart from bug fixes and a few additions, such as the scavenger keys of `ucache_info()` (see
-[Migrating from WinCache](#migrating-from-wincache)).
+WinCache 2.0.0.8, apart from bug fixes and a few additions, such as the scavenger keys and the `offset` and `limit`
+parameters of `ucache_info()` (see [Migrating from WinCache](#migrating-from-wincache)).
 
 ## Installing/Configuring
 
@@ -258,8 +258,9 @@ This extension has no constants defined.
 ### UCache Statistics Script
 
 The sources of UCache include a PHP script, ucache.php (WinCache's wincache.php for UCache), that can be used to
-obtain cache information and statistics: the server and cache settings, the memory use, the hit and miss counts and
-the list of entries and the value stored under a key; with authentication on, it can also clear the whole cache.
+obtain cache information and statistics: the server and cache settings, the memory use, the hit and miss counts, the
+list of entries (250 per page, with links to the other pages) and the value stored under a key; with authentication
+on, it can also clear the whole cache.
 
 To use ucache.php, copy it into a root folder of a web site that runs with the extension loaded, or into any
 subfolder, preferably one that only administrators can reach. To protect the script, open it in any text editor and
@@ -390,6 +391,9 @@ after it are not. The checks run between allocations, though: one string, or the
 to fit under the hard limit still gets the process killed (exit code 137, without a fatal error or shutdown
 functions). Older versions raise the fatal error at once.
 
+The full listing of `ucache_info()` copies every entry into request memory, about 800 bytes for an entry with a short
+key: list a large cache a part at a time, with `offset` and `limit` (see [ucache_info](#ucache_info)).
+
 ## The Scavenger
 
 The scavenger removes the entries that have expired and, if the settings ask for it, the entries that have not been
@@ -509,8 +513,8 @@ are removals on contact, deletes, replaces and clears.
 Argument names are the ones in the extension's arginfo, except `$values` and `$unused` in the array forms of
 `ucache_set()` and `ucache_add()`, which arginfo calls `$key` and `$value`. On PHP 8 the optional parameters have
 their defaults in arginfo, so named arguments can skip them: `ucache_set($values, ttl: 60)`,
-`ucache_inc($key, success: $ok)`, `ucache_info(key: $key)`. Reflection reports one required parameter for
-`ucache_set()` and `ucache_add()`, as their array form takes only the array.
+`ucache_inc($key, success: $ok)`, `ucache_info(key: $key)`, `ucache_info(limit: 250)`. Reflection reports one
+required parameter for `ucache_set()` and `ucache_add()`, as their array form takes only the array.
 
 Arguments are checked before anything else, whatever the state of the cache. Invalid ones (a wrong type, a missing
 argument, an argument to `ucache_clear()` or `ucache_meminfo()`, which take none) throw `ArgumentCountError` or
@@ -1198,7 +1202,7 @@ ucache_info - Retrieves information about data stored in the user cache
 #### Description
 
 ```php
-ucache_info(bool $summaryonly = false, string $key = ?): array|false
+ucache_info(bool $summaryonly = false, ?string $key = null, int $offset = 0, int $limit = 0): array|false
 ```
 
 Retrieves information about data stored in the user cache.
@@ -1213,13 +1217,26 @@ summary.
 `key`
 
 The key of an entry in the user cache. If specified, the returned array contains information only about that cache
-entry, whatever `summaryonly` is (nothing if the key is missing or has expired). If not specified and `summaryonly`
-is false, the returned array contains information about all the entries in the cache.
+entry, whatever `summaryonly` is (nothing if the key is missing or has expired). If null or not specified and
+`summaryonly` is false, the returned array contains information about all the entries in the cache, or the part
+of them that `offset` and `limit` select.
+
+`offset`
+
+Without `key`, the number of entries to skip at the start of the listing. The entries are listed in the order of
+the cache's hash table, which stays the same while no entry is added or removed: a listing taken a page at a time
+while other requests write to the cache may skip or repeat entries. Ignored with `key`.
+
+`limit`
+
+Without `key`, the largest number of entries to list, 0 meaning all of them. The full listing of a large cache can
+run past memory_limit: each entry takes several hundred bytes of request memory, plus twice the length of its key
+(about 800 MB for a million short keys). Ignored with `key`.
 
 #### Return Values
 
-Array of meta data about the user cache, or false on failure (the cache was not created, or memory_limit was reached
-while the entries were listed). The array contains:
+Array of meta data about the user cache, or false on failure (the cache was not created, `offset` or `limit` is
+negative, or memory_limit was reached while the entries were listed). The array contains:
 
 - `total_cache_uptime` - total time in seconds that the user cache has been active
 - `is_local_cache` - always false (the user cache is always the shared one)
@@ -1233,7 +1250,8 @@ while the entries were listed). The array contains:
 - `total_scavenged_count` - the entries that steps and full passes removed since the cache was created, evicted
   entries included
 - `total_evicted_count` - the entries evicted from a full cache since the cache was created
-- `ucache_entries` - an array, indexed from 1, that contains the information about the cached entries:
+- `ucache_entries` - an array, indexed from 1 (from `offset` + 1 without `key`: the position of the entry in the
+  full listing), that contains the information about the cached entries:
   - `key_name` - name of the key which is used to store the data
   - `value_type` - type of value stored by the key (`long`, `double`, `string`, `bool`, `null`, `array` or
     `object`)
@@ -1242,9 +1260,10 @@ while the entries were listed). The array contains:
   - `age_seconds` - time elapsed from the time data has been added in the cache
   - `hitcount` - number of times data has been served from the cache
 
-With `summaryonly` set to true, `ucache_entries` is empty. `ucache_info()` removes nothing, does not count as a use
-of the entries, and also works with `ucache.enabled=0`: its full listing shows the expired entries that nothing has
-removed yet (see [The Scavenger](#the-scavenger)).
+With `summaryonly` set to true, `ucache_entries` is empty. `total_item_count` always counts the whole cache, whatever
+`offset` and `limit` select. `ucache_info()` removes nothing, does not count as a use of the entries, and also works
+with `ucache.enabled=0`: its full listing shows the expired entries that nothing has removed yet (see
+[The Scavenger](#the-scavenger)).
 
 #### Examples
 
@@ -1342,6 +1361,25 @@ Array
         )
 
 )
+```
+
+**Example #3 Listing the entries a page at a time**
+
+```php
+<?php
+// 1000 entries per call, so that a large cache does not run past memory_limit
+$offset = 0;
+do {
+    $info = ucache_info(false, null, $offset, 1000);
+    if ($info === false) {
+        break;
+    }
+    foreach ($info['ucache_entries'] as $position => $entry) {
+        echo $position, ': ', $entry['key_name'], "\n";
+    }
+    $offset += 1000;
+} while ($offset < $info['total_item_count']);
+?>
 ```
 
 #### See Also
@@ -1802,5 +1840,12 @@ Several of these change what existing code sees.
   returns false, without an error (see [memory_limit](#memory_limit)).
 - `value_size` (`ucache_info()`) and the memory an entry uses differ slightly from WinCache 2.0.0.8: sparse hash
   arrays keep a larger hash part, and an object that occurs more than once is stored once.
+- `ucache_info()` takes `offset` and `limit`, which list a part of the entries without copying the others, and a null
+  `key` means no key (see [ucache_info](#ucache_info)). WinCache 2.0.0.8's `wincache_ucache_info()` always copied
+  every entry into the array it returned, so the listing of a cache of many entries ran past memory_limit, and it
+  took a null `key` as the empty key, listing no entry.
 - `ucache.php` escapes everything it prints, its Clear All button is a token-protected form instead of a link, and it
-  works on PHP 8 (the hit/miss chart of `wincache.php` called `each()`, which PHP 8 removed).
+  works on PHP 8 (the hit/miss chart of `wincache.php` called `each()`, which PHP 8 removed). It lists the entries 250
+  per page and copies only those; `wincache.php` copied every entry even to show the first 250 (and showed all of
+  them on one page with its Show all entries link), so on a cache of many entries it failed with the memory_limit
+  error.

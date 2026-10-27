@@ -113,8 +113,11 @@ if (isset($_GET['page']) && is_numeric($_GET['page']) && $_GET['page'] == UCACHE
     $page = UCACHE_DATA;
 }
 
-// The list shows the first CACHE_MAX_ENTRY entries, or all of them with all=1
-$show_all_ucache_entries = isset($_GET['all']) && $_GET['all'] === '1';
+// The list shows CACHE_MAX_ENTRY entries at a time, from position start (0 for the first entry)
+$ucache_start = 0;
+if (isset($_GET['start']) && is_string($_GET['start']) && ctype_digit($_GET['start'])) {
+    $ucache_start = (int)$_GET['start'];
+}
 
 // Clearing the cache is a POST from the page's own form, never a link
 $clear_user_cache = isset($_POST['clc']) && $_POST['clc'] === '1';
@@ -160,14 +163,14 @@ if ($token === null) {
 header('X-Frame-Options: DENY');
 header("Content-Security-Policy: frame-ancestors 'none'");
 
-// The entries, listed once so that they agree with the overview above them. ucache_info() fails when it reaches
-// memory_limit while it lists them.
+// The entries of the page, listed with the totals so that they agree with the overview above them. Only those are
+// copied: listing all the entries of a large cache would run past memory_limit.
 $ucache_entries = null;
 if ($user_cache_available && $page == UCACHE_DATA && $ucache_key === null) {
-    $full_info = uc('info');
-    if (is_array($full_info)) {
-        $ucache_info = $full_info;
-        $ucache_entries = $full_info['ucache_entries'];
+    $list_info = uc('info', false, null, $ucache_start, CACHE_MAX_ENTRY);
+    if (is_array($list_info)) {
+        $ucache_info = $list_info;
+        $ucache_entries = $list_info['ucache_entries'];
     }
 }
 
@@ -252,6 +255,26 @@ function meter_markup($percent, $label, $text) {
         . number_format($percent, 1, '.', '') . '" aria-label="' . html_escape($label) . '" aria-valuetext="'
         . html_escape($text) . '" title="' . html_escape($text) . '"><span' . $class . ' style="width: '
         . number_format($percent, 2, '.', '') . '%"></span></div>';
+}
+
+// The row under the list of entries that tells which ones it shows, with links to the other pages
+function entries_pager($start, $shown, $total) {
+    global $PHP_SELF;
+
+    $pages = [];
+    if ($start > 0) {
+        $pages['First'] = 0;
+        $pages['Previous'] = max(0, $start - CACHE_MAX_ENTRY);
+    }
+    if ($start + $shown < $total) {
+        $pages['Next'] = $start + $shown;
+        $pages['Last'] = intdiv($total - 1, CACHE_MAX_ENTRY) * CACHE_MAX_ENTRY;
+    }
+    $html = 'Entries ' . format_number($start + 1) . ' to ' . format_number($start + $shown) . ' of ' . format_number($total);
+    foreach ($pages as $label => $from) {
+        $html .= ' &middot; <a href="' . $PHP_SELF . '?page=' . UCACHE_DATA . '&amp;start=' . $from . '#entries">' . $label . '</a>';
+    }
+    return '<tr class="more"><td colspan="6">' . $html . "</td></tr>\n";
 }
 
 // The stat tiles at the top of the Summary and User cache pages
@@ -795,7 +818,7 @@ if ($host === null) {
             ?>
                 <section class="card" id="entries">
                     <div class="card-header">
-                        <h2>Entries<?php if ($ucache_entries !== null) { ?><span class="count"><?= format_number(count($ucache_entries)) ?></span><?php } ?></h2>
+                        <h2>Entries<?php if ($ucache_entries !== null) { ?><span class="count"><?= format_number($ucache_info['total_item_count']) ?></span><?php } ?></h2>
                         <?php if (USE_AUTHENTICATION && $ucache_info['total_item_count'] > 0) { ?>
                             <form method="post" action="<?= $PHP_SELF ?>?page=<?= UCACHE_DATA ?>">
                                 <input type="hidden" name="clc" value="1">
@@ -805,7 +828,9 @@ if ($host === null) {
                         <?php   } ?>
                     </div>
                     <?php if ($ucache_entries === null) { ?>
-                        <p class="empty">The entries could not be listed: memory_limit was reached.</p>
+                        <p class="empty">The entries could not be listed.</p>
+                    <?php   } elseif (!$ucache_entries && $ucache_info['total_item_count'] > 0) { ?>
+                        <p class="empty">The user cache has <?= format_number($ucache_info['total_item_count']) ?> entries, none from entry <?= format_number($ucache_start + 1) ?> on. <a href="<?= $PHP_SELF ?>?page=<?= UCACHE_DATA ?>#entries">First page</a></p>
                     <?php   } elseif (!$ucache_entries) { ?>
                         <p class="empty">The user cache is empty.</p>
                     <?php   } else { ?>
@@ -823,15 +848,7 @@ if ($host === null) {
                                 </thead>
                                 <tbody>
                                     <?php
-                                    $shown = 0;
                                     foreach ($ucache_entries as $entry) {
-                                        if (!$show_all_ucache_entries && $shown == CACHE_MAX_ENTRY) {
-                                            echo '<tr class="more"><td colspan="6">The first ', format_number(CACHE_MAX_ENTRY), ' of ',
-                                            format_number(count($ucache_entries)), ' entries. <a href="', $PHP_SELF, '?page=', UCACHE_DATA,
-                                            '&amp;all=1#entries">Show all entries</a></td></tr>', "\n";
-                                            break;
-                                        }
-                                        $shown++;
                                         $key = html_escape($entry['key_name']);
                                         echo '<tr>';
                                         echo '<td class="key"><a href="', $PHP_SELF, '?page=', UCACHE_DATA, '&amp;key=', urlencode($entry['key_name']),
@@ -845,6 +862,10 @@ if ($host === null) {
                                         }
                                         echo '<td class="num" title="', format_number($entry['age_seconds']), ' seconds">', format_duration($entry['age_seconds']), '</td>';
                                         echo '<td class="num">', format_number($entry['hitcount']), "</td></tr>\n";
+                                    }
+                                    $shown = count($ucache_entries);
+                                    if ($ucache_start > 0 || $shown < $ucache_info['total_item_count']) {
+                                        echo entries_pager($ucache_start, $shown, $ucache_info['total_item_count']);
                                     }
                                     ?>
                                 </tbody>

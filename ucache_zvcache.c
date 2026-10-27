@@ -3587,8 +3587,12 @@ static void zvcache_info_entry_dtor(void * pvoid)
     return;
 }
 
-/* Adds the entries zvcache_list() reports to plist. Call this under the cache lock. */
-static int list_zvcache_entries(zvcache_context * pcache, zend_bool summaryonly, char * pkey, unsigned int cticks, zend_llist * plist)
+/*
+ * Adds the entries zvcache_list() reports to plist. Call this under the cache lock. Without a
+ * key, the entries in the order of the table: the first offset ones are skipped without copying
+ * their keys, and at most limit ones are added (all of them with limit 0).
+ */
+static int list_zvcache_entries(zvcache_context * pcache, zend_bool summaryonly, char * pkey, zend_ulong offset, zend_ulong limit, unsigned int cticks, zend_llist * plist)
 {
     int                  result   = NONFATAL;
     zvcache_header *     header   = pcache->zvheader;
@@ -3597,6 +3601,8 @@ static int list_zvcache_entries(zvcache_context * pcache, zend_bool summaryonly,
     unsigned int         index    = 0;
     zvcache_info_entry   pinfo    = {0};
     unsigned int         count    = 0;
+    zend_ulong           position = 0;
+    zend_ulong           listed   = 0;
 
     if(pkey != NULL)
     {
@@ -3645,6 +3651,12 @@ static int list_zvcache_entries(zvcache_context * pcache, zend_bool summaryonly,
             pvalue = ZVCACHE_VALUE(palloc, header->values[index]);
             while(pvalue != NULL)
             {
+                if(position++ < offset)
+                {
+                    pvalue = ZVCACHE_VALUE(palloc, pvalue->next_value);
+                    continue;
+                }
+
                 pinfo.key = alloc_estrdup(ZVALUE(pcache->incopy, pvalue->keystr));
                 if(pinfo.key == NULL)
                 {
@@ -3667,6 +3679,11 @@ static int list_zvcache_entries(zvcache_context * pcache, zend_bool summaryonly,
                     result = FATAL_OUT_OF_LMEMORY;
                     goto Finished;
                 }
+
+                if(limit != 0 && ++listed == limit)
+                {
+                    goto Finished;
+                }
             }
         }
     }
@@ -3676,7 +3693,7 @@ Finished:
     return result;
 }
 
-int zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, zvcache_info * pcinfo, zend_llist * plist)
+int zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, zend_ulong offset, zend_ulong limit, zvcache_info * pcinfo, zend_llist * plist)
 {
     int                  result   = NONFATAL;
     unsigned char        flock    = 0;
@@ -3721,7 +3738,7 @@ int zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, z
      */
     zend_try
     {
-        result = list_zvcache_entries(pcache, summaryonly, pkey, cticks, plist);
+        result = list_zvcache_entries(pcache, summaryonly, pkey, offset, limit, cticks, plist);
     }
     zend_catch
     {

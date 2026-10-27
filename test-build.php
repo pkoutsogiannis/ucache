@@ -928,6 +928,7 @@ if (PHP_VERSION_ID >= 80000) {
         "set" => attempt(function () { return ucache_set(["smoke_named_ttl" => 1], ttl: 5); }),
         "inc" => attempt(function () { $success = "unset"; return [ucache_inc("smoke_named_counter", success: $success), $success]; }),
         "info" => attempt(function () { return ucache_info(key: "smoke_long"); }),
+        "page" => attempt(function () { return ucache_info(offset: 1, limit: 2); }),
         "novalue" => attempt(function () { return ucache_set("smoke_named_novalue", ttl: 60); }),
     ];');   /* named arguments do not parse before 8.0 */
 
@@ -941,6 +942,11 @@ if (PHP_VERSION_ID >= 80000) {
     check('ucache_info(key: $key) returns only that entry (PHP 8)',
           is_array($info) && isset($info['ucache_entries']) && count($info['ucache_entries']) === 1 && find_entry($info, 'smoke_long') !== null,
           outcome($named['info']));
+
+    $info = $named['page'][0];
+    check('ucache_info(offset: 1, limit: 2) returns the 2nd and 3rd entries, indexed 2 and 3 (PHP 8)',
+          is_array($info) && isset($info['ucache_entries']) && array_keys($info['ucache_entries']) === [2, 3],
+          outcome($named['page']));
 
     /* The value takes its default, null: as documented, the call stores null (positionally, ucache_set('k') fails) */
     $entry = find_entry(ucache_info(false, 'smoke_named_novalue'), 'smoke_named_novalue');
@@ -1009,6 +1015,44 @@ check('ucache_info(true, key) still returns that entry', is_array($one) && count
 
 $none = ucache_info(false, 'smoke_missing');
 check('ucache_info(false, missing key) returns no entries', is_array($none) && $none['ucache_entries'] === [], $none);
+
+/* offset and limit: a page of the full listing. The keys and their positions are compared, not the whole entries,
+   whose age_seconds may have grown by a second since $info */
+function entry_keys($info)
+{
+    return is_array($info) ? array_map(function ($entry) { return $entry['key_name']; }, $info['ucache_entries']) : $info;
+}
+
+$fullKeys = entry_keys($info);
+$page = ucache_info(false, null, 2, 3);
+check('ucache_info(false, null, 2, 3) returns the 3rd to 5th entries of the full listing, indexed 3 to 5, with the totals of the whole cache',
+      count($fullKeys) >= 5 && entry_keys($page) === array_slice($fullKeys, 2, 3, true)
+      && $page['total_item_count'] === $info['total_item_count'], ['page' => entry_keys($page), 'full' => $fullKeys]);
+
+check('ucache_info(false, null) and ucache_info(false, null, 0, 0) list every entry',
+      entry_keys(ucache_info(false, null)) === $fullKeys && entry_keys(ucache_info(false, null, 0, 0)) === $fullKeys,
+      [entry_keys(ucache_info(false, null)), entry_keys(ucache_info(false, null, 0, 0))]);
+
+$total = $info['total_item_count'];
+$tail = ucache_info(false, null, $total - 1, 10);
+$past = ucache_info(false, null, $total, 10);
+$far = ucache_info(false, null, PHP_INT_MAX, 1);
+check('a limit past the end returns the entries left, an offset at or past the end returns none',
+      entry_keys($tail) === array_slice($fullKeys, $total - 1, 1, true) && is_array($past) && $past['ucache_entries'] === []
+      && $past['total_item_count'] === $total && is_array($far) && $far['ucache_entries'] === [],
+      ['tail' => entry_keys($tail), 'past' => entry_keys($past), 'far' => entry_keys($far)]);
+
+$one = ucache_info(false, 'smoke_long', 5, 1);
+check('with a key, offset and limit are ignored', entry_keys($one) === [1 => 'smoke_long'], entry_keys($one));
+
+$summary = ucache_info(true, null, 0, 3);
+check('ucache_info(true, null, 0, 3) still returns no entries', is_array($summary) && $summary['ucache_entries'] === [], entry_keys($summary));
+
+$r = capture(function () { return ucache_info(false, null, -1); }, $raised);
+$r2 = capture(function () { return ucache_info(false, null, 0, -1); }, $raised2);
+check('ucache_info() with a negative offset or limit returns false with a warning',
+      $r === false && warned($raised, 'cannot be less than 0') && $r2 === false && warned($raised2, 'cannot be less than 0'),
+      [$r, $raised, $r2, $raised2]);
 
 $before = ucache_info(true);
 $hitsBefore = find_entry(ucache_info(false, 'smoke_long'), 'smoke_long')['hitcount'];

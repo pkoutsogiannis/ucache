@@ -184,7 +184,7 @@ extern int  zvcache_set(zvcache_context * pcache, const char * key, zval * pzval
 extern int  zvcache_delete(zvcache_context * pcache, const char * key);
 extern int  zvcache_clear(zvcache_context * pcache);
 extern int  zvcache_exists(zvcache_context * pcache, const char * key, unsigned char * pexists);
-extern int  zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, zvcache_info * pcinfo, zend_llist * plist);
+extern int  zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, zend_ulong offset, zend_ulong limit, zvcache_info * pcinfo, zend_llist * plist);
 extern int  zvcache_change(zvcache_context * pcache, const char * key, zend_long delta, zend_long * newvalue);
 extern int  zvcache_compswitch(zvcache_context * pcache, const char * key, zend_long oldvalue, zend_long newvalue);
 extern int  zvcache_run_scavenger(zvcache_context * pcache, unsigned int force);

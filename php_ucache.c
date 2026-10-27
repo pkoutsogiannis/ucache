@@ -125,7 +125,9 @@ ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_info, 0, 0, 0)
     UCACHE_ARG_INFO_DEFAULT(0, summaryonly, "false")
-    ZEND_ARG_INFO(0, key)
+    UCACHE_ARG_INFO_DEFAULT(0, key, "null")
+    UCACHE_ARG_INFO_DEFAULT(0, offset, "0")
+    UCACHE_ARG_INFO_DEFAULT(0, limit, "0")
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_inc, 0, 0, 1)
@@ -1377,8 +1379,10 @@ PHP_FUNCTION(ucache_info)
     zend_bool            summaryonly = 0;   /* "b" stores a zend_bool (bool since PHP 8.0) */
     char *               entrykey    = NULL;
     size_t               entrylen    = 0;
+    zend_long            offset      = 0;
+    zend_long            limit       = 0;
 
-    if(zend_parse_parameters(ZEND_NUM_ARGS(), "|bs", &summaryonly, &entrykey, &entrylen) == FAILURE)
+    if(zend_parse_parameters(ZEND_NUM_ARGS(), "|bs!ll", &summaryonly, &entrykey, &entrylen, &offset, &limit) == FAILURE)
     {
         result = FATAL_INVALID_ARGUMENT;
         goto Finished;
@@ -1390,6 +1394,21 @@ PHP_FUNCTION(ucache_info)
         goto Finished;
     }
 
+    /* Negative offset and limit are not allowed */
+    if(offset < 0 || limit < 0)
+    {
+        php_error_docref(NULL, E_WARNING, "offset and limit cannot be less than 0");
+
+        result = WARNING_ZVCACHE_ARGUMENT;
+        goto Finished;
+    }
+
+    /* The full listing is indexed by position: the entries after offset start at offset + 1 */
+    if(entrykey == NULL)
+    {
+        index = (zend_ulong)offset + 1;
+    }
+
     plist = (zend_llist *)alloc_emalloc(sizeof(zend_llist));
     if(plist == NULL)
     {
@@ -1397,7 +1416,7 @@ PHP_FUNCTION(ucache_info)
         goto Finished;
     }
 
-    result = zvcache_list(UCG(zvucache), summaryonly, entrykey, &zvinfo, plist);
+    result = zvcache_list(UCG(zvucache), summaryonly, entrykey, (zend_ulong)offset, (zend_ulong)limit, &zvinfo, plist);
     if(FAILED(result))
     {
         goto Finished;
