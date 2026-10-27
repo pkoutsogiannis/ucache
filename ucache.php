@@ -166,11 +166,19 @@ header("Content-Security-Policy: frame-ancestors 'none'");
 // The entries of the page, listed with the totals so that they agree with the overview above them. Only those are
 // copied: listing all the entries of a large cache would run past memory_limit.
 $ucache_entries = null;
+$list_error = null;
 if ($user_cache_available && $page == UCACHE_DATA && $ucache_key === null) {
-    $list_info = uc('info', false, null, $ucache_start, CACHE_MAX_ENTRY);
-    if (is_array($list_info)) {
-        $ucache_info = $list_info;
-        $ucache_entries = $list_info['ucache_entries'];
+    // A php_ucache.dll built before ucache_info() took offset and limit reports the same version: tell it by the
+    // number of parameters
+    if ((new ReflectionFunction(ini_get('ucache.prefix') . 'info'))->getNumberOfParameters() < 4) {
+        $list_error = 'the loaded php_ucache.dll is an older build, whose ucache_info() takes no offset and limit. '
+            . 'Install the php_ucache.dll of the current release.';
+    } else {
+        $list_info = uc('info', false, null, $ucache_start, CACHE_MAX_ENTRY);
+        if (is_array($list_info)) {
+            $ucache_info = $list_info;
+            $ucache_entries = $list_info['ucache_entries'];
+        }
     }
 }
 
@@ -828,7 +836,7 @@ if ($host === null) {
                         <?php   } ?>
                     </div>
                     <?php if ($ucache_entries === null) { ?>
-                        <p class="empty">The entries could not be listed.</p>
+                        <p class="empty">The entries could not be listed<?= $list_error !== null ? ': ' . html_escape($list_error) : '.' ?></p>
                     <?php   } elseif (!$ucache_entries && $ucache_info['total_item_count'] > 0) { ?>
                         <p class="empty">The user cache has <?= format_number($ucache_info['total_item_count']) ?> entries, none from entry <?= format_number($ucache_start + 1) ?> on. <a href="<?= $PHP_SELF ?>?page=<?= UCACHE_DATA ?>#entries">First page</a></p>
                     <?php   } elseif (!$ucache_entries) { ?>
