@@ -44,7 +44,7 @@
 #define UCACHE_VMAJOR       1
 #define UCACHE_VMINOR       0
 #define UCACHE_VMMDD        0
-#define UCACHE_VREVISION    1
+#define UCACHE_VREVISION    2
 
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 #pragma code_page(1252)

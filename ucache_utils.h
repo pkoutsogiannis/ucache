@@ -38,7 +38,7 @@
 #define _UCACHE_UTILS_H_
 
 extern uint32_t     utils_hashcalc(const char * str, size_t strlen);
-extern uint32_t     utils_getindex(const char * filename, unsigned int numfiles);
+extern uint32_t     utils_getindex(const char * key, unsigned int count);
 extern int          utils_apoolpid();
 extern unsigned int utils_ticksdiff(unsigned int present, unsigned int past);
 extern char *       utils_build_temp_filename(char * suffix);

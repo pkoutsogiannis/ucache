@@ -200,27 +200,24 @@ uint32_t utils_hashcalc(const char * str, size_t strlen)
     return utils_crc32(str, strlen);
 }
 
-uint32_t utils_getindex(const char * filename, unsigned int numfiles)
+/* The hash bucket of a key, among count. The whole key is hashed, however long it is: WinCache */
+/* hashed no key longer than MAX_PATH (260) characters, which put all of them in bucket 0 */
+uint32_t utils_getindex(const char * key, unsigned int count)
 {
     uint32_t     hash   = 0;
     size_t       length = 0;
 
     dprintdecorate("start utils_getindex");
 
-    _ASSERT(filename != NULL);
-    _ASSERT(numfiles != 0);
+    _ASSERT(key   != NULL);
+    _ASSERT(count != 0);
 
-    length = strlen(filename);
+    length = strlen(key);
     _ASSERT(length != 0);
-    if (length > MAX_PATH)
-    {
-        goto Finished;
-    }
 
-    hash = utils_hashcalc(filename, length);
-    hash = hash % numfiles;
+    hash = utils_hashcalc(key, length);
+    hash = hash % count;
 
-Finished:
     dprintdecorate("end utils_getindex");
 
     return hash;
@@ -1002,58 +999,41 @@ const char * utils_get_typename(zend_uchar type)
 }
 
 /*
-   static array of primes.  Each prime number is at least twice as large
-   as the previous.
-*/
-static unsigned int g_pdwPrimes[] =
-{
-    11,         23,         47,         97,
-    197,        397,        797,        1597,
-    3203,       6421,       12853,      25717,
-    51437,      102877,     205759,     411527,
-    823117,     1646237,    3292489,    6584983,
-    13169977,   26339969,   52679969,   105359939,
-    210719881,  421439783,  842879579,  1685759167,
-    3371518343
-};
-
-#define PRIMES_COUNT (sizeof( g_pdwPrimes ) / sizeof( unsigned int ) )
-
-/* Binary search to find appropriate prime that is less than value */
+ * The largest prime that is not greater than value (2 below 3), by trial division: it runs once
+ * per process, when the cache is opened, on values up to about 2 million, where it takes
+ * microseconds.  WinCache picked from a table of primes that doubled from one to the next, so a
+ * cache could get as little as half the buckets it was meant to have.
+ */
 unsigned int utils_get_prime_less_than(size_t value)
 {
-    unsigned int ret;
-    int low, high, current, delta;
-    int done = 0;
+    unsigned int candidate = 0;
+    unsigned int divisor   = 0;
 
-    low = 0;
-    high = PRIMES_COUNT;
-    current = high / 2;
-    while (!done)
+    if (value < 3)
     {
-        if (value == g_pdwPrimes[current]) /* perfect! */
-        {
-            ret = g_pdwPrimes[current];
-            done = 1;
-        }
-        else if (value < g_pdwPrimes[current]) /* lower */
-        {
-            high = current;
-            delta = -((high - low) / 2);
-        }
-        else /* higher */
-        {
-            low = current;
-            delta = ((high - low) / 2);
-        }
-
-        if (delta == 0)
-        {
-            ret = g_pdwPrimes[low];
-            done = 1;
-        }
-        current += delta;
+        return 2;
     }
 
-    return ret;
+    /* The largest odd number not greater than value */
+    candidate = (value > UINT_MAX) ? UINT_MAX : (unsigned int)value;
+    if ((candidate & 1) == 0)
+    {
+        candidate--;
+    }
+
+    for (;; candidate -= 2)
+    {
+        for (divisor = 3; divisor <= candidate / divisor; divisor += 2)
+        {
+            if (candidate % divisor == 0)
+            {
+                break;
+            }
+        }
+
+        if (divisor > candidate / divisor)
+        {
+            return candidate;
+        }
+    }
 }

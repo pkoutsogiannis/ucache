@@ -1125,7 +1125,7 @@ check('with ucache.enabled=0 invalid arguments still throw ArgumentCountError or
  * included. ucache_info() removes nothing: an expired entry that no call has looked up stays listed
  * until the scavenger removes it, at the end of requests (ucache.gc.interval), on writes (with
  * ucache.gc.threshold, 0 here) or when a write runs out of shared memory, none of which happens in this
- * process before these checks. The three keys are in different hash buckets of the default cache (197
+ * process before these checks. The three keys are in different hash buckets of the default cache (16381
  * buckets), so each call below removes only the entry of its own key. The checks with several processes
  * look at the scavenger.
  */
@@ -3333,7 +3333,7 @@ switch ($argv[1]) {
     case 'fill_mixed':
         /* Run with ucache.size 5 and ucache.gc.evict 25. Values of about 50 KB without a ttl until less than 40% of the
            memory is free, then with ttl 1 until less than 10% is free; 2.5 s later, a value of 1 MB (more than is free,
-           less than what has expired). 'big' has a hash bucket of its own among t0..t79 (97 buckets in 5 MB), so its
+           less than what has expired). 'big' has a hash bucket of its own among t0..t999 (10223 buckets in 5 MB), so its
            lookup removes none of them on contact: the full pass removes them all. Counts */
         $cold = 0;
         $expiring = 0;
@@ -3361,7 +3361,7 @@ switch ($argv[1]) {
         break;
 
     case 'contact_free':
-        /* Expired entries, each the only one in its hash bucket (8 MB cache: 197 buckets): what memory_free gains
+        /* Expired entries, each the only one in its hash bucket (8 MB cache: 16381 buckets): what memory_free gains
            during the ucache_exists(), ucache_inc() and ucache_cas() that remove them */
         ucache_set('smoke_ttl_exists', str_repeat('e', 4000), 1);
         ucache_set('smoke_ttl_inc', 1, 1);
@@ -3469,7 +3469,7 @@ if ($op === 'sleep_fatal') {
     }
 } elseif ($op === 'poke') {
     /* A write, which runs a scavenger step while ucache.gc.threshold allows it. Its lookup removes the expired entries of
-       the hash bucket of 'poke', which is not the one of 'expiring' (of the 197 buckets of the default cache): the step
+       the hash bucket of 'poke', which is not the one of 'expiring' (of the 16381 buckets of the default cache): the step
        is what removes 'expiring' */
     echo 'poked ', var_export(ucache_set('poke', 1), true);
 } elseif ($op === 'seed') {
@@ -3637,7 +3637,7 @@ CHILDSCRIPT
        expires after 1 second, one without a ttl and one that expires after 300 seconds, then, once the first one has
        expired, lists the entries in each of its requests. ucache_info() removes nothing, so the first list still has the
        expired entry; where the end of a request runs the scavenger, the next list shows what it removed. ucache.gc.step
-       covers the whole table, so that one run sees every entry (197 buckets and three entries take far less than the
+       covers the whole table, so that one run sees every entry (16381 buckets and three entries take far less than the
        1 ms a step may last). The last list also gives what ucache_info() reports about the scavenger: the entries
        removed in all and by the last step, and the seconds since that step (null if none ran, else at most the bound) */
     $all = '[expiring,lasting,later]';

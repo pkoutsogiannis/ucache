@@ -69,6 +69,15 @@ C_ASSERT(SIZEOF_SIZE_T <= SIZEOF_ZEND_LONG);
 
 #define PER_RUN_SCAVENGE_COUNT       16
 
+/*
+ * One hash bucket per this many bytes of the cache (the largest prime up to that number of buckets).
+ * An entry takes at least about 200 bytes (208 with a key of 40 characters and an integer value), so
+ * the chains of a cache full of the smallest entries hold 2 to 3 entries on average, and the buckets
+ * (8 bytes each) take about 1.6% of the cache.  WinCache had one bucket per 32 to 64 KB: 197 for 8 MB,
+ * whose chains could hold hundreds of small entries each.
+ */
+#define ZVCACHE_BUCKET_BYTES         512
+
 #ifndef UCACHE_MAX_ZVKEY_LENGTH
 #define UCACHE_MAX_ZVKEY_LENGTH      0xFFFF
 #endif /* UCACHE_MAX_ZVKEY_LENGTH */
@@ -2332,9 +2341,11 @@ static unsigned int scavenger_interval_ms(void)
 #define SCAVENGER_STEP_MINIMUM      16
 
 /* A step stops after about this much work under the cache lock, and the next one goes on from */
-/* there; the clock is read every SCAVENGER_CLOCK_EVERY buckets */
+/* there; the clock is read every SCAVENGER_CLOCK_EVERY buckets, which hold a few hundred entries */
+/* on average in a full cache (see ZVCACHE_BUCKET_BYTES). Most buckets are empty otherwise: read */
+/* every 16 buckets, the clock took about half the time of a step */
 #define SCAVENGER_STEP_BUDGET_US    1000
-#define SCAVENGER_CLOCK_EVERY       16
+#define SCAVENGER_CLOCK_EVERY       256
 
 /* Eviction (ucache.gc.evict) by groups of idle time: group g holds the entries unused for */
 /* [2^(g-1), 2^g) seconds, group 0 those used in the last second */
@@ -2814,7 +2825,7 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short islocal, unsigne
     }
 
     /* Get memory for cache header */
-    zvcount = utils_get_prime_less_than(segsize / (32 * 1024));
+    zvcount = utils_get_prime_less_than(segsize / ZVCACHE_BUCKET_BYTES);
     msize = sizeof(zvcache_header) + ((zvcount - 1) * sizeof(size_t));
     pcache->zvheader = (zvcache_header *)alloc_get_cacheheader(pcache->zvalloc, msize, CACHE_TYPE_USERZVALS);
     if(pcache->zvheader == NULL)

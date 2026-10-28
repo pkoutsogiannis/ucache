@@ -2,7 +2,7 @@
 
 UCache is the user cache of WinCache (Microsoft's Windows Cache Extension for PHP, 2.0.0.8) as a PHP extension of
 its own, for PHP 7.2, 7.3, 7.4, 8.0, 8.1, 8.2, 8.3, 8.4 and 8.5 on Windows x64. Extension `ucache`, file
-`php_ucache.dll`, version 1.0.0.1. License: see [LICENSE](LICENSE) (the original Microsoft license).
+`php_ucache.dll`, version 1.0.0.2. License: see [LICENSE](LICENSE) (the original Microsoft license).
 
 ## Table of Contents
 
@@ -187,8 +187,7 @@ Defines the seconds between the scavenger steps at the end of requests. 0 turns 
 `ucache.gc.step` *int*
 
 Defines the hash buckets that a scavenger step goes through. 0: automatic, at least 16, so that the steps at the end
-of requests go through the whole table in at most about 5 minutes (about 2 minutes for the default 8 MB). See
-[The Scavenger](#the-scavenger).
+of requests go through the whole table in at most about 5 minutes. See [The Scavenger](#the-scavenger).
 
 `ucache.gc.ttl` *int*
 
@@ -446,8 +445,8 @@ Steps run:
 A step goes through `ucache.gc.step` buckets, at most the whole table. The default, 0, takes the larger of 16 and
 buckets x `ucache.gc.interval` / 300, rounded up, so that the steps at the end of requests go through the whole table
 in at most about 5 minutes while requests keep coming (16 buckets when `ucache.gc.interval` is 0). The table has a
-prime number of buckets, about one per 32 to 64 KB of `ucache.size`: 197 for the default 8 MB (16 buckets a step, the
-whole table in about 2 minutes), 25717 for 930 MB (858 buckets a step). A step also stops after about 1 ms of work
+prime number of buckets, the largest prime up to one bucket per 512 bytes of `ucache.size`: 16381 for the default
+8 MB (547 buckets a step), 1904621 for 930 MB (63488 buckets a step). A step also stops after about 1 ms of work
 under the cache lock, and the next step goes on from there. So a step holds the cache lock for about 1 ms at most,
 but going through a table that holds many entries can take more than 5 minutes.
 
@@ -494,7 +493,7 @@ are removals on contact, deletes, replaces and clears.
 
 - To go through the table faster or slower than the automatic step does, set `ucache.gc.step`: going through it then
   takes about buckets / `ucache.gc.step` x `ucache.gc.interval` seconds, more if steps reach the 1 ms limit. A fixed
-  value does not grow with the cache: 16 buckets every 10 seconds take about 4.5 hours to go through the 25717
+  value does not grow with the cache: 1000 buckets every 10 seconds take about 5 hours to go through the 1904621
   buckets of a 930 MB cache.
 - With the defaults, an entry without a ttl stays until it is deleted, replaced or cleared. If keys go out of use
   (one per user, per page or per day, for example), set `ucache.gc.ttl` above the longest time between two uses of
@@ -1757,6 +1756,13 @@ Several of these change what existing code sees.
   block in shared memory to find the next free one, which took time in proportion to the number of entries: deleting
   every second one of 10,000 entries took 0.8 seconds, of 100,000 entries minutes, with every process of the pool
   waiting for the allocator meanwhile.
+- Lookups stay fast as the cache fills: the hash table has one bucket per 512 bytes of `ucache.size` (16381 for the
+  default 8 MB, 262139 for 128 MB), so its chains hold 2 to 3 entries on average even in a cache full of the smallest
+  entries, and the whole key is hashed. WinCache 2.0.0.8 had one bucket per 32 to 64 KB (197 for 8 MB, 3203 for
+  128 MB) and put every key longer than 260 characters into the same bucket. With 500,000 entries of 40-character
+  keys in 128 MB, its chains held about 156 entries, and a read through them took about 8 microseconds, 16 for a
+  missing key, where UCache takes about 1; with 5,000 keys of 300 characters, a read took about 8 microseconds and a
+  miss 14, against 1.5.
 - A `ttl` is taken as given up to 4294967295 seconds, and as 4294967295 above. WinCache 2.0.0.8 cut it to 32 bits:
   2147483648 to 4294967295 were refused as negative ttls, 4294967296 meant no expiry and 4294967297 one second.
 - `$GLOBALS` can be stored, as a value or with the array forms (see [Values](#values)). WinCache 2.0.0.8 stored none
