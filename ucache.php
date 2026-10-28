@@ -332,6 +332,16 @@ function render_overview(array $info, array $mem, $link_entries) {
             <p class="tile-value"><?= format_duration($uptime) ?></p>
             <p class="tile-caption"><?= format_number($uptime) ?> seconds</p>
         </div>
+        <?php // Pre-release builds of php_ucache.dll do not report the scavenger
+        if (isset($info['total_scavenged_count'])) {
+            $last_run = $info['last_scavenge_seconds'] === null ? 'No run yet'
+                : 'Last run ' . format_duration($info['last_scavenge_seconds']) . ' ago, ' . format_number($info['last_scavenge_count']) . ' removed'; ?>
+            <div class="tile">
+                <p class="tile-label">Scavenged entries</p>
+                <p class="tile-value"><?= format_number($info['total_scavenged_count']) ?></p>
+                <p class="tile-caption"><?= $last_run ?><br><?= format_number($info['total_evicted_count']) ?> evicted from a full cache</p>
+            </div>
+        <?php } ?>
     </section>
 <?php
 }
@@ -515,7 +525,7 @@ if ($host === null) {
 
         .tiles {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
             gap: 16px;
         }
 

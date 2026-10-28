@@ -258,9 +258,9 @@ This extension has no constants defined.
 ### UCache Statistics Script
 
 The sources of UCache include a PHP script, ucache.php (WinCache's wincache.php for UCache), that can be used to
-obtain cache information and statistics: the server and cache settings, the memory use, the hit and miss counts, the
-list of entries (250 per page, with links to the other pages) and the value stored under a key; with authentication
-on, it can also clear the whole cache.
+obtain cache information and statistics: the server and cache settings, the memory use, the hit and miss counts, what
+the scavenger removed and evicted and when it last ran, the list of entries (250 per page, with links to the other
+pages) and the value stored under a key; with authentication on, it can also clear the whole cache.
 
 To use ucache.php, copy it into a root folder of a web site that runs with the extension loaded, or into any
 subfolder, preferably one that only administrators can reach. To protect the script, open it in any text editor and
