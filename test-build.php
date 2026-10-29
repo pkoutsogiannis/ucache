@@ -25,8 +25,9 @@
  *   objects of caches for the checks of who initializes a cache (they are skipped, with a "SKIP:"
  *   line, without it or where it runs in ConstrainedLanguage mode).
  *
- * Prints one line per check ("OK: ..." or "FAIL: ...", or "SKIP: ..." for checks that cannot run) and
- * exits with 1 if any check failed.
+ * Prints one line per check ("OK: ..." or "FAIL: ...", or "SKIP: ..." for checks that cannot run; a
+ * "NOTE: ..." line follows a check of a killed process none of whose attempts hit a lock) and exits
+ * with 1 if any check failed.
  * The expected results follow the semantics of the original user cache implementation (the
  * functions were only renamed), apart from the differences that README.md lists. The test clears the
  * user cache it runs against.
@@ -554,7 +555,7 @@ check("phpversion('ucache') is a version string ($version)", is_string($version)
 
 $expectedFuncs = ['ucache_add', 'ucache_cas', 'ucache_clear', 'ucache_dec', 'ucache_delete', 'ucache_exists',
                   'ucache_get', 'ucache_inc', 'ucache_info', 'ucache_meminfo', 'ucache_set'];
-$testOnlyFuncs = ['ucache_lasterror', 'ucache_runtests'];   /* only in UCACHE_TEST (debug) builds */
+$testOnlyFuncs = ['ucache_lasterror'];   /* only in UCACHE_TEST (debug) builds */
 
 $funcs = get_extension_funcs('ucache');
 $funcs = is_array($funcs) ? $funcs : [];
@@ -930,6 +931,75 @@ check('ucache_cas() of a missing key returns false', $r === false && $raised ===
 
 $r = capture(function () { return ucache_cas('smoke_string', 1, 2); }, $raised);
 check('ucache_cas() of a non-long value returns false with a warning', $r === false && warned($raised, 'value is long'), $raised);
+
+/*
+ * ucache_set() and ucache_add() share one implementation, and so do ucache_inc() and ucache_dec(): each problem is
+ * reported the same way by both, or by neither, under the name of the function called. The array forms warn about
+ * nothing: a key that fails gets -1
+ */
+
+$tooLong = str_repeat('k', 4097);
+$cases = [];
+foreach (['ucache_set', 'ucache_add'] as $fn) {
+    $cases["$fn, blank key"]                = [$fn, ['', 1], [false, ["$fn(): key cannot be blank string"]]];
+    $cases["$fn, negative ttl"]             = [$fn, ['smoke_shared_negttl', 1, -1], [false, ["$fn(): ttl cannot be less than 0"]]];
+    $cases["$fn, resource"]                 = [$fn, ['smoke_shared_res', $res], [false, ["$fn(): value cannot be a resource"]]];
+    $cases["$fn, no value"]                 = [$fn, ['smoke_shared_novalue'], [false, []]];
+    $cases["$fn, key too long"]             = [$fn, [$tooLong, 1], [false, []]];
+    $cases["$fn, array holding a resource"] = [$fn, [['smoke_shared_m' => $res]], [['smoke_shared_m' => -1], []]];
+}
+$cases['ucache_add, existing key']               = ['ucache_add', ['smoke_add', 'again'],
+                                                    [false, ['ucache_add(): function called with a key which already exists']]];
+$cases['ucache_add, array with an existing key'] = ['ucache_add', [['smoke_add' => 'again']], [['smoke_add' => -1], []]];
+foreach (['ucache_inc', 'ucache_dec'] as $fn) {
+    $cases["$fn, non-long value"] = [$fn, ['smoke_string'], [false, ["$fn(): function can only be called for key whose value is long"]]];
+    $cases["$fn, missing key"]    = [$fn, ['smoke_nocounter'], [false, []]];
+}
+$bad = [];
+foreach ($cases as $case => $spec) {
+    list($fn, $args, $want) = $spec;
+    $r = capture(function () use ($fn, $args) { return call_user_func_array($fn, $args); }, $raised);
+    if ([$r, $raised] !== $want) {
+        $bad[$case] = ['result' => $r, 'warnings' => $raised];
+    }
+}
+check('ucache_set() and ucache_add(), ucache_inc() and ucache_dec() fail the same way, with warnings that name the function called',
+      $bad === [] && ucache_get('smoke_add') === 'first' && ucache_exists('smoke_shared_novalue') === false
+      && ucache_exists('smoke_shared_m') === false, $bad);
+unset($tooLong, $cases);
+
+/* A dec adds -$delta; both wrap around at the ends of the integer range, and -PHP_INT_MIN is PHP_INT_MIN */
+ucache_set('smoke_wrap', PHP_INT_MAX);
+$wrap = [ucache_inc('smoke_wrap'), ucache_dec('smoke_wrap'), ucache_dec('smoke_wrap', PHP_INT_MIN), ucache_inc('smoke_wrap', PHP_INT_MIN),
+         ucache_dec('smoke_wrap', -2), ucache_get('smoke_wrap')];
+check('ucache_inc() and ucache_dec() wrap around at PHP_INT_MAX and PHP_INT_MIN, and ucache_dec($key, PHP_INT_MIN) adds PHP_INT_MIN',
+      $wrap === [PHP_INT_MIN, PHP_INT_MAX, -1, PHP_INT_MAX, PHP_INT_MIN + 1, PHP_INT_MIN + 1], $wrap);
+ucache_delete('smoke_wrap');
+
+/*
+ * $success of ucache_inc() and ucache_dec() is assigned in the strict_types mode of the file that calls them, which
+ * the shared implementation does not change: from a strict file, false does not go into an int property (TypeError,
+ * the property keeps its value); from this file it becomes 0 (PHP 7.4+)
+ */
+if (PHP_VERSION_ID >= 70400) {
+    $strictFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'ucache-smoke-strict-' . getmypid() . '.php';
+    file_put_contents($strictFile, "<?php declare(strict_types=1);\nreturn function (\$fn, \$holder) { return \$fn('smoke_nocounter', 1, \$holder->count); };\n");
+    $strictCall = include $strictFile;
+    @unlink($strictFile);
+    $strictGot = [];
+    $strictOk = true;
+    foreach (['ucache_inc', 'ucache_dec'] as $fn) {
+        $holder = new UcacheSmokeSuccess();
+        $a = attempt(function () use ($strictCall, $fn, $holder) { return $strictCall($fn, $holder); });
+        $coerced = new UcacheSmokeSuccess();
+        $r = $fn('smoke_nocounter', 1, $coerced->count);
+        $strictGot[$fn] = ['strict' => outcome($a), 'strict property' => $holder->count, 'coercive' => $r, 'coercive property' => $coerced->count];
+        $strictOk = $strictOk && $a[1] instanceof TypeError
+                    && strpos($a[1]->getMessage(), 'to reference held by property UcacheSmokeSuccess::$count of type int') !== false
+                    && $holder->count === 7 && $r === false && $coerced->count === 0;
+    }
+    check('$success of ucache_inc() and ucache_dec() follows the strict_types mode of the calling file (PHP 7.4+)', $strictOk, $strictGot);
+}
 
 /*
  * Parameters. The array forms of ucache_set() and ucache_add() take no value, so only the key is
@@ -2429,25 +2499,15 @@ function children_cleanup()
    one, null if it did not accept the connection within $connect seconds or did not answer within $timeout */
 function http_get($port, $path, $timeout, $connect = 0.5)
 {
-    /* A short connect timeout: Windows takes 2 s to report that nothing listens on the port */
-    $socket = @stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, $connect);
-    if ($socket === false) {
-        return null;
-    }
-    stream_set_timeout($socket, $timeout);
-    @fwrite($socket, "GET $path HTTP/1.0\r\nHost: 127.0.0.1:$port\r\nConnection: close\r\n\r\n");
-    $reply = @stream_get_contents($socket);
-    $meta = stream_get_meta_data($socket);
-    fclose($socket);
-
-    return $meta['timed_out'] ? null : (string)$reply;
+    return http_request($port, 'GET', $path, [], null, $timeout, $connect);
 }
 
 /* The reply of a php -S server to a request with these extra header lines (a cookie, credentials) and this form body
    (null for none), as http_get() returns it */
-function http_request($port, $method, $path, array $headers, $body, $timeout)
+function http_request($port, $method, $path, array $headers, $body, $timeout, $connect = 0.5)
 {
-    $socket = @stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 0.5);
+    /* A short connect timeout: Windows takes 2 s to report that nothing listens on the port */
+    $socket = @stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, $connect);
     if ($socket === false) {
         return null;
     }
@@ -5136,8 +5196,9 @@ CHILDSCRIPT
           && $result['entries'] + $result['total_evicted_count'] === $result['cold'] + 2,
           ['exit code' => $exit, 'counts' => $result, 'output' => child_tail($fillRaise)]);
 
-    /* A value that takes more than the empty cache holds, counted from below, fails at once, before it takes any shared
-       memory: no full pass, nothing removed or evicted */
+    /* A value that takes more than the empty cache holds, by the count made before it is copied (each part once, without
+       the overheads of the allocator), fails at once, before it takes any shared memory: no full pass, nothing removed
+       or evicted */
     $exit = child_finish($tooBigEvict, 60);
     $result = child_result($tooBigEvict);
     check('(in another process) with ucache.gc.evict 10, values that take more than the empty cache holds (a 6 MB string, an array of 6000 strings of 1000 bytes, an array holding a 6 MB string that a variable holds too) fail at once in a full cache: nothing is evicted or removed, no full pass runs, the memory is as it was; a value that only the empty cache holds is stored, evicting every entry',
@@ -5888,6 +5949,13 @@ if (function_exists('my_cache_set')) {
     $result['set'] = my_cache_set('k', [1, 'two']);
     $result['get'] = My_Cache_Get('k');
     $result['extension'] = (new ReflectionFunction('my_cache_info'))->getExtensionName();
+    /* The warnings of the shared implementations name the function called, with its prefix */
+    $helperWarnings = [];
+    set_error_handler(function ($no, $str) use (&$helperWarnings) { $helperWarnings[] = $str; return true; });
+    $result['add again'] = my_cache_add('k', 'again');
+    $result['dec of an array'] = my_cache_dec('k');
+    restore_error_handler();
+    $result['helper warnings'] = $helperWarnings;
 }
 echo "RESULT ", base64_encode(serialize($result)), "\n";
 CHILDSCRIPT
@@ -5901,6 +5969,13 @@ CHILDSCRIPT
           $prefixedExit === 0 && is_array($result) && array_values(array_diff($result['funcs'], $expectedPrefixed)) === []
           && array_values(array_diff($expectedPrefixed, $result['funcs'])) === [] && $result['ucache_get exists'] === false
           && $result['set'] === true && $result['get'] === [1, 'two'] && $result['extension'] === 'ucache',
+          ['exit code' => $prefixedExit, 'result' => $result, 'output' => child_tail($prefixed)]);
+
+    check('(in another process) with ucache.prefix=my_cache_ the warnings of my_cache_add() and my_cache_dec() name them',
+          $prefixedExit === 0 && is_array($result) && isset($result['helper warnings'])
+          && $result['add again'] === false && $result['dec of an array'] === false
+          && $result['helper warnings'] === ['my_cache_add(): function called with a key which already exists',
+                                             'my_cache_dec(): function can only be called for key whose value is long'],
           ['exit code' => $prefixedExit, 'result' => $result, 'output' => child_tail($prefixed)]);
 
     foreach (['invalid' => '1cache', 'duplicate' => 'date_'] as $kind => $prefix) {

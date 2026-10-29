@@ -218,9 +218,9 @@ this long, whatever their ttl. 0: the scavenger removes expired entries only. Se
 `ucache.gc.evict` *int*
 
 Defines a free memory percentage, 0 to 100 (higher values act as 100). When > 0 and `ucache_set()` or `ucache_add()`
-finds the cache full, the entries not used for the longest time are evicted until this percentage of the cache is
-free, or more if that is not enough for the value. A value that takes, counted from below, more than the empty cache
-holds fails at once and evicts nothing (see [A full cache](#a-full-cache)). 0: no eviction. See
+finds the cache full, the entries not used for the longest time are evicted until this percentage of the cache is free,
+or more if that is not enough for the value. A value larger than the empty cache (counted without the cache's own
+overheads, see [A full cache](#a-full-cache)) fails at once and evicts nothing. 0: no eviction. See
 [The Scavenger](#the-scavenger).
 
 `ucache.prefix` *string*
@@ -239,11 +239,11 @@ UCache raises a startup warning (`E_CORE_WARNING`) when it cannot use a setting 
 `error_log`, or else the error output of the process) and, on Windows, to the Application event log, with the source
 `PHP-<version>` (for example `PHP-8.4.14`) and the event ID 4: PHP 7 always does, PHP 8 when `log_errors` is on (as in
 php.ini-production and php.ini-development) or `display_startup_errors` is off. Event Viewer says that the description
-of the event cannot be found, and shows the warning under "the following information was included with the event".
-With `display_startup_errors` on, PHP also displays it (the CLI prints it).
-Every PHP process raises the warning again when it starts, and IIS starts new php-cgi processes regularly: fix the
-setting rather than ignore the warning. The `ucache.size` and cache warnings are not raised under the CLI without
-`ucache.enablecli=1`, where no cache is created; the `ucache.prefix` warning is.
+of the event cannot be found, and shows the warning under "the following information was included with the event". With
+`display_startup_errors` on, PHP also displays it (the CLI prints it). Every PHP process raises the warning again when
+it starts, and IIS starts new php-cgi processes regularly: fix the setting rather than ignore the warning. The
+`ucache.size` and cache warnings are not raised under the CLI without `ucache.enablecli=1`, where no cache is created;
+the `ucache.prefix` warning is.
 
 When the cache cannot be created, PHP runs without it: the functions return false (`ucache_meminfo()` returns null),
 and the `User cache` line of `phpinfo()` says `unavailable`. The warning gives the UCache error and, where it applies,
@@ -286,14 +286,13 @@ Instead of `-d` arguments, the `environmentVariables` of a FastCGI application c
 folders, separated by `;`, of extra .ini files read after php.ini) or `PHPRC` (the folder of a php.ini of its own).
 The application still needs arguments that differ from those of the other applications of the same php-cgi.exe.
 
-The processes that share a cache must use the same `ucache.*` settings. Two sites of one pool that use different
-FastCGI applications still share the pool's cache: give them different `ucache.namesalt` values if their settings
-differ. php-cgi reads the settings when it starts: after changing them, recycle the pool. After changing
-`ucache.size`, stop the pool and, once its php-cgi processes have exited, start it again instead: an overlapped
-recycle (the IIS default) starts the new processes while the old ones still run, and the new processes would open the
-cache of the old ones, at its old size, for as long as old and new processes overlap (see
-[Installation](#installation)).
-`phpinfo()` on a site shows the settings its processes use.
+The processes that share a cache must use the same `ucache.*` settings. Two sites of one pool that use different FastCGI
+applications still share the pool's cache: give them different `ucache.namesalt` values if their settings differ.
+php-cgi reads the settings when it starts: after changing them, recycle the pool. After changing `ucache.size`, stop the
+pool and, once its php-cgi processes have exited, start it again instead: an overlapped recycle (the IIS default) starts
+the new processes while the old ones still run, and the new processes would open the cache of the old ones, at its old
+size, for as long as old and new processes overlap (see [Installation](#installation)). `phpinfo()` on a site shows the
+settings its processes use.
 
 ### Resource Types
 
@@ -495,14 +494,13 @@ not change when an entry expires.
 ### Removal on contact
 
 Every call that looks up a key (`ucache_get()`, `ucache_exists()`, `ucache_set()`, `ucache_add()`, `ucache_delete()`,
-`ucache_inc()`, `ucache_dec()`, `ucache_cas()`, and each key of their array forms) removes the expired entries it
-passes in the key's hash bucket: the key's own expired entry, and possibly expired entries of other keys that share
-the bucket. So storing a key again after it expired leaves a single entry, and `ucache_delete()` of an expired key
-returns false (the key is missing) and removes the entry. This removal on contact happens whatever the `ucache.gc.*`
-settings are, and concerns expired entries only: the entries that `ucache.gc.ttl` targets are left to the scavenger.
-It also removes the entries of the bucket that a `ucache_clear()` has not freed yet.
-`ucache_info()` and `ucache_meminfo()` never remove anything: the full `ucache_info()` listing shows the expired
-entries that nothing has removed yet.
+`ucache_inc()`, `ucache_dec()`, `ucache_cas()`, and each key of their array forms) removes the expired entries it passes
+in the key's hash bucket: the key's own expired entry, and possibly expired entries of other keys that share the bucket.
+So storing a key again after it expired leaves a single entry, and `ucache_delete()` of an expired key returns false
+(the key is missing) and removes the entry. This removal on contact happens whatever the `ucache.gc.*` settings are, and
+concerns expired entries only: the entries that `ucache.gc.ttl` targets are left to the scavenger. It also removes the
+entries of the bucket that a `ucache_clear()` has not freed yet. `ucache_info()` and `ucache_meminfo()` never remove
+anything: the full `ucache_info()` listing shows the expired entries that nothing has removed yet.
 
 ### Steps
 
@@ -601,11 +599,7 @@ a block being allocated stays free, and a block being freed stays in use, lost w
 processes go on with consistent structures. `total_abandoned_lock_count` in `ucache_info()` counts the locks that a
 process found abandoned (the process that held one ended without releasing it), whether or not it was in the middle of
 an update; a log is also put back when the lock was created again while the memory lived on (a process that starts
-while the last process of the pool exits), which is not counted. The log costs little in single calls: measured on
-PHP 7.2 and 8.5 against a build without it, `ucache_set()`, `ucache_get()` and `ucache_delete()` took at most about
-5% longer (on 7.2 the difference was within the noise), and so did those of 4 processes writing at once; but
-`ucache_clear()` frees its entries about a quarter to a third slower (50,000 arrays in 25 ms instead of 18.5): a free
-under the lock of the allocator, which its batches make one after the other, logs 5 to 13 fields.
+while the last process of the pool exits), which is not counted.
 
 `ucache_clear()` clears the cache at once, under the cache lock: from then on no process sees the entries that were in
 it (the calls miss them, the listing and `total_item_count` leave them out), and an entry stored afterwards is kept.
@@ -653,11 +647,11 @@ neither are removals on contact, deletes, replaces and clears.
   for about 1 ms of cache lock a second, and faster again while they find entries to remove. It only helps where entries
   expire or go unused (`ucache.gc.ttl`): otherwise the steps find nothing to remove. It does not keep up with a mass
   expiry: steps on writes remove some thousands of entries a second there. Measured on PHP 7.2, with 500,000 expired
-  entries in 128 MB and `ucache.gc.threshold=50`: about 1,000 a second at first and 6,000 later, so that free memory was
-  back above 50% after about 45 seconds, with steps holding the cache lock about 1% of the time (in a fuller cache,
-  about 10,000 a second while at most a quarter of 50% was free). If new values fill the cache first, the full pass of a
+  entries in 128 MB and `ucache.gc.threshold=50`: about 4,000 a second at first and 6,000 later, so that free memory was
+  back above 50% after about 40 seconds, with steps holding the cache lock about 1% of the time (in a fuller cache, more
+  than 20,000 a second while at most a quarter of 50% was free). If new values fill the cache first, the full pass of a
   full cache removes all the expired entries at once, and every process of the pool waits for it: it held the cache lock
-  for about 0.18 seconds for 635,000 expired entries in 128 MB. Steps on writes cannot prevent that pass then: spread
+  for about 0.25 seconds for 635,000 expired entries in 128 MB. Steps on writes cannot prevent that pass then: spread
   the ttls of entries stored together, or give the cache room for them.
 - `ucache.gc.interval=0` turns off the steps at the end of requests: expired entries are then removed only on contact,
   by steps on writes (`ucache.gc.threshold`) and by the full pass of a full cache. It suits a cache where no entry has a
@@ -898,7 +892,7 @@ This function has no parameters.
 
 #### Return Values
 
-Returns true.
+Returns true on success or false on failure (the cache is switched off or was not created).
 
 #### Examples
 
@@ -1848,28 +1842,38 @@ With the path of the DLL under test as its argument, as `build.bat` passes it, i
 holds no path of the build machine (of a PDB file or of the sources: a DLL built with debug information fails this
 check), and that it imports `GetTickCount64()` and not `GetTickCount()`, whose count wraps every 49.7 days, longer than
 a test can wait. And it starts other PHP processes that load that DLL, each group on a cache of its own (a unique
-`ucache.apppoolid` or `APP_POOL_ID`): a holder keeps a cache alive while other processes use it, and `php -S` servers on
-127.0.0.1 stand for the FastCGI processes of a pool, which survive the fatal error of a request. They check what a
-single process cannot, such as a cache shared by several processes and which processes share one (`ucache.apppoolid`,
-`APP_POOL_ID`, the parent process), the settings read at startup (`ucache.size`, `ucache.prefix`) and a cache that
-cannot be created, the release of the cache lock after a fatal error, the scavenger at the end of requests and on
-writes, a full cache (eviction, and values larger than the empty cache while another process writes), `ucache_clear()`
-of a full cache while other processes read and write, storing in a fragmented cache, the memory that stored arrays
-take, processes killed while they clear, evict, store or replace entries (the cache they leave must be consistent; the
-checks of a clear, a full pass and replaces print a `NOTE` line when none of their attempts killed the process while it
-held a lock), and the processes that start while the last process of their pool closes the cache or after one died
-while it created the cache (a Windows PowerShell script holds named objects of the cache as such processes find them;
-without `powershell.exe`, or where it runs in ConstrainedLanguage mode, these checks are skipped, with a `SKIP` line).
+`ucache.apppoolid` or `APP_POOL_ID`): a holder keeps a cache alive while other processes use it, `php -S` servers on
+127.0.0.1 stand for the FastCGI processes of a pool, which survive the fatal error of a request, and a Windows
+PowerShell script holds named objects of a cache. They check what a single process cannot:
+
+- a cache shared by several processes, and which processes share one (`ucache.apppoolid`, `APP_POOL_ID`, the parent
+  process);
+- the settings read at startup (`ucache.size`, `ucache.prefix`), and a cache that cannot be created;
+- the processes that start while the last process of their pool closes the cache, or after one died while it created the
+  cache (the PowerShell script holds the named objects of the cache as such processes find them; without
+  `powershell.exe`, or where it runs in ConstrainedLanguage mode, these checks are skipped, with a `SKIP` line);
+- the release of the cache lock after a fatal error, reads that fail in a Fiber or at memory_limit (no destructor runs
+  under the lock), and `$GLOBALS` in scripts with and without variables at the top level;
+- the scavenger at the end of requests and on writes;
+- a full cache (eviction, and values larger than the empty cache while another process writes), storing in a fragmented
+  cache, and the memory that stored arrays take;
+- `ucache_clear()` of a full cache while other processes read and write;
+- processes killed while they clear, evict, store or replace entries: the cache they leave must be consistent (the
+  checks of a clear, a full pass and replaces print a `NOTE` line when none of their attempts killed the process while
+  it held a lock);
+- ucache.php, which a `php -S` server runs: its Clear All form, which a planted cookie, another origin or a copy of the
+  page cannot use, and its authentication, also with IIS authentication (these checks are skipped, with a `SKIP` line,
+  if ucache.php is not next to test-build.php).
+
 They need a writable temporary folder, free local ports and Windows PowerShell, and every process they start has a
-timeout.
-Without the argument, all the checks with several processes are skipped, with one `SKIP` line. The second run, with
-opcache, goes through the immutable arrays of opcache, which take other paths through the copy code.
+timeout. Without the argument, all the checks with several processes are skipped, with one `SKIP` line. The second run,
+with opcache, goes through the immutable arrays of opcache, which take other paths through the copy code.
 
 ### Debug builds
 
 Builds compiled with `UCACHE_DEBUG` (which defines `UCACHE_TEST`) also have `ucache_lasterror()`, the last internal
-error code of the user cache in this process, and `ucache_runtests()`, which runs the internal self tests (results go
-to the debug trace).
+error code of the user cache in this process, and check their internal assertions: a failed one is written to the debug
+trace (with `ucache.debuglevel` 101 or more) and breaks into a debugger that is attached.
 
 To debug the DLL with symbols, set `GenerateDebugInformation` to `true` in the `Link` settings of
 `php_ucache.vcxproj` on your machine: the build then writes a PDB file next to the DLL and puts its path in the DLL,
@@ -1890,7 +1894,7 @@ so the check of `test-build.php` that the DLL holds no path of the build machine
 | `wincache_ucache_inc()` | `ucache_inc()` |
 | `wincache_ucache_dec()` | `ucache_dec()` |
 | `wincache_ucache_cas()` | `ucache_cas()` |
-| `wincache_ucache_lasterror()`, `wincache_runtests()` (debug builds) | `ucache_lasterror()`, `ucache_runtests()` (debug builds) |
+| `wincache_ucache_lasterror()` (debug builds) | `ucache_lasterror()` (debug builds) |
 | `wincache.ucenabled` | `ucache.enabled` |
 | `wincache.ucachesize` | `ucache.size` |
 | `wincache.enablecli` | `ucache.enablecli` |
@@ -1902,10 +1906,10 @@ so the check of `test-build.php` that the DLL holds no path of the build machine
 
 Not carried over: the file and resolve-path caches (`wincache.fcenabled`, `fcachesize`, `maxfilesize`, `filecount`,
 `chkinterval`, `ttlmax`, `ignorelist`, `fcenabledfilter`, `fcndetect`, `wincache_fcache_*()`, `wincache_rplist_*()`,
-`wincache_fcnotify_*()`, `wincache_refresh_if_changed()`), function rerouting (`wincache.reroute_enabled`), the
-session handler (`session.save_handler = wincache`, `wincache.scachesize`, `wincache_scache_*()`),
-`wincache_lock()` / `wincache_unlock()`, and the debugging setting `wincache.localheap`, with which every value went
-to the process heap and could never be read back.
+`wincache_fcnotify_*()`, `wincache_refresh_if_changed()`), function rerouting (`wincache.reroute_enabled`), the session
+handler (`session.save_handler = wincache`, `wincache.scachesize`, `wincache_scache_*()`), `wincache_lock()` /
+`wincache_unlock()`, the internal self tests of debug builds (`wincache_runtests()`), and the debugging setting
+`wincache.localheap`, with which every value went to the process heap and could never be read back.
 
 UCache does not see data stored by WinCache; it starts with an empty cache.
 
@@ -1938,21 +1942,23 @@ Several of these change what existing code sees.
 - `ucache_get()` and `ucache_delete()` read the elements of a key array that are references (as a `foreach` by
   reference leaves them) as their values. WinCache 2.0.0.8 raised its "key array elements can only be string or long"
   warning and returned false.
-- Deleting, replacing or scavenging an entry does not take time in proportion to the number of entries: deleting every
-  second one of 40,000 entries takes about 0.1 second. WinCache 2.0.0.8 walked the blocks that follow a freed
-  block in shared memory to find the next free one, which took time in proportion to the number of entries: deleting
-  every second one of 10,000 entries took 0.8 seconds, of 100,000 entries minutes, with every process of the pool
-  waiting for the allocator meanwhile.
-- Storing a value takes the same time however fragmented the cache is: free blocks are kept in lists by size, and a
-  block is split only when the rest can hold the smallest block the cache asks for (16 bytes). With 125,000 free
-  blocks too small for them, 2000 sets of a 1000-byte string take about 0.01 second. WinCache 2.0.0.8 kept its free
-  blocks in one list in address order and took the first one large enough, so a write took time in proportion to the
-  free blocks before it; and it split a block when 4 bytes or more were left, leaving free blocks that nothing could
-  use, which every search then went past.
+- Deleting, replacing or scavenging an entry, and storing a value, take the same time however many entries and free
+  blocks the cache holds: free blocks are kept in lists by size, and a block is split only when the rest can hold the
+  smallest block the cache asks for (16 bytes). Deleting every second one of 100,000 entries takes about 0.1 second, and
+  with 125,000 free blocks too small for them, 2000 sets of a 1000-byte string take about 0.01 second. WinCache 2.0.0.8
+  walked the blocks that follow a freed block in shared memory to find the next free one, and kept its free blocks in
+  one list in address order, from which it took the first one large enough, so a delete took time in proportion to the
+  number of entries and a write in proportion to the free blocks before the one it took: deleting every second one of
+  10,000 entries took 0.8 seconds, of 100,000 entries minutes, with every process of the pool waiting for the allocator
+  meanwhile. It also split a block when 4 bytes or more were left, leaving free blocks that nothing could use, which
+  every search then went past.
 - A stored array takes the memory it holds: its tables and strings are counted before they are copied and go in one
   block of that size, each string once however often it occurs. A row of 14 short strings takes about 2.1 KB with the
-  entry, an array of 100 such rows about 100 KB. WinCache 2.0.0.8 put them in chunks of 512 bytes, 1 KB or 4 KB, by
-  the size of the part, which a small table left mostly empty.
+  entry, an array of 100 such rows about 100 KB, and deleting, replacing, clearing or expiring an entry frees a few
+  blocks, after the cache lock has been released (see [Freeing memory](#freeing-memory)). WinCache 2.0.0.8 put the parts
+  of an array in chunks of 512 bytes, 1 KB or 4 KB, by the size of the part, which a small table left mostly empty, and
+  it freed a large entry in time quadratic in its size, while the cache lock was held: for an entry of 100,000 small
+  arrays it took 14-21 s, and every other process waited.
 - `ucache_clear()` holds the cache lock only for a moment: the cache is empty for every process at once, and its
   entries are then freed in batches of at most 32, the lock released between them, so the other processes go on
   reading and writing (with a full cache of 512 MB, a read in another process waited at most 0.6 ms during a clear of
@@ -2083,10 +2089,6 @@ Several of these change what existing code sees.
   the pool until all of them had exited: depending on where the process ended, the list of free blocks could give the
   same memory out twice or crash the next process that used it, every later write could fail, or a hash chain could
   keep pointing to an entry after its memory was freed.
-- Deleting, replacing, clearing or expiring a large entry frees a few blocks (the parts of its arrays lie in one
-  block), after the cache lock has been released (see [Freeing memory](#freeing-memory)). WinCache 2.0.0.8 took time
-  quadratic in its size, while the cache lock was held: for an entry of 100,000 small arrays it took 14-21 s, and
-  every other process waited.
 - Changes that `__sleep()` or `__serialize()` make to a value while `ucache_set()` stores it are not stored: the entry
   holds the value as it was when `ucache_set()` was called, or the call fails. WinCache 2.0.0.8 could store an entry
   made of freed or unrelated data, which crashed or broke every process that read it.
@@ -2104,8 +2106,12 @@ Several of these change what existing code sees.
   `key` means no key (see [ucache_info](#ucache_info)). WinCache 2.0.0.8's `wincache_ucache_info()` always copied
   every entry into the array it returned, so the listing of a cache of many entries ran past memory_limit, and it
   took a null `key` as the empty key, listing no entry.
-- `ucache.php` escapes everything it prints, its Clear All button is a token-protected form instead of a link, and it
-  works on PHP 8 (the hit/miss chart of `wincache.php` called `each()`, which PHP 8 removed). It lists the entries 250
-  per page and copies only those; `wincache.php` copied every entry even to show the first 250 (and showed all of
-  them on one page with its Show all entries link), so on a cache of many entries it failed with the memory_limit
-  error.
+- `ucache.php` escapes everything it prints and works on PHP 8 (the hit/miss chart of `wincache.php` called `each()`,
+  which PHP 8 removed). Its Clear All button posts a form with a token that the page makes from `PASSWORD`, and the page
+  offers it only when `PASSWORD` is neither `ucache` nor empty, with IIS authentication too; any `USE_AUTHENTICATION`
+  other than 0 turns authentication on (see [UCache Statistics Script](#ucache-statistics-script)). `wincache.php`
+  cleared the cache with a link (`?page=4&clc=1`) that another site could make a logged-in browser follow, offered it
+  with IIS authentication whatever the password, and with a `USE_AUTHENTICATION` other than 0 and 1 asked for no
+  authentication but offered it all the same. `ucache.php` lists the entries 250 per page and copies only those;
+  `wincache.php` copied every entry even to show the first 250 (and showed all of them on one page with its Show all
+  entries link), so on a cache of many entries it failed with the memory_limit error.
