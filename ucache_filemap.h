@@ -67,11 +67,15 @@
 /* filemap_information        - LOCAL -  20 bytes */
 /* filemap_context            - LOCAL -  14 bytes (not aligned at 4 bytes) */
 
+/* filemap_information_header.initdone once a process has initialized the information filemap ("DONE" in */
+/* memory). Any other value, 0 in a new filemap, means that it is still to be initialized */
+#define FILEMAP_INFO_INITDONE                   0x454E4F44
+
 typedef struct filemap_information_header filemap_information_header;
 struct filemap_information_header
 {
     size_t                       size;          /* Total size of the memory map */
-    unsigned int                 mapcount;      /* Total times this shared area got mapped */
+    unsigned int                 initdone;      /* FILEMAP_INFO_INITDONE once initialized, else not */
     unsigned short               entry_count;   /* How many other filemap objects are present */
     unsigned short               maxcount;      /* Maximum number of filemaps which can be created */
 };
@@ -95,7 +99,7 @@ struct filemap_context
     unsigned short               id;            /* unique id of this filemap context */
     filemap_information_entry *  infoentry;     /* pointer to filemap information entry */
     HANDLE                       hshmfile;      /* file handle for file backed shared memory */
-    unsigned int                 existing;      /* If value is 1, skip initialization for this */
+    unsigned int                 existing;      /* 1 if the file mapping object already existed (another process had it open), whatever its file holds */
     HANDLE                       hfilemap;      /* handle to memory map object */
     void *                       mapaddr;       /* local adddress mapped for this process */
 };
@@ -107,7 +111,7 @@ struct filemap_information
     char *                       infoname;      /* Name of memory map to store filemap info */
     size_t                       infonlen;      /* Length of name buffer */
     filemap_information_header * header;        /* Mapped memory address to information segment */
-    HANDLE                       hinitdone;     /* event inidicating if memory is initialized */
+    HANDLE                       hinitdone;     /* init mutex (_FILEMAP_INIT), owned while the process creates or opens the information filemap */
     lock_context *               hlock;         /* Lock object for info filemap */
 };
 

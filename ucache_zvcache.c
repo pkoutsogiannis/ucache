@@ -2741,8 +2741,7 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
     unsigned int    cticks     = 0;
     unsigned char   isfirst    = 0;
     unsigned char   islocked   = 0;
-    unsigned int    initmemory = 0;
-    DWORD           ret        = 0;
+    unsigned char   initmemory = 0;
     char *          lockname   = "USERZVALS_CACHE";
     char *          prefix     = NULL;
     size_t          cchprefix  = 0;
@@ -2775,8 +2774,14 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
         goto Finished;
     }
 
+    /* Owned until Finished: whether the cache is initialized or opened is decided once, under this mutex */
     islocked = 1;
 
+    /* isfirst (no other process had the init mutex) only lets a file-backed filemap delete the file of */
+    /* an earlier cache: it does not tell whether the segment is initialized. A process that starts while */
+    /* the last one of the pool closes the cache (zvcache_terminate closes the mutex last), or after a */
+    /* process died owning the mutex, finds the mutex with a new segment, or with the segment of the */
+    /* process that is closing it, or of the one that died */
     result = filemap_initialize(pcache->zvfilemap, FILEMAP_TYPE_USERZVALS, cachekey, cachesize, isfirst);
     if(FAILED(result))
     {
@@ -2786,6 +2791,9 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
     pcache->zvmemaddr = (char *)pcache->zvfilemap->mapaddr;
     segsize = filemap_getsize(pcache->zvfilemap);
     _ASSERT(segsize != 0);
+
+    /* A new segment is initialized; one that existed is too, unless a process completed its */
+    /* initialization (alloc_initialize decides, and sets initmemory then) */
     initmemory = (pcache->zvfilemap->existing == 0);
 
     /* Create allocator for zvcache segment */
@@ -2795,7 +2803,7 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
         goto Finished;
     }
 
-    result = alloc_initialize(pcache->zvalloc, "USERZVALS_SEGMENT", cachekey, pcache->zvfilemap->mapaddr, segsize, initmemory);
+    result = alloc_initialize(pcache->zvalloc, "USERZVALS_SEGMENT", cachekey, pcache->zvfilemap->mapaddr, segsize, &initmemory);
     if(FAILED(result))
     {
         goto Finished;
@@ -2826,44 +2834,39 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
         goto Finished;
     }
 
-    /* Initialize the zvcache_header if this is the first process */
-    if(isfirst)
+    /* Initialize the zvcache_header if alloc_initialize initialized the segment */
+    if(initmemory)
     {
         cticks = GetTickCount();
 
-        if(initmemory)
-        {
-            /* No need to get a write lock as other processes */
-            /* are blocked waiting for hinitdone event */
+        /* No need to get a write lock: the other processes wait for */
+        /* the init mutex, and none uses a segment that is not marked */
+        header->hitcount     = 0;
+        header->misscount    = 0;
+        header->last_owner   = 0;
 
-            /* We can set rdcount to 0 safely as other processes are */
-            /* blocked and this process is right now not using lock */
-            header->hitcount     = 0;
-            header->misscount    = 0;
-            header->last_owner   = 0;
+        header->lscavenge    = cticks;
+        header->scstart      = 0;
+        header->itemcount    = 0;
+        header->valuecount   = zvcount;
+        header->scticks      = 0;
+        header->sccount      = 0;
+        header->scruns       = 0;
+        header->scremoved    = 0;
+        header->scevicted    = 0;
+        header->rcticks      = 0;
+        header->rcfutile     = 0;
+        header->rcwait       = 0;
+        header->rcgen        = 0;
 
-            header->lscavenge    = cticks;
-            header->scstart      = 0;
-            header->itemcount    = 0;
-            header->valuecount   = zvcount;
-            header->scticks      = 0;
-            header->sccount      = 0;
-            header->scruns       = 0;
-            header->scremoved    = 0;
-            header->scevicted    = 0;
-            header->rcticks      = 0;
-            header->rcfutile     = 0;
-            header->rcwait       = 0;
-            header->rcgen        = 0;
-
-            memset((void *)header->values, 0, sizeof(size_t) * zvcount);
-        }
+        memset((void *)header->values, 0, sizeof(size_t) * zvcount);
 
         header->init_ticks = cticks;
         header->mapcount   = 1;
 
-        ReleaseMutex(pcache->hinitdone);
-        islocked = 0;
+        /* Every field of zvcache_header, fields added later included, must be set above: the mark */
+        /* comes last, and the processes that open the segment from then on use it as it is */
+        alloc_initdone(pcache->zvalloc);
     }
     else
     {

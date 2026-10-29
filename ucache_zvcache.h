@@ -124,7 +124,7 @@ struct zvcache_context
 {
     unsigned int      id;                /* unique identifier for cache */
     unsigned short    cachekey;          /* unique cache key used in names */
-    HANDLE            hinitdone;         /* event indicating if memory is initialized */
+    HANDLE            hinitdone;         /* init mutex (ZVCACHE_INIT), owned while the process creates or opens the cache */
 
     zvcopy_context *  incopy;            /* zvcopy context to use for non-array copyin */
     zvcopy_context *  outcopy;           /* zvcopy context to use for all copyout */

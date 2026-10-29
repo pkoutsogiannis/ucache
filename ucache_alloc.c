@@ -573,7 +573,6 @@ int alloc_create(alloc_context ** ppalloc)
 
     /* Initialize member variables */
     palloc->id        = gallocid++;
-    palloc->hinitdone = NULL;
     palloc->memaddr   = NULL;
     palloc->size      = 0;
     palloc->lock      = NULL;
@@ -607,24 +606,28 @@ void alloc_destroy(alloc_context * palloc)
     return;
 }
 
-/* initmemory should be 1 for all non file backed shared memory allocators and 0 */
-/* for file backed shared memory allocators when filemap->existing is set to 1 */
-int alloc_initialize(alloc_context * palloc, char * name, unsigned short cachekey, void * staddr, size_t size, unsigned char initmemory)
+/*
+ * *pinitmemory is 1 for a segment in a file mapping object that the caller has just created, 0 for one that it
+ * opened. An opened segment is used as it is only once a process has completed its initialization (alloc_initdone):
+ * otherwise the process that was initializing it died before it was done, and the segment is initialized again,
+ * which *pinitmemory then tells the caller. The caller holds the init mutex of the cache throughout (ZVCACHE_INIT),
+ * so no other process initializes or opens the segment meanwhile, and no process uses a segment that is not marked
+ */
+int alloc_initialize(alloc_context * palloc, char * name, unsigned short cachekey, void * staddr, size_t size, unsigned char * pinitmemory)
 {
     int                    result   = NONFATAL;
     alloc_segment_header * header   = NULL;
     alloc_free_header *    frestart = NULL;
     alloc_free_header *    fremid   = NULL;
     alloc_free_header *    freend   = NULL;
-    unsigned char          isfirst  = 1;
-    DWORD                  ret      = 0;
 
     dprintverbose("start alloc_initialize");
 
-    _ASSERT(palloc   != NULL);
-    _ASSERT(cachekey != 0);
-    _ASSERT(staddr   != NULL);
-    _ASSERT(size     >  0);
+    _ASSERT(palloc      != NULL);
+    _ASSERT(cachekey    != 0);
+    _ASSERT(staddr      != NULL);
+    _ASSERT(size        >  0);
+    _ASSERT(pinitmemory != NULL);
 
     palloc->memaddr   = staddr;
     palloc->size      = size;
@@ -643,74 +646,71 @@ int alloc_initialize(alloc_context * palloc, char * name, unsigned short cacheke
         goto Finished;
     }
 
-    result = utils_create_init_event(palloc->lock->nameprefix, "ALLOC_INIT", &palloc->hinitdone, &isfirst);
-    if (FAILED(result))
+    /* Opened, but the process that initialized it died before it marked it */
+    if(*pinitmemory == 0 && header->initdone != ALLOC_SEGMENT_INITDONE)
     {
-        result = FATAL_ALLOC_INIT_EVENT;
+        dprintimportant("alloc_initialize: the initialization of segment %s was not completed: initializing it again", palloc->lock->nameprefix);
+        *pinitmemory = 1;
+    }
+
+    /* A safety net: the caller maps a segment it opens at the size it has (filemap_initialize), which */
+    /* the process that initialized it recorded. No cache is better than a free list past the view */
+    if(*pinitmemory == 0 && header->total_size != size)
+    {
+        dprintimportant("alloc_initialize: segment %s records %Iu bytes, not %Iu", palloc->lock->nameprefix, header->total_size, size);
+        result = FATAL_ALLOC_SEGMENT_CORRUPT;
         goto Finished;
     }
 
-    /* If the segment is not initialized, set */
-    /* header on the shared memory segment start */
-    if(isfirst)
+    if(*pinitmemory)
     {
-        /* No need to get a lock as other processes */
-        /* are blocked waiting for hinitdone event */
+        /* No lock needed: the other processes wait for the init mutex of the cache. The segment is */
+        /* not initialized until the caller marks it (alloc_initdone): clear a mark that the file of */
+        /* a file-backed segment can hold from an earlier cache */
+        InterlockedExchange((volatile LONG *)&header->initdone, 0);
 
-        if(initmemory)
-        {
-            /* Put the start header of size 0 */
-            /* followed by the first free block of size free_size */
-            frestart = (alloc_free_header *)(header + 1);
-            fremid   = (alloc_free_header *)((char *)frestart + ALLOC_FREE_BLOCK_OVERHEAD);
+        /* Put the start header of size 0 */
+        /* followed by the first free block of size free_size */
+        frestart = (alloc_free_header *)(header + 1);
+        fremid   = (alloc_free_header *)((char *)frestart + ALLOC_FREE_BLOCK_OVERHEAD);
 
-            /* Set start of doubly circular linked list */
-            frestart->size      = 0;
-            frestart->is_free   = BLOCK_ISFREE_FIRST;
-            frestart->prev_free = 0;
-            frestart->next_free = POINTER_OFFSET(staddr, fremid);
-            *((size_t *)((char *)(frestart + 1))) = frestart->size;
+        /* Set start of doubly circular linked list */
+        frestart->size      = 0;
+        frestart->is_free   = BLOCK_ISFREE_FIRST;
+        frestart->prev_free = 0;
+        frestart->next_free = POINTER_OFFSET(staddr, fremid);
+        *((size_t *)((char *)(frestart + 1))) = frestart->size;
 
-            /* Set mid of doubly linked list */
-            fremid->size      = size - ALLOC_SEGMENT_HEADER_SIZE - ALLOC_FREE_BLOCK_OVERHEAD - ALLOC_FREE_BLOCK_OVERHEAD - ALLOC_FREE_BLOCK_OVERHEAD;
-            freend   = (alloc_free_header *)((char *)fremid + ALLOC_FREE_BLOCK_OVERHEAD + fremid->size);
+        /* Set mid of doubly linked list */
+        fremid->size      = size - ALLOC_SEGMENT_HEADER_SIZE - ALLOC_FREE_BLOCK_OVERHEAD - ALLOC_FREE_BLOCK_OVERHEAD - ALLOC_FREE_BLOCK_OVERHEAD;
+        freend   = (alloc_free_header *)((char *)fremid + ALLOC_FREE_BLOCK_OVERHEAD + fremid->size);
 
-            fremid->is_free   = BLOCK_ISFREE_FREE;
-            fremid->prev_free = POINTER_OFFSET(staddr, frestart);
-            fremid->next_free = POINTER_OFFSET(staddr, freend);
-            *((size_t *)(((char *)(fremid + 1)) + fremid->size)) = fremid->size;
+        fremid->is_free   = BLOCK_ISFREE_FREE;
+        fremid->prev_free = POINTER_OFFSET(staddr, frestart);
+        fremid->next_free = POINTER_OFFSET(staddr, freend);
+        *((size_t *)(((char *)(fremid + 1)) + fremid->size)) = fremid->size;
 
-            freend->size      = 0;
-            freend->is_free   = BLOCK_ISFREE_LAST;
-            freend->next_free = 0;
-            freend->prev_free = POINTER_OFFSET(staddr, fremid);
-            *((size_t *)((char *)(freend + 1))) = freend->size;
+        freend->size      = 0;
+        freend->is_free   = BLOCK_ISFREE_LAST;
+        freend->next_free = 0;
+        freend->prev_free = POINTER_OFFSET(staddr, fremid);
+        *((size_t *)((char *)(freend + 1))) = freend->size;
 
-            /* Set segment header */
-            header->total_size = size;
-            header->free_size  = fremid->size;
+        /* Set segment header. Every field of alloc_segment_header, fields added later included, must */
+        /* be set in this branch: the caller marks the segment after it (alloc_initdone), and the */
+        /* processes that open it from then on use it as it is */
+        header->total_size = size;
+        header->free_size  = fremid->size;
 
-            header->cacheheader1 = 0;
-            header->usedcount    = 0;
-            header->freecount    = 1;
-        }
-
-        header->mapcount = 1;
-    }
-    else
-    {
-        /* TODO: perform integrity check of segment.  If it fails, re-init. */
-        InterlockedIncrement(&header->mapcount);
+        header->cacheheader1 = 0;
+        header->usedcount    = 0;
+        header->freecount    = 1;
+        header->last_owner   = 0;
     }
 
     _ASSERT(SUCCEEDED(result));
 
 Finished:
-
-    if (palloc->hinitdone)
-    {
-        ReleaseMutex(palloc->hinitdone);
-    }
 
     if(FAILED(result))
     {
@@ -726,12 +726,6 @@ Finished:
                 palloc->lock = NULL;
             }
 
-            if(palloc->hinitdone != NULL)
-            {
-                CloseHandle(palloc->hinitdone);
-                palloc->hinitdone = NULL;
-            }
-
             palloc->memaddr = NULL;
             palloc->size    = 0;
             palloc->header  = NULL;
@@ -743,17 +737,24 @@ Finished:
     return result;
 }
 
+/* Marks the segment initialized, once the caller has also initialized what it keeps in it (the cache */
+/* header): the processes that open the segment from then on use it as it is (see alloc_initialize). The */
+/* interlocked write keeps the mark after every write of the initialization */
+void alloc_initdone(alloc_context * palloc)
+{
+    _ASSERT(palloc         != NULL);
+    _ASSERT(palloc->header != NULL);
+
+    InterlockedExchange((volatile LONG *)&palloc->header->initdone, ALLOC_SEGMENT_INITDONE);
+}
+
 void alloc_terminate(alloc_context * palloc)
 {
     dprintverbose("start alloc_terminate");
 
     if(palloc != NULL)
     {
-        if(palloc->header != NULL)
-        {
-            InterlockedDecrement(&palloc->header->mapcount);
-            palloc->header = NULL;
-        }
+        palloc->header = NULL;
 
         if(palloc->lock != NULL)
         {
@@ -761,12 +762,6 @@ void alloc_terminate(alloc_context * palloc)
             lock_destroy(palloc->lock);
 
             palloc->lock = NULL;
-        }
-
-        if(palloc->hinitdone != NULL)
-        {
-            CloseHandle(palloc->hinitdone);
-            palloc->hinitdone = NULL;
         }
 
         palloc->memaddr = NULL;
@@ -1245,6 +1240,7 @@ void alloc_runtest()
 {
     int             result  = NONFATAL;
     void *          memaddr = NULL;
+    unsigned char   initmem = 1;
 
     void *          mem1    = NULL;
     void *          mem2    = NULL;
@@ -1273,7 +1269,7 @@ void alloc_runtest()
         goto Finished;
     }
 
-    result = alloc_initialize(palloc, "ALLOC_TEST", 1, memaddr, 4096, 1);
+    result = alloc_initialize(palloc, "ALLOC_TEST", 1, memaddr, 4096, &initmem);
     if(FAILED(result))
     {
         goto Finished;

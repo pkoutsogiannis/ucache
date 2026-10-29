@@ -509,6 +509,13 @@ int utils_create_init_event(
             result = FATAL_ALLOC_INIT_EVENT;
             goto Finished;
         }
+
+        /* The mutex is this process's all the same. The callers do not go by who owned it: they check */
+        /* the memory the process that died left (its init mark), as after one that completed */
+        if (ret == WAIT_ABANDONED)
+        {
+            dprintimportant("Acquired abandoned mutex %s: the process that owned it died", evtname);
+        }
     }
 
     *pinit_event = hinitdone;

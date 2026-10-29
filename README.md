@@ -285,8 +285,9 @@ The application still needs arguments that differ from those of the other applic
 The processes that share a cache must use the same `ucache.*` settings. Two sites of one pool that use different
 FastCGI applications still share the pool's cache: give them different `ucache.namesalt` values if their settings
 differ. php-cgi reads the settings when it starts: after changing them, recycle the pool. After changing
-`ucache.size`, stop the pool and start it again instead: an overlapped recycle (the IIS default) starts the new
-processes while the old ones still run, and they would open the cache the old ones created (see
+`ucache.size`, stop the pool and, once its php-cgi processes have exited, start it again instead: an overlapped
+recycle (the IIS default) starts the new processes while the old ones still run, and the new processes would open the
+cache of the old ones, at its old size, for as long as old and new processes overlap (see
 [Installation](#installation)).
 `phpinfo()` on a site shows the settings its processes use.
 
@@ -379,7 +380,9 @@ application pool ids do not share a cache, nor does a process with an applicatio
 grouped by their parent process. Only processes of the same Windows session share a cache, since the names of its
 shared memory and synchronization objects have no `Global\` prefix: IIS runs every application pool in session 0, so
 a CLI script run in a Remote Desktop session does not see the cache of a pool. There is no private per-process cache.
-The cache is not persistent: it starts empty when the first process of a group creates it.
+The cache is not persistent: it starts empty when the first process of a group creates it, and lasts while a process
+of the group has it open. A process that starts while the last one is still closing it opens that cache, with its
+entries and at its size.
 
 ### Values
 
@@ -1746,10 +1749,13 @@ cache alive while other processes use it, and `php -S` servers on 127.0.0.1 stan
 pool, which survive the fatal error of a request. They check what a single process cannot, such as a cache shared by
 several processes and which processes share one (`ucache.apppoolid`, `APP_POOL_ID`, the parent process), the settings
 read at startup (`ucache.size`, `ucache.prefix`) and a cache that cannot be created, the release of the cache lock
-after a fatal error and the scavenger at the end of requests. They need a writable temporary folder and free local
-ports, and every process they start has a timeout. Without the argument these checks are skipped, with one `SKIP`
-line. The second run, with opcache, goes through the immutable arrays of opcache, which take other paths through the
-copy code.
+after a fatal error, the scavenger at the end of requests, and the processes that start while the last process of
+their pool closes the cache or after one died while it created the cache (a Windows PowerShell script holds named
+objects of the cache as such processes find them; without `powershell.exe`, or where it runs in ConstrainedLanguage
+mode, these checks are skipped, with a `SKIP` line). They need a writable temporary folder, free local ports and
+Windows PowerShell, and every process they start has a timeout. Without the argument, all the checks with several
+processes are skipped, with one `SKIP` line. The second run, with opcache, goes through the immutable arrays of
+opcache, which take other paths through the copy code.
 
 ### Debug builds
 
@@ -1859,6 +1865,16 @@ Several of these change what existing code sees.
   of using `APP_POOL_ID` or the parent process; put the file of an empty `wincache.filemapdir` in the root of the
   current drive; added an empty `wincache.namesalt` to the names, which kept those processes apart from the ones
   without the setting; and backed with a file the caches of processes whose parent process id was above 99999.
+- A process that starts while the last process of its pool is closing the cache, or after a process died while it
+  created the cache, gets a working cache. Under the init mutex of the cache, it initializes the shared memory if the
+  memory is new or lacks the mark that its initialization completed (written last, so a process that dies before then
+  leaves the memory unmarked), and otherwise uses it as it is, at the size it has; the table of the caches of the pool
+  is decided the same way. WinCache 2.0.0.8 went by which of its init mutexes already existed, which such a process
+  could get wrong: its first lookup of a key could then end it with a division by zero, as it could in every process
+  that opened the cache while it ran; or it initialized the memory allocator again under the entries of the cache,
+  after which entries could be lost and calls could crash (with a larger `wincache.ucachesize` than the processes that
+  were ending, it wrote past the end of their memory); or it ran without a cache, every function returning false, as
+  did every process of the pool that started while it ran.
 - Reading an array with `ucache_get()` does not leak request memory. WinCache 2.0.0.8 leaked about 1.2 KB per read,
   until the end of the request.
 - A reference that only the fetched value holds has reference count 1, as in any PHP array where no variable shares

@@ -61,10 +61,14 @@ typedef void   (*fn_free)(void * palloc, size_t hoffset, void * addr);
 /* TBD? Right now I am doing a custom implementation which will probably work */
 /* best for the problem at hand. Try a quick fit memory allocator later. */
 
+/* alloc_segment_header.initdone once a process has initialized the segment and what its caller keeps in it */
+/* ("DONE" in memory). Any other value, 0 in a new segment, means that it is still to be initialized */
+#define ALLOC_SEGMENT_INITDONE          0x454E4F44
+
 typedef struct alloc_segment_header alloc_segment_header;
 struct alloc_segment_header
 {
-    unsigned int mapcount;    /* How many processes mapped this segment */
+    unsigned int initdone;    /* ALLOC_SEGMENT_INITDONE once initialized (alloc_initdone), else not */
     unsigned int usedcount;   /* Number of used blocks. Determine fragmentation */
     unsigned int freecount;   /* Number of free blocks Determine when to defrag */
     unsigned int last_owner;  /* PID of last process to acquire the lock for this segment */
@@ -118,7 +122,6 @@ typedef struct alloc_context alloc_context;
 struct alloc_context
 {
     unsigned short         id;        /* Unique id of this alloc_context */
-    HANDLE                 hinitdone; /* event to indicate if memory is initialized */
     void *                 memaddr;   /* Shared memory segment which is manipulated */
     size_t                 size;      /* Size of memory segment to be allocated */
     lock_context *         lock;      /* Lock to acquire before manipulating segment */
@@ -137,7 +140,8 @@ struct alloc_info
 
 extern int    alloc_create(alloc_context ** ppalloc);
 extern void   alloc_destroy(alloc_context * palloc);
-extern int    alloc_initialize(alloc_context * palloc, char * name, unsigned short cachekey, void * staddr, size_t size, unsigned char initmemory);
+extern int    alloc_initialize(alloc_context * palloc, char * name, unsigned short cachekey, void * staddr, size_t size, unsigned char * pinitmemory);
+extern void   alloc_initdone(alloc_context * palloc);
 extern void   alloc_terminate(alloc_context * palloc);
 extern int    alloc_create_mpool(alloc_context * palloc, size_t * phoffset);
 extern void   alloc_free_mpool(alloc_context * palloc, size_t hoffset);

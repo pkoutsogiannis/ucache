@@ -438,7 +438,6 @@ static void startup_failure_warning(int result)
         case FATAL_FILEMAP_CREATEFILE:
         case FATAL_FILEMAP_CREATEFILEMAP:
         case FATAL_FILEMAP_REVERT_FAILED:
-        case FATAL_ALLOC_INIT_EVENT:
         case FATAL_ZVCACHE_INIT_EVENT:
             haswinerror = (winerror != 0);
             break;

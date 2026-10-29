@@ -20,6 +20,9 @@
  *   ucache.apppoolid or APP_POOL_ID per group), php -S servers among them. Without the argument
  *   they are skipped, with one "SKIP:" line. One of the servers runs copies of ucache.php, read from
  *   the folder of test-build.php (its checks are skipped, with a "SKIP:" line, if it is not there).
+ *   Windows PowerShell (%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe) holds named
+ *   objects of caches for the checks of who initializes a cache (they are skipped, with a "SKIP:"
+ *   line, without it or where it runs in ConstrainedLanguage mode).
  *
  * Prints one line per check ("OK: ..." or "FAIL: ...", or "SKIP: ..." for checks that cannot run) and
  * exits with 1 if any check failed.
@@ -2193,9 +2196,11 @@ unset($tooBig);
 /*
  * Several processes. With the path of the DLL under test as the first argument, these checks start other
  * php.exe processes with that DLL, each group on a cache of its own (a unique ucache.apppoolid): a holder
- * keeps a cache alive while other processes use it, and php -S servers stand for the FastCGI processes of
- * a pool, which survive the fatal error of a request. Every process is bounded by a timeout (a hang is a
- * failure, and the process is ended), and all of them are ended at the end.
+ * keeps a cache alive while other processes use it, php -S servers stand for the FastCGI processes of
+ * a pool, which survive the fatal error of a request, and a Windows PowerShell script holds named objects
+ * of caches as the processes that start while the last one of a pool closes its cache, or after one died
+ * creating it, find them. Every process is bounded by a timeout (a hang is a failure, and the process is
+ * ended), and all of them are ended at the end.
  */
 
 /* Quotes one argument of a Windows command line (the rules of CommandLineToArgvW and of the C runtime) */
@@ -2244,8 +2249,8 @@ function child_php_args($pool, array $ini, $script = null, array $scriptArgs = [
     return array_merge($args, $scriptArgs);
 }
 
-/* Starts PHP_BINARY with $args; its stdin is a pipe, its stdout and stderr go to files of the work directory */
-function child_start($name, array $args)
+/* Starts PHP_BINARY (or $program) with $args; its stdin is a pipe, its stdout and stderr go to files of the work directory */
+function child_start($name, array $args, $program = null)
 {
     global $children, $childDir;
 
@@ -2257,7 +2262,7 @@ function child_start($name, array $args)
     $child->proc  = null;
     $child->stdin = null;
 
-    $command = implode(' ', array_map('cmd_arg', array_merge([PHP_BINARY], $args)));
+    $command = implode(' ', array_map('cmd_arg', array_merge([($program === null) ? PHP_BINARY : $program], $args)));
     $proc = @proc_open($command, [0 => ['pipe', 'r'], 1 => ['file', $child->out, 'w'], 2 => ['file', $child->err, 'w']], $pipes,
                        $childDir, null, ['bypass_shell' => true]);
     if (is_resource($proc)) {
@@ -2500,6 +2505,19 @@ function limit_exit_ok($exit)
     return (PHP_VERSION_ID >= 80000) ? $exit === 255 : ($exit === 1 || $exit === 255);
 }
 
+/* The names of the kernel objects of the cache of pool id $pool (without ucache.namesalt), as the extension builds them:
+   the init mutex and the shared memory of the cache, and those of the table of the caches of the pool. The group in the
+   names is "P" and the first 16 hex digits of the SHA-1 of the id, A-Z taken as a-z */
+function ucache_object_names($pool)
+{
+    $versions = PHP_MAJOR_VERSION . '.' . PHP_MINOR_VERSION . '_' . phpversion('ucache');
+    $group = 'P' . substr(sha1(strtr($pool, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')), 0, 16);
+    $info = "UCACHE_{$versions}_FILEMAP_INFORMATION_$group";
+
+    return ['init' => "UCACHE_USERZVALS_CACHE_{$versions}_1_0_{$group}_x64_ZVCACHE_INIT", 'section' => "UCACHE_{$versions}_FILEMAP_USERZVALS_1_{$group}_x64",
+            'infoinit' => "{$info}_FILEMAP_INIT", 'info' => $info];
+}
+
 $children = [];
 $childDir = null;
 $childDll = isset($argv[1]) ? $argv[1] : null;
@@ -2566,6 +2584,8 @@ CHILDSCRIPT
 <?php
 /* A process of the checks with several processes; argv[1] says what it does. Prints "RESULT " and its
    serialize()d result in base64. */
+$start = microtime(true);   /* after the startup of the extension, which waits for the init mutexes */
+
 class UcacheChildPoint
 {
     public $x;
@@ -3421,6 +3441,35 @@ switch ($argv[1]) {
             $result[$call] = [$value, ucache_meminfo()['memory_free'] - $before];
         }
         $result['entries left'] = ucache_info(true)['total_item_count'];
+        break;
+
+    case 'roundtrip':
+        /* A value stored and read back: [stored, read back, entries, memory_total, microtime at the start of the script] */
+        $set = ucache_set('roundtrip', [1, 'two']);
+        $info = ucache_info(true);
+        $memory = ucache_meminfo();
+        $result = [$set, ucache_get('roundtrip'), is_array($info) ? $info['total_item_count'] : $info,
+                   is_array($memory) ? $memory['memory_total'] : $memory, $start];
+        break;
+
+    case 'churn':
+        /* Reads argv[2], stores, reads back and deletes 2000 entries, then reads argv[2] again, and deletes it if argv[3] is
+           'delete': [first read, entries that did not read back, second read, deleted (null if not asked), memory_total,
+           microtime at the start of the script]. In a cache whose allocator was initialized again under its entries, the new
+           entries would take the memory of the old ones */
+        $first = ucache_get($argv[2]);
+        $bad = 0;
+        for ($i = 0; $i < 2000; $i++) {
+            ucache_set("churn$i", str_repeat(chr(65 + $i % 26), 100 + $i % 200));
+        }
+        for ($i = 0; $i < 2000; $i++) {
+            $bad += (ucache_get("churn$i") === str_repeat(chr(65 + $i % 26), 100 + $i % 200)) ? 0 : 1;
+            ucache_delete("churn$i");
+        }
+        $second = ucache_get($argv[2]);
+        $memory = ucache_meminfo();
+        $result = [$first, $bad, $second, ($argv[3] === 'delete') ? ucache_delete($argv[2]) : null,
+                   is_array($memory) ? $memory['memory_total'] : $memory, $start];
         break;
 }
 echo "RESULT ", base64_encode(serialize($result)), "\n";
@@ -4331,6 +4380,207 @@ CHILDSCRIPT
     check('without a pool id (an empty ucache.apppoolid, no APP_POOL_ID) the processes of one parent process share a cache, which ucache.filemapdir does not back with a file',
           $holdersOk && $seen['empty, parent'] === true && $dirFiles === [],
           ['holders' => $holderResults, 'empty ucache.apppoolid' => $seen['empty, parent'], 'files in ucache.filemapdir' => $dirFiles]);
+
+    /* Which process initializes the shared memory of a cache, and which one uses it as it is. A process decides it under the
+       init mutex of the cache (for the table of the caches of its pool, under the init mutex of the table), from the memory
+       itself: memory that another process initialized is used as it is, at the size it has, and new memory, or memory without
+       the mark that its initialization completed, is initialized. WinCache 2.0.0.8 went by which mutexes existed, which a
+       process that started while the last one of its pool closed the cache, or after one died while it created the cache,
+       could get wrong. A Windows PowerShell script (given with -EncodedCommand, to which no execution policy applies) holds
+       objects of these caches by name, as such processes find them. The names self-check opens the four objects of a running
+       cache, and each process that waits for a mutex that the script owns must start its script after the script released
+       the mutex or was ended, so that names that drifted from the extension's fail these checks instead of passing them. All
+       these processes run at the same time */
+    $powershell = getenv('SystemRoot') . '\System32\WindowsPowerShell\v1.0\powershell.exe';
+    $objectsScript = <<<'POWERSHELL'
+# Holds named objects of caches as the processes of their pools do. It first prints its language mode, and ends at once
+# in another mode than FullLanguage: the ConstrainedLanguage mode of a locked-down Windows does not let it use these .NET
+# types. Then it reads commands from stdin, one per line, and answers each on stdout: "section <name> <bytes>" creates a
+# section of that size, zeroed (it must not exist), "open-section <name>" and "open-mutex <name>" open objects that must
+# exist, "own <name>" creates or opens a mutex and owns it, "release" releases the mutexes it owns and keeps them open,
+# and "ready" prints READY. A command that fails is answered with "FAILED <command>: <message>". The test ends it with
+# TerminateProcess, as IIS ends a FastCGI process: the mutexes that it still owns are then abandoned
+$ProgressPreference = 'SilentlyContinue'
+$language = $ExecutionContext.SessionState.LanguageMode
+"LANGUAGE $language"
+if ($language -ne 'FullLanguage') { exit }
+$out = [Console]::Out
+$held = New-Object System.Collections.ArrayList
+$owned = New-Object System.Collections.ArrayList
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+    $words = $line.Split(' ')
+    try {
+        switch ($words[0]) {
+            'section' {
+                [void]$held.Add([System.IO.MemoryMappedFiles.MemoryMappedFile]::CreateNew($words[1], [long]$words[2]))
+                $out.WriteLine("CREATED $($words[1])")
+            }
+            'open-section' {
+                [void]$held.Add([System.IO.MemoryMappedFiles.MemoryMappedFile]::OpenExisting($words[1]))
+                $out.WriteLine("OPENED $($words[1])")
+            }
+            'open-mutex' {
+                [void]$held.Add([System.Threading.Mutex]::OpenExisting($words[1]))
+                $out.WriteLine("OPENED $($words[1])")
+            }
+            'own' {
+                $created = $false
+                $mutex = New-Object System.Threading.Mutex($true, $words[1], [ref]$created)
+                if (-not $created) {
+                    try { [void]$mutex.WaitOne() } catch [System.Threading.AbandonedMutexException] { }
+                }
+                [void]$held.Add($mutex)
+                [void]$owned.Add($mutex)
+                $out.WriteLine("OWNED $($words[1]) created=$created")
+            }
+            'release' {
+                foreach ($mutex in $owned) { $mutex.ReleaseMutex() }
+                $owned.Clear()
+                $out.WriteLine('RELEASED')
+            }
+            'ready' { $out.WriteLine('READY') }
+        }
+    } catch {
+        $out.WriteLine("FAILED ${line}: $($_.Exception.Message)")
+    }
+    $out.Flush()
+}
+POWERSHELL;
+    $irLanguage = null;
+    if (is_file($powershell)) {
+        /* -EncodedCommand takes the script in UTF-16LE, which the ASCII script becomes with a 0 byte after each character */
+        $psArgs = ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', base64_encode(preg_replace('/./s', "\$0\0", $objectsScript))];
+        $irNames = [];
+        foreach (['n', 'h', 't', 'u', 'v', 's', 'z', 'a', 'b', 'l'] as $suffix) {
+            $irNames[$suffix] = ucache_object_names($poolBase . 'ir' . $suffix);
+        }
+
+        /* Caches in use (n, z, l): the names self-check opens the objects of n, then the memory of n and z outlives their last
+           process, and l stays in use */
+        $irHolders = ['n' => child_start('ir-names-holder', child_php_args($poolBase . 'irn', [], $holderScript, ['kept', 'kept value'])),
+                      'z' => child_start('ir-size-holder', child_php_args($poolBase . 'irz', ['ucache.size' => '16'], $holderScript, ['kept', 'kept value'])),
+                      'l' => child_start('ir-live-holder', child_php_args($poolBase . 'irl', [], $holderScript, ['kept', 'kept value']))];
+        /* The script that releases the mutexes it owns, and the one that dies owning them */
+        $irHold = child_start('ir-hold', $psArgs, $powershell);
+        $irAbandon = child_start('ir-abandon', $psArgs, $powershell);
+        /* An init mutex without the memory (h: of a cache, t: of a table of caches), memory without the mark (u: of a cache, which
+           the table has no entry for, as after the death of the process that created it; v: of a table, at least as large as the
+           extension's, 8896 bytes), and the memory of a cache of 3 MB (s) */
+        foreach (['own ' . $irNames['h']['init'], 'own ' . $irNames['t']['infoinit'],
+                  'section ' . $irNames['u']['section'] . ' 8388608', 'own ' . $irNames['u']['init'],
+                  'section ' . $irNames['v']['info'] . ' 65536', 'own ' . $irNames['v']['infoinit'],
+                  'section ' . $irNames['s']['section'] . ' 3145728'] as $line) {
+            child_send($irHold, $line);
+        }
+        /* Init mutexes without the memory, which the script that dies owns (a: of a cache, b: of a table) */
+        child_send($irAbandon, 'own ' . $irNames['a']['init']);
+        child_send($irAbandon, 'own ' . $irNames['b']['infoinit']);
+        /* '' if the script printed nothing: the checks then fail, with what it printed */
+        $irLanguage = (child_wait_for($irHold, '/^LANGUAGE \w+/m', 30) && preg_match('/^LANGUAGE (\w+)/m', child_output($irHold), $match) === 1)
+                      ? $match[1] : '';
+    }
+    if ($irLanguage === null) {
+        echo "SKIP: the checks of who initializes the shared memory of a cache (they need Windows PowerShell, $powershell)\n";
+    } elseif ($irLanguage !== 'FullLanguage' && $irLanguage !== '') {
+        echo "SKIP: the checks of who initializes the shared memory of a cache (Windows PowerShell runs in $irLanguage mode here, in which their script cannot use the .NET types it needs)\n";
+        foreach (array_merge(array_values($irHolders), [$irHold, $irAbandon]) as $child) {
+            child_kill($child);
+        }
+    } else {
+        $irHoldersReady = child_wait_for($irHolders['n'], '/^READY/m', 30) && child_wait_for($irHolders['z'], '/^READY/m', 30)
+                          && child_wait_for($irHolders['l'], '/^READY/m', 30);
+        /* The names self-check (n); the memory and the init mutex of n and z; the init mutexes of l and its table, in use */
+        foreach (['open-mutex ' . $irNames['n']['init'], 'open-mutex ' . $irNames['n']['infoinit'], 'open-section ' . $irNames['n']['section'],
+                  'open-section ' . $irNames['n']['info'], 'own ' . $irNames['n']['init'],
+                  'open-section ' . $irNames['z']['section'], 'own ' . $irNames['z']['init'], 'ready'] as $line) {
+            child_send($irHold, $line);
+        }
+        foreach (['own ' . $irNames['l']['infoinit'], 'own ' . $irNames['l']['init'], 'ready'] as $line) {
+            child_send($irAbandon, $line);
+        }
+        $irScriptsReady = child_wait_for($irHold, '/^READY/m', 30) && child_wait_for($irAbandon, '/^READY/m', 30);
+        /* The last process of n and of z ends */
+        $irHolderResults = [];
+        foreach (['n', 'z'] as $suffix) {
+            child_send($irHolders[$suffix], 'kept');
+            $irHolderResults[$suffix] = [child_finish($irHolders[$suffix], 30), child_result($irHolders[$suffix])];
+        }
+
+        $irClients = ['h' => child_start('ir-hold-client', child_php_args($poolBase . 'irh', [], $clientScript, ['roundtrip'])),
+                      't' => child_start('ir-hold-table-client', child_php_args($poolBase . 'irt', [], $clientScript, ['roundtrip'])),
+                      'u' => child_start('ir-unmarked-client', child_php_args($poolBase . 'iru', [], $clientScript, ['roundtrip'])),
+                      'v' => child_start('ir-unmarked-table-client', child_php_args($poolBase . 'irv', [], $clientScript, ['roundtrip'])),
+                      's' => child_start('ir-small-client', child_php_args($poolBase . 'irs', [], $clientScript, ['roundtrip'])),
+                      'a' => child_start('ir-abandoned-client', child_php_args($poolBase . 'ira', [], $clientScript, ['roundtrip'])),
+                      'b' => child_start('ir-abandoned-table-client', child_php_args($poolBase . 'irb', [], $clientScript, ['roundtrip'])),
+                      'n' => child_start('ir-kept-client', child_php_args($poolBase . 'irn', [], $clientScript, ['churn', 'kept', 'delete'])),
+                      'z' => child_start('ir-kept-size-client', child_php_args($poolBase . 'irz', ['ucache.size' => '32'], $clientScript, ['churn', 'kept', 'delete'])),
+                      'l' => child_start('ir-live-client', child_php_args($poolBase . 'irl', [], $clientScript, ['churn', 'kept', 'keep']))];
+        /* About a second later, while they wait for the mutexes, one script releases the ones it owns, and the other one is ended */
+        usleep(1000000);
+        $irReleased = microtime(true);
+        child_send($irHold, 'release');
+        child_kill($irAbandon);
+        $irResults = [];
+        foreach ($irClients as $suffix => $client) {
+            $exit = child_finish($client, 60);
+            $irResults[$suffix] = ['exit code' => $exit, 'result' => child_result($client), 'output' => ($exit === 0) ? '' : child_tail($client)];
+        }
+        /* The process that uses l still reads its entry */
+        child_send($irHolders['l'], 'kept');
+        $irHolderResults['l'] = [child_finish($irHolders['l'], 30), child_result($irHolders['l'])];
+        $irOutput = child_output($irHold);
+        $irScripts = ['scripts (output)' => [child_tail($irHold), child_tail($irAbandon)]];
+        child_kill($irHold);
+
+        /* Whether a client's result is as expected (its microtime at the start of the script left out), and came after the release
+           if it waited for a mutex */
+        $irOk = function ($suffix, array $expected, $waited) use ($irResults, $irReleased) {
+            $result = $irResults[$suffix]['result'];
+            return $irResults[$suffix]['exit code'] === 0 && is_array($result) && array_slice($result, 0, -1) === $expected
+                   && (!$waited || end($result) >= $irReleased);
+        };
+        $irDetail = function (array $suffixes) use ($irResults, $irReleased, $irScripts) {
+            $detail = [];
+            foreach ($suffixes as $suffix) {
+                $detail[$suffix] = $irResults[$suffix];
+                if (is_array($irResults[$suffix]['result'])) {
+                    $detail[$suffix]['started after the release by (s)'] = round(end($irResults[$suffix]['result']) - $irReleased, 3);
+                }
+            }
+            return $detail + $irScripts;
+        };
+        $irOpened = true;
+        foreach (['init', 'infoinit', 'section', 'info'] as $object) {
+            $irOpened = $irOpened && preg_match('/^OPENED ' . preg_quote($irNames['n'][$object], '/') . '\r?$/m', $irOutput) === 1;
+        }
+        $mb = 1024 * 1024;
+        $irRoundtrip = [true, [1, 'two'], 1, 8 * $mb];
+
+        check('the names of the kernel objects of a cache that the checks below build are the extension\'s: the init mutexes and the shared memory of a running cache and of its pool\'s table of caches open by those names',
+              $irHoldersReady && $irScriptsReady && $irOpened, ['names' => $irNames['n']] + $irScripts);
+        check('a process that finds the init mutex of its cache without the cache (as while the last process of the pool closes it) waits for the mutex and creates the cache',
+              $irOk('h', $irRoundtrip, true), $irDetail(['h']));
+        check('a process that finds the init mutex of the table of its pool\'s caches without the table waits for the mutex and creates the table',
+              $irOk('t', $irRoundtrip, true), $irDetail(['t']));
+        check('a process that finds the memory of its cache without the mark that its initialization completed (a process died while it initialized it) initializes it',
+              $irOk('u', $irRoundtrip, true), $irDetail(['u']));
+        check('a process that finds the table of its pool\'s caches without that mark initializes it',
+              $irOk('v', $irRoundtrip, true), $irDetail(['v']));
+        check('a process that finds the memory of its cache with another size (3 MB, against its ucache.size of 8) uses the memory at that size',
+              $irOk('s', [true, [1, 'two'], 1, 3 * $mb], false), $irDetail(['s']));
+        check('a process that gets the init mutex of its cache, or of the table of caches, from a process that died owning it creates the cache',
+              $irOk('a', $irRoundtrip, true) && $irOk('b', $irRoundtrip, true), $irDetail(['a', 'b']));
+        check('a process that opens the cache while its memory outlives the last process of the pool uses it as it is: its entries stay, and new entries do not take their memory',
+              $irHolderResults['n'] === [0, serialize('kept value')] && $irOk('n', ['kept value', 0, 'kept value', true, 8 * $mb], true),
+              ['holder (exit code, result)' => $irHolderResults['n']] + $irDetail(['n']));
+        check('the same with another ucache.size (32 against 16): the process uses the cache at the size it has',
+              $irHolderResults['z'] === [0, serialize('kept value')] && $irOk('z', ['kept value', 0, 'kept value', true, 16 * $mb], true),
+              ['holder (exit code, result)' => $irHolderResults['z']] + $irDetail(['z']));
+        check('a process that gets the init mutexes of a cache in use, and of its table, from a process that died owning them uses the cache as it is: its entries stay, for it and for the process that uses the cache',
+              $irOk('l', ['kept value', 0, 'kept value', null, 8 * $mb], true) && $irHolderResults['l'] === [0, serialize('kept value')],
+              ['holder (exit code, result)' => $irHolderResults['l']] + $irDetail(['l']));
+    }
 
     /* ucache.php, from copies that php -S runs as a web server would: stats.php with a password of its own, stats-copy.php
        the same page in another file, stats-auth2.php with USE_AUTHENTICATION 2, and stats-default.php as it comes, with the

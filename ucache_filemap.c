@@ -276,12 +276,12 @@ static int create_file_mapping(
     if(shmfilepath != NULL)
     {
         _ASSERT(pshmfile     != NULL);
-        _ASSERT(pexisting    != NULL);
         _ASSERT(*shmfilepath != '\0');
 
         if (isfirst)
         {
-            /* Delete the file, since we're creating it for the first time */
+            /* Delete the file of an earlier cache: the caller created the init mutex of the cache, */
+            /* so no process has the cache open (they keep the mutex open until they close it) */
             (void)DeleteFile(shmfilepath);
         }
 
@@ -295,31 +295,10 @@ static int create_file_mapping(
             goto Finished;
         }
 
-        /* If file already exists, and is valid, mark existing so that initialization is skipped */
-        if(GetLastError() == ERROR_ALREADY_EXISTS)
-        {
-            BY_HANDLE_FILE_INFORMATION byFileInfo;
-
-            if (!GetFileInformationByHandle(filehandle, &byFileInfo))
-            {
-                dprintimportant("error while validating existing file: %d", GetLastError());
-                goto Finished;
-            }
-
-            if (byFileInfo.nFileSizeHigh == li.HighPart &&
-                byFileInfo.nFileSizeLow  == li.LowPart)
-            {
-                isexisting = 1;
-            }
-            else
-            {
-                dprintverbose("existing file size is incorrect.  re-initalizing");
-            }
-
-            /* TBD?? If file never got initialized properly, mark isexisting = 0 */
-            /* TBD?? Detect memory corruption. Mark isexisting = 0 */
-        }
-        else
+        /* A new file gets the ACL of the application pool. What an existing file holds does not matter: */
+        /* a new file mapping object over it is initialized (see isexisting below), and one that exists */
+        /* holds the memory of the processes that have it open */
+        if(GetLastError() != ERROR_ALREADY_EXISTS)
         {
             int aclRet = utils_set_apppool_acl(shmfilepath);
 
@@ -339,7 +318,9 @@ static int create_file_mapping(
         }
     }
 
-    /* Call CreateFileMapping to create new or open existing file mapping object */
+    /* Call CreateFileMapping to create new or open existing file mapping object. The last error is */
+    /* cleared first, so that the ERROR_ALREADY_EXISTS of CreateFile cannot be taken for its own */
+    SetLastError(ERROR_SUCCESS);
     maphandle = CreateFileMapping(filehandle, NULL, PAGE_READWRITE, li.HighPart, li.LowPart, name);
 
     /* handle value null means a fatal error */
@@ -351,12 +332,19 @@ static int create_file_mapping(
         goto Finished;
     }
 
+    /* Whether the object already existed: only then can its memory hold what another process initialized, */
+    /* with the size that process gave it. A new object is to be initialized, whatever its file holds */
+    isexisting = (GetLastError() == ERROR_ALREADY_EXISTS);
+
     if(shmfilepath != NULL)
     {
-        _ASSERT(filehandle != INVALID_HANDLE_VALUE);
-
+        /* INVALID_HANDLE_VALUE if the ACL could not be set: the object is then in the paging file */
         *pshmfile  = filehandle;
         filehandle = INVALID_HANDLE_VALUE;
+    }
+
+    if(pexisting != NULL)
+    {
         *pexisting = isexisting;
     }
 
@@ -419,7 +407,6 @@ static int create_information_filemap(filemap_information ** ppinfo)
     unsigned char               isfirst     = 1;
     unsigned char               islocked    = 0;
     unsigned int                isexisting  = 0;
-    DWORD                       ret         = 0;
 
     dprintverbose("start create_information_filemap");
 
@@ -502,16 +489,11 @@ static int create_information_filemap(filemap_information ** ppinfo)
     /* Adding two aligned qwords sizes will produce qword */
     size = FILEMAP_INFO_HEADER_SIZE + (FILEMAP_MAX_COUNT * FILEMAP_INFO_ENTRY_SIZE);
 
-    /* shmfilepath = NULL, pfilehandle = NULL, pexisting = NULL */
+    /* In the paging file: shmfilepath = NULL, pshmfile = NULL */
     result = create_file_mapping(pinfo->infoname, NULL, isfirst, size, NULL, &isexisting, &pinfo->hinfomap);
     if(FAILED(result))
     {
         goto Finished;
-    }
-
-    if (!isfirst && isexisting)
-    {
-        dprintimportant("create_information_filemap[%d]: Warning: We thought we were first, but we found an existing file.\n", UCG(fmapgdata)->pid);
     }
 
     /* We have the handle to information file mapping object */
@@ -523,16 +505,24 @@ static int create_information_filemap(filemap_information ** ppinfo)
         goto Finished;
     }
 
-    /* Initialize if its not already initialized */
-    if(isfirst)
+    /*
+     * Initialize it unless it existed and a process completed its initialization; the init mutex, which this
+     * process owns until Finished, keeps the other processes waiting meanwhile. That this process created the
+     * mutex (isfirst) does not tell: a process that starts while the last one closes the filemap (which
+     * destroy_information_filemap does before it closes the mutex), or after a process died owning the mutex,
+     * finds the mutex and a new filemap; and a process killed while it initialized the filemap leaves one that
+     * exists without the mark. No process uses a filemap without the mark
+     */
+    if(!isexisting || pinfo->header->initdone != FILEMAP_INFO_INITDONE)
     {
+        if(isexisting)
+        {
+            dprintimportant("create_information_filemap: the initialization of %s was not completed: initializing it again", pinfo->infoname);
+        }
+
         lock_lock(pinfo->hlock);
 
-        /* This is the first process which got the pointer */
-        /* to information filemap. This should initialize header. */
-        /* Other processes will be blocked trying to get writelock */
         pinfo->header->size        = size;
-        pinfo->header->mapcount    = 1;
         pinfo->header->maxcount    = FILEMAP_MAX_COUNT;
         pinfo->header->entry_count = 0;
 
@@ -545,15 +535,10 @@ static int create_information_filemap(filemap_information ** ppinfo)
             pentry = (filemap_information_entry *)((char *)pentry + FILEMAP_INFO_ENTRY_SIZE);
         }
 
-        ReleaseMutex(pinfo->hinitdone);
-        islocked = 0;
+        /* Last, interlocked so that it follows every write above */
+        InterlockedExchange((volatile LONG *)&pinfo->header->initdone, FILEMAP_INFO_INITDONE);
 
         lock_unlock(pinfo->hlock);
-    }
-    else
-    {
-        /* Increment the number of times information filemap is mapped */
-        InterlockedIncrement(&pinfo->header->mapcount);
     }
 
     *ppinfo = pinfo;
@@ -626,7 +611,6 @@ static void destroy_information_filemap(filemap_information * pinfo)
     {
         if(pinfo->header != NULL)
         {
-            InterlockedDecrement(&pinfo->header->mapcount);
             UnmapViewOfFile((void *)pinfo->header);
 
             pinfo->header = NULL;
@@ -846,6 +830,7 @@ int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsi
     filemap_information *        pinfo  = NULL;
     filemap_information_header * pinfoh = NULL;
     filemap_information_entry *  pentry = NULL;
+    MEMORY_BASIC_INFORMATION     meminfo;
 
     dprintverbose("start filemap_initialize");
 
@@ -880,6 +865,16 @@ int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsi
 
     for(index = 0; index < pinfoh->maxcount; index++)
     {
+        /* An entry of this filemap without a name or a size cannot be mapped: create it again. Entries are */
+        /* published whole (see below), so only damage, or a process killed while it wrote one with code */
+        /* that published the type first, leaves one; it would keep every process of the pool without a cache */
+        if(pentry->fmaptype == fmaptype && pentry->cachekey == cachekey && (pentry->size == 0 || pentry->name[0] == '\0'))
+        {
+            dprintimportant("filemap_initialize: entry %u was left half written: creating it again", index);
+            pentry->fmaptype = FILEMAP_TYPE_UNUSED;
+            pentry->cachekey = 0;
+        }
+
         if(pentry->fmaptype == FILEMAP_TYPE_UNUSED && ffree == 0)
         {
             ffree = index;
@@ -908,13 +903,10 @@ int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsi
         pentry = (filemap_information_entry *)((char *)pinfoh + FILEMAP_INFO_HEADER_SIZE);
         pentry = (filemap_information_entry *)((char *)pentry + (ffree * FILEMAP_INFO_ENTRY_SIZE));
 
-        pentry->fmaptype = fmaptype;
-        pentry->cachekey = cachekey;
-
         /* Create name with the group in it */
         ZeroMemory(pentry->name, MAX_PATH);
 
-        build_filemap_name(pentry->name, MAX_PATH, UCG(namesalt), pentry->fmaptype, cachekey, UCG(fmapgdata)->group);
+        build_filemap_name(pentry->name, MAX_PATH, UCG(namesalt), fmaptype, cachekey, UCG(fmapgdata)->group);
 
         dprintverbose("Creating a shared filemap with name %s", pentry->name);
 
@@ -923,6 +915,14 @@ int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsi
         pentry->cpid     = filemap_getpid();
         pentry->opid     = filemap_getpid();
         pentry->mapaddr  = NULL;
+
+        /* The key and the type last, after a barrier: a process killed before then (IIS can end one at */
+        /* any instruction, which abandons the info lock) leaves the entry unused, where the other */
+        /* processes would otherwise find an entry without a name or a size */
+        MemoryBarrier();
+
+        pentry->cachekey = cachekey;
+        pentry->fmaptype = fmaptype;
     }
 
     /* If we should have a temp file for shared memory, build its name. */
@@ -961,6 +961,17 @@ int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsi
     {
         result = FATAL_FILEMAP_MAPVIEW;
         goto Finished;
+    }
+
+    /* A file mapping object that existed keeps the size it was created with, which the view has. It differs */
+    /* from the entry's only if this process created the entry while the processes that had created the object, */
+    /* with another ucache.size, were ending (their entry goes before their object): use the size of the object, */
+    /* as the processes that find the entry of a running cache do. The views of a section are committed whole */
+    /* and nothing changes their protection, so the region is the whole view */
+    if(pfilemap->existing && VirtualQuery(pfilemap->mapaddr, &meminfo, sizeof(meminfo)) != 0 && meminfo.RegionSize != pentry->size)
+    {
+        dprintimportant("filemap_initialize: %s has %Iu bytes, not %Iu", pentry->name, meminfo.RegionSize, pentry->size);
+        pentry->size = meminfo.RegionSize;
     }
 
     pfilemap->infoentry = pentry;
@@ -1147,7 +1158,6 @@ void filemap_runtest()
     filemap_information_header * pinfoh      = NULL;
     filemap_information_entry *  pentry      = NULL;
 
-    unsigned int                 orig_mapcount    = 0;
     unsigned short               orig_entry_count = 0;
 
     dprintverbose("*** STARTING FILEMAP TESTS ***");
@@ -1181,7 +1191,7 @@ void filemap_runtest()
     _ASSERT(pinfoh != NULL);
 
     _ASSERT(pinfoh->size        != 0);
-    orig_mapcount               = pinfoh->mapcount;
+    _ASSERT(pinfoh->initdone    == FILEMAP_INFO_INITDONE);
     orig_entry_count            = pinfoh->entry_count;
     _ASSERT(pinfoh->maxcount    >  0);
 
@@ -1212,7 +1222,6 @@ void filemap_runtest()
     _ASSERT(pentry->opid     == filemap_getpid());
     _ASSERT(pentry->mapaddr  != NULL);
 
-    _ASSERT(pinfoh->mapcount    == orig_mapcount);
     _ASSERT(pinfoh->entry_count == orig_entry_count + 1);
 
     result = filemap_create(&pfilemap2);
@@ -1240,7 +1249,6 @@ void filemap_runtest()
     _ASSERT(pentry->opid     == filemap_getpid());
     _ASSERT(pentry->mapaddr  != NULL);
 
-    _ASSERT(pinfoh->mapcount    == orig_mapcount);
     _ASSERT(pinfoh->entry_count == orig_entry_count + 2);
 
     /* Delete one of the filemap context and verify everything */
@@ -1249,7 +1257,6 @@ void filemap_runtest()
 
     pfilemap1 = NULL;
 
-    _ASSERT(pinfoh->mapcount    == orig_mapcount);
     _ASSERT(pinfoh->entry_count == orig_entry_count + 1);
 
     /* Create filemap context for the second filemap again */
