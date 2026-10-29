@@ -48,11 +48,11 @@ static int create_information_filemap(filemap_information ** ppinfo);
 static void destroy_information_filemap(filemap_information * pinfo);
 
 #ifdef _WIN64
-#define FILEMAP_PREFIX_FORMAT           "%s_%u_%u_x64"
-#define FILEMAP_NAMESALT_PREFIX_FORMAT  "%s_%u_%s_%u_x64"
+#define FILEMAP_PREFIX_FORMAT           "%s_%u_%s_x64"
+#define FILEMAP_NAMESALT_PREFIX_FORMAT  "%s_%u_%s_%s_x64"
 #else  /* not _WIN64 */
-#define FILEMAP_PREFIX_FORMAT           "%s_%u_%u"
-#define FILEMAP_NAMESALT_PREFIX_FORMAT  "%s_%u_%s_%u"
+#define FILEMAP_PREFIX_FORMAT           "%s_%u_%s"
+#define FILEMAP_NAMESALT_PREFIX_FORMAT  "%s_%u_%s_%s"
 #endif /* _WIN64 */
 
 /* Global information containing information */
@@ -66,7 +66,6 @@ static unsigned int getppid()
     unsigned int   pid       = 0;
     HANDLE         hSnapShot = INVALID_HANDLE_VALUE;
     PROCESSENTRY32 pe        = {0};
-    int            poolpid   = -1;
 
     dprintverbose("start getppid");
 
@@ -78,14 +77,6 @@ static unsigned int getppid()
     }
 
     pid = GetCurrentProcessId();
-
-    /* Use CRC of user provided apppoolid as ppid if available */
-    poolpid = utils_apoolpid();
-    if(poolpid != -1)
-    {
-        UCG(parentpid) = poolpid;
-        goto Finished;
-    }
 
     /* Get the current snapshot and look for */
     /* current process by matching PIDs */
@@ -172,17 +163,17 @@ static int build_filemap_name(
     char * namesalt,
     unsigned short fmaptype,
     unsigned short cachekey,
-    unsigned int   pid
+    const char *   group
     )
 {
     int ret;
     if (namesalt == NULL)
     {
-        ret = _snprintf_s(dest, dest_size, dest_size - 1, FILEMAP_PREFIX_FORMAT, get_filemap_prefix(fmaptype), cachekey, pid);
+        ret = _snprintf_s(dest, dest_size, dest_size - 1, FILEMAP_PREFIX_FORMAT, get_filemap_prefix(fmaptype), cachekey, group);
     }
     else
     {
-        ret = _snprintf_s(dest, dest_size, dest_size - 1, FILEMAP_NAMESALT_PREFIX_FORMAT, get_filemap_prefix(fmaptype), cachekey, namesalt, pid);
+        ret = _snprintf_s(dest, dest_size, dest_size - 1, FILEMAP_NAMESALT_PREFIX_FORMAT, get_filemap_prefix(fmaptype), cachekey, namesalt, group);
     }
 
     return ret;
@@ -459,10 +450,10 @@ static int create_information_filemap(filemap_information ** ppinfo)
         goto Finished;
     }
 
-    /* Use PPID in the information filemap so that processes under */
-    /* one w3wp can share filemap information. Add PID and 2 more for */
-    /* underscore and terminating NULL */
-    namelen = FILEMAP_INFORMATION_PREFIX_LENGTH + PID_MAX_LENGTH + 2;
+    /* Use the group in the information filemap so that the processes */
+    /* of a group share filemap information. Add the group and 2 more */
+    /* for underscore and terminating NULL */
+    namelen = FILEMAP_INFORMATION_PREFIX_LENGTH + GROUP_MAX_LENGTH + 2;
 
     /* If a name salt is specified, use _<namesalt> in name */
     if(UCG(namesalt) != NULL)
@@ -480,14 +471,14 @@ static int create_information_filemap(filemap_information ** ppinfo)
 
     ZeroMemory(pinfo->infoname, namelen);
 
-    /* Create name as FILE_INFORMATION_PREFIX_<ppid> */
+    /* Create name as FILE_INFORMATION_PREFIX_<group> */
     if(UCG(namesalt) == NULL)
     {
-        infonamelen = _snprintf_s(pinfo->infoname, namelen, namelen - 1, "%s_%u", FILEMAP_INFORMATION_PREFIX, UCG(fmapgdata)->ppid);
+        infonamelen = _snprintf_s(pinfo->infoname, namelen, namelen - 1, "%s_%s", FILEMAP_INFORMATION_PREFIX, UCG(fmapgdata)->group);
     }
     else
     {
-        infonamelen = _snprintf_s(pinfo->infoname, namelen, namelen - 1, "%s_%s_%u", FILEMAP_INFORMATION_PREFIX, UCG(namesalt), UCG(fmapgdata)->ppid);
+        infonamelen = _snprintf_s(pinfo->infoname, namelen, namelen - 1, "%s_%s_%s", FILEMAP_INFORMATION_PREFIX, UCG(namesalt), UCG(fmapgdata)->group);
     }
 
     if (infonamelen < 0)
@@ -683,6 +674,7 @@ int filemap_global_initialize()
 {
     int                      result    = NONFATAL;
     filemap_global_context * fgcontext = NULL;
+    uint64_t                 poolhash  = 0;
 
     dprintverbose("start filemap_global_initialize");
 
@@ -702,10 +694,25 @@ int filemap_global_initialize()
 
     /* Set default values of structure members */
     fgcontext->pid  = GetCurrentProcessId();
-    fgcontext->ppid = getppid();
     fgcontext->info = NULL;
 
-    /* Set global as soon as pid and ppid are set */
+    /* The group of the processes that share the cache, as the object names hold it: "P" and 16 hex digits of the */
+    /* hash of the application pool id (see utils_apoolhash), or else the parent process id. The "P" keeps a pool */
+    /* apart from a parent process, whatever their numbers */
+    if(utils_apoolhash(&poolhash))
+    {
+        fgcontext->ispool = 1;
+        _snprintf_s(fgcontext->group, sizeof(fgcontext->group), _TRUNCATE, "P%016llx", poolhash);
+    }
+    else
+    {
+        fgcontext->ispool = 0;
+        _snprintf_s(fgcontext->group, sizeof(fgcontext->group), _TRUNCATE, "%u", getppid());
+    }
+
+    dprintverbose("process group %s", fgcontext->group);
+
+    /* Set global as soon as pid and group are set */
     UCG(fmapgdata) = fgcontext;
 
     result = create_information_filemap(&fgcontext->info);
@@ -768,15 +775,6 @@ unsigned int filemap_getpid()
 {
     _ASSERT(UCG(fmapgdata) != NULL);
     return UCG(fmapgdata)->pid;
-}
-
-/* API tp get the parent process ID */
-/* Use parent process identifier to create */
-/* separate caches for processes under a process */
-unsigned int filemap_getppid()
-{
-    _ASSERT(UCG(fmapgdata) != NULL);
-    return UCG(fmapgdata)->ppid;
 }
 
 /* create new filemap context */
@@ -858,9 +856,10 @@ int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsi
 
     size = size_mb * 1024 * 1024;
 
-    /* If parentpid is greater than 99999, use file backed shared memory */
-    /* Else don't create file backed shared memory */
-    if(UCG(fmapgdata)->ppid <= 99999)
+    /* Only the cache of an application pool is backed by a file in ucache.filemapdir: the name of the */
+    /* file stays the same from one start of the pool to the next, so a start replaces a file that killed */
+    /* processes left, where a file named after a parent process would stay forever */
+    if(!UCG(fmapgdata)->ispool)
     {
         fcreate_file_for_sm = 0;
     }
@@ -912,10 +911,10 @@ int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsi
         pentry->fmaptype = fmaptype;
         pentry->cachekey = cachekey;
 
-        /* Create name with ppid in it */
+        /* Create name with the group in it */
         ZeroMemory(pentry->name, MAX_PATH);
 
-        build_filemap_name(pentry->name, MAX_PATH, UCG(namesalt), pentry->fmaptype, cachekey, UCG(fmapgdata)->ppid);
+        build_filemap_name(pentry->name, MAX_PATH, UCG(namesalt), pentry->fmaptype, cachekey, UCG(fmapgdata)->group);
 
         dprintverbose("Creating a shared filemap with name %s", pentry->name);
 
@@ -1168,8 +1167,8 @@ void filemap_runtest()
     _ASSERT(UCG(fmapgdata) != NULL);
 
     /* Verify filemap_information_header setup correctly */
-    _ASSERT(UCG(fmapgdata)->pid  != 0);
-    _ASSERT(UCG(fmapgdata)->ppid != 0);
+    _ASSERT(UCG(fmapgdata)->pid      != 0);
+    _ASSERT(UCG(fmapgdata)->group[0] != '\0');
 
     pinfo = UCG(fmapgdata)->info;
 

@@ -89,8 +89,9 @@ To install and enable the extension, follow these steps:
 6. To check that the extension has been enabled, create a file called phpinfo.php with PHP code that calls the
    `phpinfo()` function, save it in the root folder of an IIS web site that uses PHP, then open a browser and make a
    request to `http://localhost/phpinfo.php`. Search within the returned web page for a section called `ucache`. If
-   the extension is enabled, then the `phpinfo()` output lists the `ucache.*` settings. From the command line,
-   `php -m` lists `ucache`.
+   the extension is enabled, then the `phpinfo()` output lists the `ucache.*` settings, and its `User cache` line
+   says `enabled` (`unavailable` means that the cache could not be created: see
+   [Startup warnings](#startup-warnings)). From the command line, `php -m` lists `ucache`.
 
 > **Note:** Do not forget to remove the phpinfo.php file from the web site's root folder after verifying that the
 > extension has been enabled.
@@ -152,24 +153,40 @@ under the CLI, and the functions fail there.
 
 `ucache.size` *int*
 
-Defines the size of the shared memory segment of the user cache, in megabytes. Values outside 5..930 are clamped to
-the nearest limit.
+Defines the size of the shared memory segment of the user cache, in megabytes: a number of megabytes (`64`), or a size
+with a `K`, `M` or `G` suffix in any case, which a `B` may follow (`64M`, `64MB`, `64 MB`, `1G`, `65536K`), always in
+decimal (`064` is 64). `K` is rounded up to whole megabytes (`100000K` is 98). A size outside 5..930 is clamped to the
+nearest limit, with a startup warning. Digits followed by other text (`64MiB`) are taken as megabytes, with a startup
+warning, and any other value (`abc`, `-1`, `0x40`) gives the default, 8 MB, with a startup warning; so does an empty
+value, without one. `ini_get()` and `phpinfo()` show the value as written, `ucache_meminfo()` the size of the cache
+(see [Startup warnings](#startup-warnings)).
 
 `ucache.namesalt` *string*
 
 Defines a string added to the names of the shared memory and synchronization objects, to keep apart caches that
 would otherwise be shared. Only the first 8 characters are used: `ini_get()`, `phpinfo()` and ucache.php show the
-whole value, but two salts that differ only after the 8th character give the same cache.
+whole value, but two salts that differ only after the 8th character give the same cache. An empty value is the same
+as not setting it.
 
 `ucache.apppoolid` *string*
 
 Defines the name that decides which processes share a cache, instead of the parent process id. If not set, the
-`APP_POOL_ID` environment variable is used when IIS sets it.
+`APP_POOL_ID` environment variable is used when IIS sets it; an empty value (`ucache.apppoolid=`, or `none`, `off`,
+`no`, `false` or `null`, which PHP reads as empty) is the same as not setting it. Names that differ only in the case of
+the letters A to Z are the same name; processes with different names do not share a cache. Names are compared as
+Unicode text, so `ucache.apppoolid=X` and `APP_POOL_ID=X` give the same cache: `APP_POOL_ID` is read as Unicode, and
+the setting as UTF-8 when it is valid UTF-8 (a php.ini saved in UTF-8), otherwise as text of the ANSI code page (an
+ANSI php.ini, or `-d`, whose argument PHP gets in that code page, so that characters outside it cannot be given that
+way).
 
 `ucache.filemapdir` *string*
 
-Defines the folder of a file that backs the shared memory instead of the paging file. Only used when the process
-group id (the parent process id, or the hash of the application pool id) is above 99999.
+Defines the folder of a file that backs the shared memory instead of the paging file. Only used for the cache of an
+IIS application pool: when `ucache.apppoolid` or `APP_POOL_ID` groups the processes and names an application pool,
+whose account (`IIS APPPOOL\<name>`) is given access to the file. The caches of other pool ids, and of processes
+grouped by their parent process, stay in the paging file. An empty value is the same as not setting it. If the file
+cannot be created or opened in the folder (it does not exist, or the pool's account cannot write to it), the cache is
+not created, with a startup warning that names the setting.
 
 `ucache.debuglevel` *int*
 
@@ -210,6 +227,31 @@ others do not exist. The prefix may contain letters, digits, underscores and byt
 and must not start with a digit; empty gives `get()`, `set()`, .... When the prefix is not valid, or makes a name that
 another extension already uses (`date_` would make `date_add()`), PHP starts with a warning and without any of the
 functions. This manual names the functions with the default prefix. ucache.php follows the setting.
+
+#### Startup warnings
+
+UCache raises a startup warning (`E_CORE_WARNING`) when it cannot use a setting as written (`ucache.size`,
+`ucache.prefix`) and when it cannot create the cache. PHP writes startup warnings to its error log (the file of
+`error_log`, or else the error output of the process) and, on Windows, to the Application event log, with the source
+`PHP-<version>` (for example `PHP-8.4.14`) and the event ID 4: PHP 7 always does, PHP 8 when `log_errors` is on (as in
+php.ini-production and php.ini-development) or `display_startup_errors` is off. Event Viewer says that the description
+of the event cannot be found, and shows the warning under "the following information was included with the event".
+With `display_startup_errors` on, PHP also displays it (the CLI prints it).
+Every PHP process raises the warning again when it starts, and IIS starts new php-cgi processes regularly: fix the
+setting rather than ignore the warning. The `ucache.size` and cache warnings are not raised under the CLI without
+`ucache.enablecli=1`, where no cache is created; the `ucache.prefix` warning is.
+
+When the cache cannot be created, PHP runs without it: the functions return false (`ucache_meminfo()` returns null),
+and the `User cache` line of `phpinfo()` says `unavailable`. The warning gives the UCache error and, where it applies,
+the Windows error of the step that failed, and names the likely cause:
+
+- the file of the cache could not be created or opened in `ucache.filemapdir`: the folder does not exist (Windows
+  error 3), or the pool's account cannot write to it, or a file of another account is in the way (Windows error 5);
+- a process that shares the cache kept its initialization lock for 30 seconds (Windows error 258, a timeout);
+- access to the shared memory or locks of the cache was denied (Windows error 5): processes of another account may use
+  the same `ucache.apppoolid` (or `APP_POOL_ID`) and `ucache.namesalt`;
+- the paging file has no room for the cache (Windows error 1455, the system commit limit): a cache in the paging file
+  takes its whole `ucache.size` from the commit limit when it is created.
 
 #### Settings per IIS application pool
 
@@ -331,9 +373,13 @@ to be shown inside a frame.
 
 ### Sharing
 
-Processes share a cache when they have the same parent process id, or the same `ucache.apppoolid` (default: the
-`APP_POOL_ID` environment variable set by IIS). There is no private per-process cache. The cache is not persistent:
-it starts empty when the first process of a group creates it.
+Processes share a cache when they have the same `ucache.apppoolid` (default: the `APP_POOL_ID` environment variable
+set by IIS) or, without one, the same parent process id, and the same `ucache.namesalt`. Processes with different
+application pool ids do not share a cache, nor does a process with an application pool id share one with processes
+grouped by their parent process. Only processes of the same Windows session share a cache, since the names of its
+shared memory and synchronization objects have no `Global\` prefix: IIS runs every application pool in session 0, so
+a CLI script run in a Remote Desktop session does not see the cache of a pool. There is no private per-process cache.
+The cache is not persistent: it starts empty when the first process of a group creates it.
 
 ### Values
 
@@ -1036,9 +1082,10 @@ objects.
 `success`
 
 Will be set to true on success and false on failure. It is left as it was when the cache is switched off
-(`ucache.enabled=0`) or was not created (CLI without `ucache.enablecli=1`). If `success` is a typed property (PHP 7.4
-and later), the bool is assigned under the property's type rules: converted (an `int` property gets 1 or 0), or a
-`TypeError` (an `array` property, or an `int` one under `strict_types`).
+(`ucache.enabled=0`) or was not created (CLI without `ucache.enablecli=1`, or a cache that could not be created: see
+[Startup warnings](#startup-warnings)). If `success` is a typed property (PHP 7.4 and later), the bool is assigned
+under the property's type rules: converted (an `int` property gets 1 or 0), or a `TypeError` (an `array` property, or
+an `int` one under `strict_types`).
 
 #### Return Values
 
@@ -1426,7 +1473,8 @@ This function has no parameters.
 #### Return Values
 
 Array of meta data about the user cache memory usage, or null if the cache was not created (CLI without
-`ucache.enablecli=1`). It also works with `ucache.enabled=0`. The array contains:
+`ucache.enablecli=1`, or a cache that could not be created: see [Startup warnings](#startup-warnings)). It also works
+with `ucache.enabled=0`. The array contains:
 
 - `memory_total` - amount of memory in bytes allocated for the user cache
 - `memory_free` - amount of free memory in bytes available for the user cache
@@ -1693,13 +1741,15 @@ it cannot run) and exits with 1 if a check failed. It clears the cache it runs a
 - a cache that no other process uses while it runs, since it checks hit and miss counts and free memory.
 
 With the path of the DLL under test as its argument, as `build.bat` passes it, it also starts other PHP processes
-that load that DLL, each group on a cache of its own (a unique `ucache.apppoolid`): a holder keeps a cache alive
-while other processes use it, and `php -S` servers on 127.0.0.1 stand for the FastCGI processes of a pool, which
-survive the fatal error of a request. They check what a single process cannot, such as a cache shared by several
-processes, the release of the cache lock after a fatal error and the scavenger at the end of requests. They need a
-writable temporary folder and free local ports, and every process they start has a timeout. Without the argument
-these checks are skipped, with one `SKIP` line. The second run, with opcache, goes through the immutable arrays of
-opcache, which take other paths through the copy code.
+that load that DLL, each group on a cache of its own (a unique `ucache.apppoolid` or `APP_POOL_ID`): a holder keeps a
+cache alive while other processes use it, and `php -S` servers on 127.0.0.1 stand for the FastCGI processes of a
+pool, which survive the fatal error of a request. They check what a single process cannot, such as a cache shared by
+several processes and which processes share one (`ucache.apppoolid`, `APP_POOL_ID`, the parent process), the settings
+read at startup (`ucache.size`, `ucache.prefix`) and a cache that cannot be created, the release of the cache lock
+after a fatal error and the scavenger at the end of requests. They need a writable temporary folder and free local
+ports, and every process they start has a timeout. Without the argument these checks are skipped, with one `SKIP`
+line. The second run, with opcache, goes through the immutable arrays of opcache, which take other paths through the
+copy code.
 
 ### Debug builds
 
@@ -1785,9 +1835,30 @@ Several of these change what existing code sees.
   2147483648 to 4294967295 were refused as negative ttls, 4294967296 meant no expiry and 4294967297 one second.
 - `$GLOBALS` can be stored, as a value or with the array forms (see [Values](#values)). WinCache 2.0.0.8 stored none
   of it on PHP 7, whose `$GLOBALS` holds its variables through slots that it did not follow.
-- `ucache.size` is used as written. WinCache 2.0.0.8 stored `wincache.ucachesize` as an 8-byte value into a 4-byte
-  field, so sizes were read as 32-bit unsigned numbers (a negative size meant 930 MB, 4 GB meant 5 MB). Sizes
-  outside 5..930 MB are clamped to the nearest limit.
+- `ucache.size` takes a number of megabytes, always in decimal (`064` is 64), or a size with a `K`, `M` or `G` suffix
+  (`64M` is 64 MB). A size outside 5..930 MB is clamped with a startup warning; digits followed by other text are
+  taken as megabytes, and any other value gives the default 8 MB, each with a startup warning (see
+  [Runtime Configuration](#runtime-configuration)). WinCache 2.0.0.8 read `wincache.ucachesize` as PHP reads any
+  integer setting: it applied the suffix to the megabytes (`64M` asked for 67108864 MB, which became 930 MB) and read
+  `064` as octal (52 MB) and `64MB` as 64; it clamped without a warning; and it stored the setting as an 8-byte value
+  into a 4-byte field, so sizes were read as 32-bit unsigned numbers (a negative size meant 930 MB, `4G` meant 5 MB).
+- A cache that cannot be created at startup (a `ucache.filemapdir` that does not exist, shared objects of another
+  account, an initialization lock held for 30 seconds) raises a startup warning that names the likely cause, which
+  PHP writes to its error log and to the Windows event log, and the `User cache` line of `phpinfo()` says
+  `unavailable` (see [Startup warnings](#startup-warnings)). WinCache 2.0.0.8 only wrote an ETW event (provider
+  PHP-Wincache) that no event log shows, its functions returned false without a warning, and its `phpinfo()` had no
+  user cache line.
+- Processes of different application pools do not share a cache: the names of the cache's shared memory and
+  synchronization objects hold a 64-bit hash of the application pool id (`ucache.apppoolid`, or `APP_POOL_ID`, read as
+  Unicode), A-Z taken as a-z. WinCache 2.0.0.8 reduced the id to one of 899,999 numbers, so different pools could share
+  one cache (`site907` and `site1499` did, as did pool names that differ only in characters outside the ANSI code page,
+  which it read in that code page): about one chance in 180 among 100 pools, 43% among 1,000. UCache takes an empty
+  `ucache.apppoolid` (`ucache.apppoolid=`, or `none`, `off`, `no`, `false` or `null`), `ucache.filemapdir` or
+  `ucache.namesalt` as not set, and backs with a file in `ucache.filemapdir` only the cache of an application pool.
+  WinCache 2.0.0.8 took an empty `wincache.apppoolid` as an id of its own, which every process with it shared, instead
+  of using `APP_POOL_ID` or the parent process; put the file of an empty `wincache.filemapdir` in the root of the
+  current drive; added an empty `wincache.namesalt` to the names, which kept those processes apart from the ones
+  without the setting; and backed with a file the caches of processes whose parent process id was above 99999.
 - Reading an array with `ucache_get()` does not leak request memory. WinCache 2.0.0.8 leaked about 1.2 KB per read,
   until the end of the request.
 - A reference that only the fetched value holds has reference count 1, as in any PHP array where no variable shares

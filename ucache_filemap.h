@@ -42,7 +42,7 @@
 /* won't work for per site php.ini configuration. We will end up sharing the */
 /* cache with all processes which won't be too bad either */
 
-#define PID_MAX_LENGTH                          6   /* 999999 is the max value */
+#define GROUP_MAX_LENGTH                        17  /* "P" and 16 hex digits, or a process id (10 digits at most) */
 #define READWRITE_LOCK_MAX_COUNT                20  /* NOT USED */
 
 #define FILEMAP_TYPE_INVALID                    0   /* Invalid value */
@@ -115,14 +115,14 @@ typedef struct filemap_global_context filemap_global_context;
 struct filemap_global_context
 {
     unsigned int                 pid;           /* PID of this process */
-    unsigned int                 ppid;          /* Parent process id */
+    unsigned int                 ispool;        /* 1 if an application pool id groups the processes, 0 if their parent process does */
+    char                         group[GROUP_MAX_LENGTH + 1]; /* The group in the object names: "P" and 16 hex digits of the hash of the pool id, or the parent process id */
     filemap_information *        info;          /* pointer to filemap_information */
 };
 
 extern int  filemap_global_initialize();
 extern void filemap_global_terminate();
 extern unsigned int filemap_getpid();
-extern unsigned int filemap_getppid();
 
 extern int    filemap_create(filemap_context ** ppfilemap);
 extern void   filemap_destroy(filemap_context * pfilemap);

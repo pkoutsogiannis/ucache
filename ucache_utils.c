@@ -35,6 +35,7 @@
 */
 
 #include "precomp.h"
+#include "ext/standard/sha1.h"
 #include <Sddl.h>
 #include <Aclapi.h>
 
@@ -223,46 +224,151 @@ uint32_t utils_getindex(const char * key, unsigned int count)
     return hash;
 }
 
-int utils_apoolpid()
+/* wstr (wlen characters) in UTF-8, in a buffer that the caller frees with alloc_pefree(), its length in *plen; NULL */
+/* if it cannot be converted */
+static char * utf8_from_wide(const WCHAR * wstr, int wlen, int * plen)
 {
-    int          retval = -1;
-    char *       buffer = NULL;
-    unsigned int buflen = 0;
+    char * buffer = NULL;
+    int    len    = 0;
 
-    dprintverbose("start utils_apoolpid");
+    len = WideCharToMultiByte(CP_UTF8, 0, wstr, wlen, NULL, 0, NULL, NULL);
+    if(len <= 0)
+    {
+        return NULL;
+    }
 
-    if(UCG(apppoolid) != NULL)
+    buffer = (char *)alloc_pemalloc(len);
+    if(buffer == NULL)
+    {
+        return NULL;
+    }
+
+    if(WideCharToMultiByte(CP_UTF8, 0, wstr, wlen, buffer, len, NULL, NULL) != len)
+    {
+        alloc_pefree(buffer);
+        return NULL;
+    }
+
+    *plen = len;
+    return buffer;
+}
+
+/*
+ * The application pool id of the process, which decides which processes share its cache: ucache.apppoolid (NULL in
+ * UCG(apppoolid) when it is not set or empty, see MINIT), or else the APP_POOL_ID environment variable that IIS sets.
+ * Sets *phash to the first 8 bytes of the SHA-1 of the id in UTF-8, with A-Z taken as a-z (IIS pool names are case
+ * insensitive), and returns 1; returns 0 when the process has no application pool id. The id is hashed in UTF-8
+ * whatever it comes from, so that ucache.apppoolid=X and APP_POOL_ID=X give the same cache: APP_POOL_ID is read as
+ * Unicode, and ucache.apppoolid is taken as it is when it is valid UTF-8 (php.ini saved in UTF-8), and otherwise as
+ * text of the ANSI code page (an ANSI php.ini, or -d, whose argument PHP gets in that code page). WinCache reduced the
+ * id to one of 899999 numbers (a CRC modulo 899999), so that different pools could share a cache, and read
+ * APP_POOL_ID in the ANSI code page, where names that differ only in other characters are the same
+ */
+int utils_apoolhash(uint64_t * phash)
+{
+    int            retval  = 0;
+    const char *   name    = UCG(apppoolid);
+    size_t         namelen = 0;
+    WCHAR *        wbuffer = NULL;
+    char *         buffer  = NULL;
+    DWORD          wsize   = 0;
+    DWORD          wlen    = 0;
+    int            len     = 0;
+    size_t         index   = 0;
+    size_t         count   = 0;
+    uint64_t       hash    = 0;
+    unsigned char  chunk[64];
+    unsigned char  digest[20];
+    PHP_SHA1_CTX   context;
+
+    dprintverbose("start utils_apoolhash");
+
+    _ASSERT(phash != NULL);
+
+    /* Empty is no id, also if MINIT did not make it NULL first */
+    if(name != NULL && name[0] != '\0')
     {
         dprintverbose("using apppoolid");
-        retval = utils_hashcalc(UCG(apppoolid), strlen(UCG(apppoolid)));
-    } else {
-        buflen = GetEnvironmentVariable("APP_POOL_ID", NULL, 0);
-        if(buflen == 0)
+        namelen = strlen(name);
+
+        /* Not UTF-8: from the ANSI code page to UTF-8, through UTF-16. If that fails (memory), the bytes are hashed */
+        /* as they are, which still makes a group of their own */
+        if(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, (int)namelen, NULL, 0) == 0)
+        {
+            wlen = (DWORD)MultiByteToWideChar(CP_ACP, 0, name, (int)namelen, NULL, 0);
+            if(wlen > 0)
+            {
+                wbuffer = (WCHAR *)alloc_pemalloc(wlen * sizeof(WCHAR));
+            }
+
+            if(wbuffer != NULL && MultiByteToWideChar(CP_ACP, 0, name, (int)namelen, wbuffer, (int)wlen) == (int)wlen)
+            {
+                buffer = utf8_from_wide(wbuffer, (int)wlen, &len);
+            }
+
+            if(buffer != NULL)
+            {
+                name    = buffer;
+                namelen = (size_t)len;
+            }
+        }
+    }
+    else
+    {
+        /* Its size with the terminating null, in characters: 0 when it is not set, 1 when it is empty */
+        wsize = GetEnvironmentVariableW(L"APP_POOL_ID", NULL, 0);
+        if(wsize <= 1)
         {
             goto Finished;
         }
 
-        buffer = (char *)alloc_pemalloc(buflen);
+        wbuffer = (WCHAR *)alloc_pemalloc(wsize * sizeof(WCHAR));
+        if(wbuffer == NULL)
+        {
+            goto Finished;
+        }
+
+        /* Its length without the terminating null */
+        wlen = GetEnvironmentVariableW(L"APP_POOL_ID", wbuffer, wsize);
+        if(wlen == 0 || wlen >= wsize)
+        {
+            goto Finished;
+        }
+
+        buffer = utf8_from_wide(wbuffer, (int)wlen, &len);
         if(buffer == NULL)
         {
             goto Finished;
         }
 
-        buflen = GetEnvironmentVariable("APP_POOL_ID", buffer, buflen);
-        if(buflen == 0)
-        {
-            goto Finished;
-        }
-
-        /* Keeping number between 99999 and 999999 to not confuse with regular pids */
-        /* 999999 - 100000 = 899999. Code dependent on assumption that apoolpid > 99999 */
-        /* If hashcalc returned a -ve value, make it +ve by subtracting from 0 */
-        retval = utils_hashcalc(buffer, buflen);
+        name    = buffer;
+        namelen = (size_t)len;
     }
 
-    retval %= 899999;
-    retval = ((retval < 0) ? (0 - retval) : retval);
-    retval += 100000;
+    /* SHA-1 of the id with A-Z taken as a-z, a chunk at a time */
+    PHP_SHA1Init(&context);
+    while(index < namelen)
+    {
+        for(count = 0; count < sizeof(chunk) && index < namelen; count++, index++)
+        {
+            chunk[count] = (unsigned char)name[index];
+            if(chunk[count] >= 'A' && chunk[count] <= 'Z')
+            {
+                chunk[count] += 'a' - 'A';
+            }
+        }
+
+        PHP_SHA1Update(&context, chunk, count);
+    }
+    PHP_SHA1Final(digest, &context);
+
+    for(index = 0; index < sizeof(hash); index++)
+    {
+        hash = (hash << 8) | digest[index];
+    }
+
+    *phash = hash;
+    retval = 1;
 
 Finished:
 
@@ -272,7 +378,13 @@ Finished:
         buffer = NULL;
     }
 
-    dprintverbose("end utils_apoolpid");
+    if(wbuffer != NULL)
+    {
+        alloc_pefree(wbuffer);
+        wbuffer = NULL;
+    }
+
+    dprintverbose("end utils_apoolhash");
 
     return retval;
 }
@@ -383,6 +495,9 @@ int utils_create_init_event(
 
         if (ret == WAIT_TIMEOUT)
         {
+            /* Recorded as the Windows error of the failure, which the startup warning reports as a timeout */
+            SetLastError(WAIT_TIMEOUT);
+            error_setlasterror();
             dprintcritical("Timed out waiting for other process to release %s", evtname);
             result = FATAL_ALLOC_INIT_EVENT;
             goto Finished;
@@ -429,6 +544,10 @@ int ucache_php_snprintf_s(char *buf, size_t len, size_t len2, const char *format
  * IIS App Pool utils
  */
 
+/* APP_POOL_ID as utils_get_apppool_name() read it (ANSI, for LookupAccountName), for the life of the process. Not in */
+/* UCG(apppoolid), which stays the setting that utils_apoolhash() reads */
+static PSTR g_apppoolname = NULL;
+
 /* Caller must NOT free the returned string */
 const char *
 utils_get_apppool_name()
@@ -442,7 +561,12 @@ utils_get_apppool_name()
         return UCG(apppoolid);
     }
 
-    /* Get app pool ID (as unicode) */
+    if ( g_apppoolname )
+    {
+        return g_apppoolname;
+    }
+
+    /* Get app pool ID (ANSI, as LookupAccountName takes it) */
     buflen = GetEnvironmentVariableA( "APP_POOL_ID", NULL, 0 );
     if (buflen == 0)
     {
@@ -464,7 +588,7 @@ utils_get_apppool_name()
         goto Finished;
     }
 
-    UCG(apppoolid) = szAppPoolName;
+    g_apppoolname = szAppPoolName;
 
 Finished:
     if ( FAILED( ret ) )
@@ -913,13 +1037,15 @@ int utils_revert_if_necessary(HANDLE *phOriginalToken)
     }
     else
     {
-        error_setlasterror();
-        if( ERROR_NO_TOKEN == error_getlasterror() )
+        /* No token: the thread does not impersonate. That is no failure, so it is not recorded as the last error, */
+        /* which a later failure reports (see startup_failure_warning) */
+        if( ERROR_NO_TOKEN == GetLastError() )
         {
             hOriginalToken = NULL;
         }
         else
         {
+            error_setlasterror();
             result = FATAL_FILEMAP_REVERT_FAILED;
             goto Finished;
         }

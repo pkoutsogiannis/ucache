@@ -58,16 +58,16 @@ ZEND_BEGIN_MODULE_GLOBALS(ucache)
     zend_long                ucgc_evict;  /* Free memory % that a full cache evicts idle entries up to, 0 = no eviction */
     zend_bool                enablecli;   /* Enable ucache for command line sapi */
     zend_bool                ucenabled;   /* User cache enabled or disabled */
-    zend_long                ucachesize;  /* User cache size in MBs */
+    zend_long                ucachesize;  /* User cache size in MBs (ucache_modify_size, clamped to 5..930 by MINIT) */
     unsigned int             debuglevel;  /* Debug dump level (0/101/201/301/401/501) */
-    char *                   namesalt;    /* Salt to use in all the names */
+    char *                   namesalt;    /* Salt to use in all the names, NULL when not set or empty */
     char *                   prefix;      /* Prefix of the PHP function names, in place of "ucache_" */
 
     unsigned int             uclasterror; /* Last error value encountered by user cache */
     unsigned int             parentpid;   /* Parent process identifier */
     filemap_global_context * fmapgdata;   /* Global data for filemap */
-    const char *             apppoolid;   /* The application id. */
-    char *                   filemapdir;  /* Directory where temp filemap files should be created */
+    const char *             apppoolid;   /* The application id: ucache.apppoolid, NULL when not set or empty */
+    char *                   filemapdir;  /* Directory where temp filemap files should be created, NULL when not set or empty */
 ZEND_END_MODULE_GLOBALS(ucache)
 
 ZEND_EXTERN_MODULE_GLOBALS(ucache)

@@ -37,13 +37,12 @@
 #ifndef _UCACHE_LOCK_H_
 #define _UCACHE_LOCK_H_
 
-#define PID_MAX_LENGTH          6     /* 999999 being maximum */
 #define LOCK_WAIT_TIMEOUT       200   /* Wait timeout is 200 ms */
 #define LOCK_NUMBER_MAXIMUM     65535 /* Maximum number of instances for same type */
 #define LOCK_NUMBER_MAX_STRLEN  5     /* 65535 is the maximum cachekey supported */
 
 #define LOCK_TYPE_INVALID       0     /* Invalid type */
-#define LOCK_TYPE_SHARED        1     /* Lock shared by child processes. Use PPID */
+#define LOCK_TYPE_SHARED        1     /* Lock shared by the processes of the group (its name has the group) */
 #define LOCK_TYPE_MAXIMUM       7     /* type is a 3 bit field. Max value is 7 */
 
 #define LOCK_STATE_UNLOCKED     0     /* Lock is not acquired */

@@ -11,14 +11,15 @@
  *   -d ucache.namesalt=... can keep the test away from another cache;
  * - ucache.enablecli=1, without which the CLI does not use the cache;
  * - a cache that no other process uses while the test runs: the test clears it and checks its hit
- *   and miss counts and its free memory. Processes with the same ucache.apppoolid and ucache.namesalt
- *   share one cache; without ucache.apppoolid, so do the processes started by the same parent process
- *   (php.exe started from one command prompt, the php-cgi.exe of one FastCGI pool);
+ *   and miss counts and its free memory. Processes with the same ucache.apppoolid (else the
+ *   APP_POOL_ID environment variable) and ucache.namesalt share one cache; without either, so do the
+ *   processes started by the same parent process (php.exe started from one command prompt, the
+ *   php-cgi.exe of one FastCGI pool); an empty ucache.apppoolid counts as not set;
  * - optionally, the path of the DLL under test as the first argument. The checks with several
  *   processes start other php.exe processes with that DLL, on caches of their own (one unique
- *   ucache.apppoolid per group), php -S servers among them. Without the argument they are skipped,
- *   with one "SKIP:" line. One of the servers runs copies of ucache.php, read from the folder of
- *   test-build.php (its checks are skipped, with a "SKIP:" line, if it is not there).
+ *   ucache.apppoolid or APP_POOL_ID per group), php -S servers among them. Without the argument
+ *   they are skipped, with one "SKIP:" line. One of the servers runs copies of ucache.php, read from
+ *   the folder of test-build.php (its checks are skipped, with a "SKIP:" line, if it is not there).
  *
  * Prints one line per check ("OK: ..." or "FAIL: ...", or "SKIP: ..." for checks that cannot run) and
  * exits with 1 if any check failed.
@@ -611,6 +612,22 @@ if (PHP_SAPI === 'cli' && ini_get('ucache.enablecli') !== '1') {
     check('ucache.enablecli=1 (needed to use the cache from the CLI)', false, ini_get('ucache.enablecli'));
     exit(1);
 }
+
+/* The User cache line of phpinfo(): "unavailable" is for a cache that could not be created (see the checks with several
+   processes), which must not hide "disabled" while ucache.enabled is 0 */
+function phpinfo_user_cache()
+{
+    ob_start();
+    phpinfo(INFO_MODULES);
+    return preg_match('/^User cache => (\w+)/m', ob_get_clean(), $match) ? $match[1] : null;
+}
+
+$rowEnabled = phpinfo_user_cache();
+ini_set('ucache.enabled', '0');
+$rowDisabled = phpinfo_user_cache();
+ini_restore('ucache.enabled');
+check('phpinfo() says the user cache is enabled, and disabled while ucache.enabled is 0',
+      $rowEnabled === 'enabled' && $rowDisabled === 'disabled' && ini_get('ucache.enabled') === '1', [$rowEnabled, $rowDisabled]);
 
 /*
  * Start from an empty cache
@@ -2203,15 +2220,19 @@ function cmd_arg($arg)
     return $quoted . str_repeat('\\', $backslashes * 2) . '"';
 }
 
-/* The arguments of a child php.exe: the DLL under test, on the cache of group $pool. The path of the DLL is
-   quoted for the INI parser as build.bat does: in single quotes (taken as they are), or in double quotes if
-   the path has a single quote */
+/* The arguments of a child php.exe: the DLL under test, on the cache of group $pool (null: no ucache.apppoolid, so
+   that APP_POOL_ID or the parent process groups it). The path of the DLL is quoted for the INI parser as build.bat
+   does: in single quotes (taken as they are), or in double quotes if the path has a single quote */
 function child_php_args($pool, array $ini, $script = null, array $scriptArgs = [])
 {
     global $childDll;
 
     $quote = (strpos($childDll, "'") === false) ? "'" : '"';
-    $args = ['-n', '-d', "extension=$quote$childDll$quote", '-d', 'ucache.enablecli=1', '-d', "ucache.apppoolid=$pool"];
+    $args = ['-n', '-d', "extension=$quote$childDll$quote", '-d', 'ucache.enablecli=1'];
+    if ($pool !== null) {
+        $args[] = '-d';
+        $args[] = "ucache.apppoolid=$pool";
+    }
     foreach ($ini as $name => $value) {
         $args[] = '-d';
         $args[] = "$name=$value";
@@ -4133,6 +4154,183 @@ CHILDSCRIPT
               $badExit === 0 && $warned && is_array($result) && $result['funcs'] === [] && $result['ucache_get exists'] === false,
               ['exit code' => $badExit, 'result' => $result, 'output' => child_tail($bad)]);
     }
+
+    /* The settings read at startup and the processes that share a cache. The processes of these checks run at the same time:
+       first the ones that read ucache.size and the holders, then the clients of the holders. Each has a pool of its own, or an
+       APP_POOL_ID of its own (the children inherit the environment of this process when they start, see putenv()) */
+    $startupScript = $childDir . DIRECTORY_SEPARATOR . 'startup.php';
+    file_put_contents($startupScript, <<<'CHILDSCRIPT'
+<?php
+/* ucache.size as ini_get() shows it, the size of the cache in bytes (null without a cache or functions), phpinfo()'s User
+   cache line, whether ucache_get() exists, and what ucache_set() returns */
+$meminfo = function_exists('ucache_meminfo') ? ucache_meminfo() : null;
+ob_start();
+phpinfo(INFO_MODULES);
+$row = preg_match('/^User cache => (\w+)/m', ob_get_clean(), $match) ? $match[1] : null;
+echo "RESULT ", base64_encode(serialize([ini_get('ucache.size'), is_array($meminfo) ? $meminfo['memory_total'] : null, $row,
+                                         function_exists('ucache_get'), function_exists('ucache_set') ? ucache_set('startup', 1) : null])), "\n";
+CHILDSCRIPT
+    );
+
+    /* ucache.size: megabytes, or a size with a K, M or G suffix, which a B may follow, read in decimal (WinCache 2.0.0.8
+       applied the suffix to the megabytes, so 64M gave 930 MB, and read 064 as octal); K is rounded up. Outside 5 to 930 MB
+       it is clamped, digits followed by other text are taken as megabytes, and anything else gives the default, 8 MB, each
+       with a startup warning; an empty value gives the default without one. A ucache.filemapdir that does not exist (a pool
+       id makes the cache file-backed) keeps the cache from being created: a startup warning names the folder and the Windows
+       error, the functions fail and phpinfo() says unavailable (ucache.size=1GB there gets its warning without committing
+       930 MB). Under the CLI without ucache.enablecli, where no cache is created, a ucache.size that is not valid raises no
+       warning, but an invalid ucache.prefix does */
+    $missing = $childDir . DIRECTORY_SEPARATOR . 'no-such-folder';
+    $quote = (strpos($missing, "'") === false) ? "'" : '"';
+    $mb = 1024 * 1024;
+    $sizeCases = [
+        /* [settings, expected [ini_get(), memory_total, User cache line, ucache_get() exists, ucache_set()], warnings expected] */
+        [['ucache.size' => '64M'], ['64M', 64 * $mb, 'enabled', true, true], []],
+        [['ucache.size' => '100000k'], ['100000k', 98 * $mb, 'enabled', true, true], []],
+        [['ucache.size' => '064'], ['064', 64 * $mb, 'enabled', true, true], []],
+        [['ucache.size' => '64 MB'], ['64 MB', 64 * $mb, 'enabled', true, true], []],
+        [['ucache.size' => ''], ['', 8 * $mb, 'enabled', true, true], []],
+        [['ucache.size' => '0'], ['0', 5 * $mb, 'enabled', true, true], ['ucache.size "0" is outside 5 to 930 MB: the cache has 5 MB']],
+        [['ucache.size' => '64MiB'], ['64MiB', 64 * $mb, 'enabled', true, true],
+         ['ucache.size "64MiB" is not a number of megabytes nor a size such as 64M: the cache has 64 MB, the number it starts with']],
+        [['ucache.size' => '0x40'], ['0x40', 8 * $mb, 'enabled', true, true],
+         ['ucache.size "0x40" is not a number of megabytes nor a size such as 64M: the cache has the default size, 8 MB']],
+        [['ucache.size' => '1GB', 'ucache.filemapdir' => "$quote$missing$quote"], ['1GB', null, 'unavailable', true, false],
+         ['ucache.size "1GB" is outside 5 to 930 MB: the cache has 930 MB',
+          "ucache: the user cache could not be created, so the ucache functions fail: its file in ucache.filemapdir \"$missing\" could not be created or opened (error 209, Windows error 3)"]],
+        [['ucache.enablecli' => '0', 'ucache.size' => 'abc', 'ucache.prefix' => '1cache'], ['abc', null, 'disabled', false, null],
+         ['ucache.prefix "1cache" is not a valid function name prefix']],
+    ];
+    $sized = [];
+    foreach ($sizeCases as $n => $case) {
+        $sized[$n] = child_start("sz-$n", child_php_args($poolBase . "sz$n", $case[0], $startupScript));
+    }
+
+    /* Which processes share a cache. A pool id (ucache.apppoolid, else APP_POOL_ID) goes into the names as a 64-bit hash,
+       A-Z taken as a-z, where WinCache 2.0.0.8 reduced it to one of 899999 numbers (site907 and site1499 gave the same). It is
+       hashed in UTF-8: APP_POOL_ID is read as Unicode, and ucache.apppoolid, which PHP gets from -d in the ANSI code page, is
+       converted from it when it is not UTF-8. An empty ucache.apppoolid (ucache.apppoolid=, none, ...) or ucache.namesalt is
+       not set. Without a pool id, the parent process groups the processes, and ucache.filemapdir is not used. A pool id that
+       is not an IIS application pool leaves the cache in the paging file, and an empty ucache.filemapdir too (WinCache 2.0.0.8
+       put the file in the root of the current drive). The salts keep the fixed ids away from the caches of other runs */
+    $savedPoolId = getenv('APP_POOL_ID');
+    $putPoolId = function ($value) {
+        putenv(($value === null) ? 'APP_POOL_ID' : "APP_POOL_ID=$value");
+    };
+    $salt = substr($poolBase, -8);
+    $drive = substr($childDir, 0, 3);
+    /* A character of the ANSI code page outside ASCII, which a -d argument can carry (none if there is no such character) */
+    $ansiChar = '';
+    if (function_exists('sapi_windows_cp_get') && function_exists('sapi_windows_cp_conv')) {
+        $acp = sapi_windows_cp_get('ansi');
+        foreach (["\u{00E9}", "\u{03B1}", "\u{0436}", "\u{05D0}", "\u{3042}"] as $char) {
+            $bytes = @sapi_windows_cp_conv(65001, $acp, $char);
+            if (is_string($bytes) && $bytes !== '' && strpos($bytes, '?') === false && @sapi_windows_cp_conv($acp, 65001, $bytes) === $char) {
+                $ansiChar = $char;
+                break;
+            }
+        }
+    }
+    $envPool = $poolBase . 'ida' . $ansiChar;
+
+    $putPoolId(null);
+    $idHolder = child_start('id-holder', child_php_args('site907', ['ucache.namesalt' => $salt, 'ucache.filemapdir' => ''], $holderScript,
+                                                        ['pooled', 'stored by site907']));
+    $putPoolId($envPool);
+    $envHolder = child_start('id-env-holder', child_php_args('', ['ucache.namesalt' => ''], $holderScript, ['pooled', 'stored through APP_POOL_ID']));
+    $putPoolId($poolBase . "idu\u{0F40}");
+    $uniHolder = child_start('id-uni-holder', child_php_args(null, ['ucache.namesalt' => $salt . 'u', 'ucache.filemapdir' => "$quote$childDir$quote"],
+                                                             $holderScript, ['pooled', 'stored through a Unicode APP_POOL_ID']));
+    $putPoolId(null);
+    $parentHolder = child_start('id-ppid-holder', child_php_args(null, ['ucache.namesalt' => $salt . 'p', 'ucache.filemapdir' => "$quote$childDir$quote"],
+                                                                 $holderScript, ['pooled', 'stored in the cache of the parent process']));
+    $holdersReady = child_wait_for($idHolder, '/^READY/m', 30) && child_wait_for($envHolder, '/^READY/m', 30)
+                    && child_wait_for($uniHolder, '/^READY/m', 30) && child_wait_for($parentHolder, '/^READY/m', 30);
+    /* The files of the caches while their holders run: none in the root of the drive, nor in ucache.filemapdir */
+    $rootFiles = glob($drive . 'ucache_*' . $salt . '*.tmp') ?: [];
+    $dirFiles = glob($childDir . DIRECTORY_SEPARATOR . 'ucache_*.tmp') ?: [];
+
+    $clients = [];
+    $clients['SITE907'] = child_start('id-same', child_php_args('SITE907', ['ucache.namesalt' => $salt], $clientScript, ['exists', 'pooled']));
+    $clients['site1499'] = child_start('id-other', child_php_args('site1499', ['ucache.namesalt' => $salt], $clientScript, ['exists', 'pooled']));
+    $putPoolId($envPool);
+    $clients['none'] = child_start('id-env-none', child_php_args('none', [], $clientScript, ['exists', 'pooled']));
+    $putPoolId($poolBase . 'idb');
+    $clients['other APP_POOL_ID'] = child_start('id-env-other', child_php_args('', [], $clientScript, ['exists', 'pooled']));
+    $clients['ucache.apppoolid'] = child_start('id-env-named', child_php_args(strtoupper($poolBase . 'ida') . $ansiChar, [], $clientScript, ['exists', 'pooled']));
+    $putPoolId($poolBase . "idu\u{0F40}");
+    $clients['same Unicode'] = child_start('id-uni-same', child_php_args(null, ['ucache.namesalt' => $salt . 'u'], $clientScript, ['exists', 'pooled']));
+    $putPoolId($poolBase . "idu\u{0F41}");
+    $clients['other Unicode'] = child_start('id-uni-other', child_php_args(null, ['ucache.namesalt' => $salt . 'u'], $clientScript, ['exists', 'pooled']));
+    $putPoolId(null);
+    $clients['empty, parent'] = child_start('id-ppid-empty', child_php_args('', ['ucache.namesalt' => $salt . 'p'], $clientScript, ['exists', 'pooled']));
+    $putPoolId(($savedPoolId === false) ? null : $savedPoolId);
+
+    $seen = [];
+    foreach ($clients as $name => $client) {
+        $exit = child_finish($client, 30);
+        $result = child_result($client);
+        $seen[$name] = ($exit === 0 && is_array($result) && isset($result['pooled'])) ? $result['pooled'] : ['exit code' => $exit, 'output' => child_tail($client)];
+    }
+    /* Each holder reads back what it stored */
+    $holderResults = [];
+    foreach (['stored by site907' => $idHolder, 'stored through APP_POOL_ID' => $envHolder, 'stored through a Unicode APP_POOL_ID' => $uniHolder,
+              'stored in the cache of the parent process' => $parentHolder] as $value => $holder) {
+        child_send($holder, 'pooled');
+        $exit = child_finish($holder, 30);
+        $holderResults[$value] = ($exit === 0 && child_result($holder) === serialize($value)) ? 'ok' : ['exit code' => $exit, 'output' => child_tail($holder)];
+    }
+    $holdersOk = $holdersReady && $holderResults === array_fill_keys(array_keys($holderResults), 'ok');
+
+    $sizeResults = [];
+    foreach ($sized as $n => $child) {
+        $exit = child_finish($child, 30);
+        $output = child_output($child);
+        $warnings = [];
+        foreach ($sizeCases[$n][2] as $text) {
+            $warnings[] = strpos($output, $text) !== false;
+        }
+        $sizeResults[$n] = [$exit, child_result($child), $warnings, strpos($output, 'ucache.size') !== false, child_tail($child)];
+    }
+    /* Whether case $n ended as expected, with exactly the warnings it expects ('ucache.size' appears only in them) */
+    $sizeOk = function ($n) use ($sizeResults, $sizeCases) {
+        list($exit, $result, $warnings, $mentions) = $sizeResults[$n];
+        $wantsSizeWarning = false;
+        foreach ($sizeCases[$n][2] as $text) {
+            $wantsSizeWarning = $wantsSizeWarning || strpos($text, 'ucache.size') !== false;
+        }
+        return $exit === 0 && $result === $sizeCases[$n][1] && !in_array(false, $warnings, true) && $mentions === $wantsSizeWarning;
+    };
+    $sizeDetail = function (array $cases) use ($sizeResults, $sizeCases) {
+        $detail = [];
+        foreach ($cases as $n) {
+            $detail[$sizeCases[$n][0]['ucache.size']] = ['exit code' => $sizeResults[$n][0], 'result' => $sizeResults[$n][1],
+                                                         'warnings found' => $sizeResults[$n][2], 'output' => $sizeResults[$n][4]];
+        }
+        return $detail;
+    };
+
+    check('(in other processes) ucache.size takes megabytes or a size with a K, M or G suffix, in decimal: 64M, 100000k (rounded up), 064, 64 MB and an empty value give caches of 64, 98, 64, 64 and 8 MB, without a warning',
+          $sizeOk(0) && $sizeOk(1) && $sizeOk(2) && $sizeOk(3) && $sizeOk(4), $sizeDetail([0, 1, 2, 3, 4]));
+    check('(in other processes) ucache.size=0 is clamped to 5 MB, 64MiB (digits and other text) gives 64 MB and 0x40 the default 8 MB, each with a startup warning that says so',
+          $sizeOk(5) && $sizeOk(6) && $sizeOk(7), $sizeDetail([5, 6, 7]));
+    check('(in another process) a cache that cannot be created (ucache.filemapdir names a folder that does not exist) gets a startup warning that names the folder and the Windows error, the functions fail and phpinfo() says unavailable; ucache.size=1GB gets its own warning there',
+          $sizeOk(8), $sizeDetail([8]));
+    check('(in another process) under the CLI without ucache.enablecli, phpinfo() says disabled and a ucache.size that is not valid raises no warning, but an invalid ucache.prefix does',
+          $sizeOk(9), $sizeDetail([9]));
+
+    check('ucache.apppoolid: the same id shares a cache, A-Z taken as a-z (site907, SITE907), and ids that WinCache 2.0.0.8 reduced to the same number do not (site1499); with an empty ucache.filemapdir the cache is in the paging file, with no file in the root of the drive',
+          $holdersOk && $seen['SITE907'] === true && $seen['site1499'] === false && $rootFiles === [],
+          ['holders' => $holderResults, 'SITE907, site1499' => [$seen['SITE907'], $seen['site1499']], 'files in the root' => $rootFiles]);
+    check('an empty ucache.apppoolid (ucache.apppoolid=, or none) or ucache.namesalt is not set: APP_POOL_ID groups the processes; ucache.apppoolid takes precedence over it, and is the same id as an APP_POOL_ID of the same name, A-Z taken as a-z, also with a character of the ANSI code page given with -d (' . (($ansiChar === '') ? 'none found' : bin2hex($ansiChar)) . ')',
+          $holdersOk && $seen['none'] === true && $seen['other APP_POOL_ID'] === false && $seen['ucache.apppoolid'] === true,
+          ['holders' => $holderResults, 'none, other APP_POOL_ID, ucache.apppoolid' => [$seen['none'], $seen['other APP_POOL_ID'], $seen['ucache.apppoolid']]]);
+    check('APP_POOL_ID is read as Unicode: application pools whose names differ only in characters outside the ANSI code page do not share a cache; with ucache.filemapdir and a pool id that is not an IIS application pool, the cache is in the paging file',
+          $holdersOk && $seen['same Unicode'] === true && $seen['other Unicode'] === false && $dirFiles === [],
+          ['holders' => $holderResults, 'same name, other name' => [$seen['same Unicode'], $seen['other Unicode']], 'files in ucache.filemapdir' => $dirFiles]);
+    check('without a pool id (an empty ucache.apppoolid, no APP_POOL_ID) the processes of one parent process share a cache, which ucache.filemapdir does not back with a file',
+          $holdersOk && $seen['empty, parent'] === true && $dirFiles === [],
+          ['holders' => $holderResults, 'empty ucache.apppoolid' => $seen['empty, parent'], 'files in ucache.filemapdir' => $dirFiles]);
 
     /* ucache.php, from copies that php -S runs as a web server would: stats.php with a password of its own, stats-copy.php
        the same page in another file, stats-auth2.php with USE_AUTHENTICATION 2, and stats-default.php as it comes, with the

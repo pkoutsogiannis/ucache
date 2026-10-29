@@ -280,9 +280,14 @@ function notice($html) {
 }
 
 function cache_unavailable_notice() {
+    // Since 1.0.0.2, the extension says why at startup; an older php_ucache.dll does not
+    $why = version_compare((string)phpversion('ucache'), '1.0.0.2', '>=')
+        ? 'the warning that PHP logged when it started says why: see the PHP error log, or the Windows Application '
+            . 'event log (source <strong>PHP-' . html_escape(PHP_VERSION) . '</strong>)'
+        : 'check the other <strong>ucache.*</strong> directives, such as <strong>ucache.filemapdir</strong>';
     return notice('The user cache is not available. Either it is disabled (enable it with the '
-        . '<strong>ucache.enabled</strong> directive in <strong>php.ini</strong>), or it could not be created '
-        . '(check the other <strong>ucache.*</strong> directives, such as <strong>ucache.filemapdir</strong>).');
+        . '<strong>ucache.enabled</strong> directive in <strong>php.ini</strong>), or it could not be created ('
+        . $why . ').');
 }
 
 function server_value($name) {
@@ -325,12 +330,21 @@ function setting_cell($name, $value) {
 }
 
 // What the value of a ucache setting does, or null where the value says it all. Only plain numbers are explained:
-// ini_get() returns the value as written, and "512M" or "-1" would be read differently by the extension.
+// ini_get() returns the value as written, and "512M" or "-1" would be read differently by the extension. Except
+// ucache.size while the cache exists: its note is the size of the cache itself, right whatever the value says and
+// whichever build of php_ucache.dll read it (1.0.0.2 reads 64M as 64 MB, earlier builds as 930 MB).
 function setting_note($name, $value) {
     $number = ctype_digit($value) ? (int)$value : null;
     switch ($name) {
         case 'ucache.prefix':
             return $value . 'get(), ' . $value . 'set(), …';
+        case 'ucache.size':
+            if (is_array($GLOBALS['ucache_mem_info'])) {
+                $size = intdiv((int)$GLOBALS['ucache_mem_info']['memory_total'], 1048576);
+                return format_number($size) . ' MB of shared memory'
+                    . (($number !== null && $size != $number) ? ($size > $number ? ' (the minimum)' : ' (the maximum)') : '');
+            }
+            break;
     }
     if ($number === null) {
         return null;

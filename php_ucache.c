@@ -41,6 +41,17 @@
 #define PREFIX_DEFAULT              "ucache_"
 #define PREFIX_LENGTH_MAXIMUM       64
 
+/* The default of ucache.size, in megabytes */
+#define SIZE_DEFAULT                8
+
+/* Where ucache_modify_size stops adding digits: any number this large is above the maximum anyway */
+#define SIZE_NUMBER_SATURATED       ((zend_ulong)1 << 40)
+
+/* How ucache_modify_size read ucache.size, for the warning that MINIT raises (see size_validate) */
+#define SIZE_READ_AS_WRITTEN        0   /* A size, or an empty value (the default) */
+#define SIZE_READ_LEADING_NUMBER    1   /* Digits, then other text: the digits, in megabytes */
+#define SIZE_READ_NOT_A_SIZE        2   /* Anything else: the default */
+
 /* Default values in arginfo (PHP 8.0+) let named arguments skip optional parameters */
 #if PHP_VERSION_ID >= 80000
 # define UCACHE_ARG_INFO_DEFAULT(pass_by_ref, name, default_value) \
@@ -59,11 +70,17 @@ static char ucache_namesalt[NAMESALT_LENGTH_MAXIMUM + 1];
 /* unregistered in MSHUTDOWN. NULL when they are not registered */
 static zend_function_entry * ucache_registered_functions = NULL;
 
+/* How ucache_modify_size read ucache.size (SIZE_READ_*) */
+static unsigned char ucache_size_read = SIZE_READ_AS_WRITTEN;
+
 static void set_success(zval * success, zend_bool value);
 static void set_or_add(INTERNAL_FUNCTION_PARAMETERS, unsigned char isadd);
 static void inc_or_dec(INTERNAL_FUNCTION_PARAMETERS, unsigned char isdec);
 static int functions_register(int type);
 static void functions_unregister(void);
+static ZEND_INI_MH(ucache_modify_size);
+static void size_validate(void);
+static void startup_failure_warning(int result);
 
 /* START OF PHP EXTENSION MACROS STUFF */
 PHP_MINIT_FUNCTION(ucache);
@@ -194,7 +211,7 @@ zend_module_entry ucache_module_entry = {
 PHP_INI_BEGIN()
 /* index 0 */  STD_PHP_INI_BOOLEAN("ucache.enabled", "1", PHP_INI_ALL, OnUpdateBool, ucenabled, zend_ucache_globals, ucache_globals)
 /* index 1 */  STD_PHP_INI_BOOLEAN("ucache.enablecli", "0", PHP_INI_SYSTEM, OnUpdateBool, enablecli, zend_ucache_globals, ucache_globals)
-/* index 2 */  STD_PHP_INI_ENTRY("ucache.size", "8", PHP_INI_SYSTEM, OnUpdateLong, ucachesize, zend_ucache_globals, ucache_globals)
+/* index 2 */  STD_PHP_INI_ENTRY("ucache.size", "8", PHP_INI_SYSTEM, ucache_modify_size, ucachesize, zend_ucache_globals, ucache_globals)
 /* index 3 */  STD_PHP_INI_ENTRY("ucache.namesalt", NULL, PHP_INI_SYSTEM, OnUpdateString, namesalt, zend_ucache_globals, ucache_globals)
 /* index 4 */  STD_PHP_INI_ENTRY("ucache.apppoolid", NULL, PHP_INI_SYSTEM, OnUpdateString, apppoolid, zend_ucache_globals, ucache_globals)
 /* index 5 */  STD_PHP_INI_ENTRY("ucache.filemapdir", NULL, PHP_INI_SYSTEM, OnUpdateString, filemapdir, zend_ucache_globals, ucache_globals)
@@ -224,7 +241,7 @@ static void globals_initialize(zend_ucache_globals * globals)
     /* Initalize the ucache_globals items, before parsing the INI file */
     UCG(ucenabled)   = 1;    /* User cache enabled by default */
     UCG(enablecli)   = 0;    /* ucache not enabled by default for CLI */
-    UCG(ucachesize)  = 8;    /* User cache size is 8 MB by default */
+    UCG(ucachesize)  = SIZE_DEFAULT; /* User cache size is 8 MB by default */
     UCG(ucgc_threshold) = 0;   /* Writes do not run the scavenger by default */
     UCG(ucgc_interval)  = 10;   /* Secs between scavenger runs at the end of requests */
     UCG(ucgc_ttl)       = 0;   /* Scavenger removes expired entries only */
@@ -253,6 +270,227 @@ static void globals_terminate(zend_ucache_globals * globals)
     dprintverbose("end globals_terminate");
 
     return;
+}
+
+/*
+ * ucache.size as written: a number of megabytes (64), or a size with a K, M or G suffix in any case, which a B may
+ * follow (64M, 64MB, 1G, 65536K), with blanks allowed around the number and the suffix; K is rounded up to whole
+ * megabytes. Digits followed by other text (64MiB) are taken as megabytes, as 1.0.0.1 took them, and anything else
+ * (abc, -1, 0x40) gives the default, as does an empty value. OnUpdateLong, which 1.0.0.1 used, applied the suffix
+ * to the number of megabytes (64M asked for 67108864 MB, which the clamp turned into 930 without a word) and read 064
+ * as octal. Sets UCG(ucachesize), saturated but not clamped, and ucache_size_read. It never fails, so ini_get() and
+ * phpinfo() show the value as written: MINIT clamps the size and says what the cache gets (size_validate), where it
+ * creates the cache, so the CLI without ucache.enablecli stays silent. The size is only used there: a [PATH=] or
+ * [HOST=] section of php.ini (php-cgi) that sets it per request changes nothing
+ */
+static ZEND_INI_MH(ucache_modify_size)
+{
+    const char *  value  = ZSTR_VAL(new_value);
+    size_t        index  = 0;
+    size_t        digits = 0;
+    zend_ulong    number = 0;
+    zend_ulong    size   = SIZE_DEFAULT;
+    unsigned char read   = SIZE_READ_AS_WRITTEN;
+
+    while(value[index] == ' ' || value[index] == '\t')
+    {
+        index++;
+    }
+
+    /* Empty: the default, as when the setting is not there */
+    if(value[index] == '\0')
+    {
+        goto Finished;
+    }
+
+    /* A hexadecimal number, which OnUpdateLong read as such (0x40 was 64), is not the 0 it starts with */
+    if(value[index] == '0' && (value[index + 1] == 'x' || value[index + 1] == 'X'))
+    {
+        read = SIZE_READ_NOT_A_SIZE;
+        goto Finished;
+    }
+
+    for(; value[index] >= '0' && value[index] <= '9'; index++, digits++)
+    {
+        if(number < SIZE_NUMBER_SATURATED)
+        {
+            number = number * 10 + (zend_ulong)(value[index] - '0');
+        }
+    }
+
+    if(digits == 0)
+    {
+        read = SIZE_READ_NOT_A_SIZE;
+        goto Finished;
+    }
+
+    size = number;
+
+    while(value[index] == ' ' || value[index] == '\t')
+    {
+        index++;
+    }
+
+    /* The suffix, and a B after it */
+    if(value[index] == 'k' || value[index] == 'K' || value[index] == 'm' || value[index] == 'M'
+        || value[index] == 'g' || value[index] == 'G')
+    {
+        if(value[index] == 'k' || value[index] == 'K')
+        {
+            size = (number + 1023) / 1024;
+        }
+        else if(value[index] == 'g' || value[index] == 'G')
+        {
+            size = number * 1024;
+        }
+
+        index++;
+
+        if(value[index] == 'b' || value[index] == 'B')
+        {
+            index++;
+        }
+    }
+
+    while(value[index] == ' ' || value[index] == '\t')
+    {
+        index++;
+    }
+
+    /* Other text after the number: the number, in megabytes */
+    if(value[index] != '\0')
+    {
+        size = number;
+        read = SIZE_READ_LEADING_NUMBER;
+    }
+
+Finished:
+
+    UCG(ucachesize)  = (zend_long)size;
+    ucache_size_read = read;
+
+    return SUCCESS;
+}
+
+/* Clamps UCG(ucachesize) to ZCACHE_SIZE_MINIMUM..ZCACHE_SIZE_MAXIMUM, and raises a startup warning when the cache */
+/* does not get the ucache.size that was written. Called by MINIT where it creates the cache */
+static void size_validate(void)
+{
+    const char * value   = INI_STR("ucache.size");
+    zend_long    size    = UCG(ucachesize);
+    zend_bool    clamped = 0;
+
+    if(value == NULL)
+    {
+        value = "";
+    }
+
+    if(size < ZCACHE_SIZE_MINIMUM || size > ZCACHE_SIZE_MAXIMUM)
+    {
+        size    = (size < ZCACHE_SIZE_MINIMUM) ? ZCACHE_SIZE_MINIMUM : ZCACHE_SIZE_MAXIMUM;
+        clamped = 1;
+
+        UCG(ucachesize) = size;
+    }
+
+    if(ucache_size_read == SIZE_READ_NOT_A_SIZE)
+    {
+        zend_error(E_CORE_WARNING, "ucache.size \"%s\" is not a number of megabytes nor a size such as 64M: the cache has the default size, %d MB",
+                   value, SIZE_DEFAULT);
+    }
+    else if(ucache_size_read == SIZE_READ_LEADING_NUMBER && clamped)
+    {
+        zend_error(E_CORE_WARNING, "ucache.size \"%s\" is not a number of megabytes nor a size such as 64M, and the number it starts with is outside %d to %d MB: the cache has %d MB",
+                   value, ZCACHE_SIZE_MINIMUM, ZCACHE_SIZE_MAXIMUM, (int)size);
+    }
+    else if(ucache_size_read == SIZE_READ_LEADING_NUMBER)
+    {
+        zend_error(E_CORE_WARNING, "ucache.size \"%s\" is not a number of megabytes nor a size such as 64M: the cache has %d MB, the number it starts with",
+                   value, (int)size);
+    }
+    else if(clamped)
+    {
+        zend_error(E_CORE_WARNING, "ucache.size \"%s\" is outside %d to %d MB: the cache has %d MB",
+                   value, ZCACHE_SIZE_MINIMUM, ZCACHE_SIZE_MAXIMUM, (int)size);
+    }
+}
+
+/*
+ * The startup warning of a cache that could not be created, with the likely cause. The functions then fail, and
+ * phpinfo() says unavailable. PHP writes startup warnings to its error log and, on Windows, to the Application event
+ * log (PHP 7 always, PHP 8 with log_errors on or display_startup_errors off), where an administrator of IIS finds the
+ * warnings of php-cgi. The Windows error is the one recorded where the step failed, for the results whose step records
+ * it: error_glerror is kept for the whole process and other steps record errors they recover from, so MINIT clears it
+ * first and the warning leaves it out for the other results
+ */
+static void startup_failure_warning(int result)
+{
+    unsigned int winerror    = error_getlasterror();
+    zend_bool    haswinerror = 0;
+    const char * cause       = NULL;
+
+    switch(result)
+    {
+        case FATAL_LOCK_INIT_CREATEMUTEX:
+        case FATAL_FILEMAP_INIT_EVENT:
+        case FATAL_FILEMAP_INFOMAP:
+        case FATAL_FILEMAP_MAPVIEW:
+        case FATAL_FILEMAP_CREATEFILE:
+        case FATAL_FILEMAP_CREATEFILEMAP:
+        case FATAL_FILEMAP_REVERT_FAILED:
+        case FATAL_ALLOC_INIT_EVENT:
+        case FATAL_ZVCACHE_INIT_EVENT:
+            haswinerror = (winerror != 0);
+            break;
+        default:
+            break;
+    }
+
+    if(result == FATAL_FILEMAP_CREATEFILE)
+    {
+        /* Not necessarily the folder: a file of another account can be in the way too (Windows error 5) */
+        zend_error(E_CORE_WARNING, "ucache: the user cache could not be created, so the ucache functions fail: its file in ucache.filemapdir \"%s\" could not be created or opened (error %d, Windows error %u)",
+                   (UCG(filemapdir) != NULL) ? UCG(filemapdir) : "", result, winerror);
+        return;
+    }
+
+    /* utils_create_init_event records WAIT_TIMEOUT when the wait for an init mutex times out */
+    if(haswinerror && winerror == WAIT_TIMEOUT)
+    {
+        zend_error(E_CORE_WARNING, "ucache: the user cache could not be created, so the ucache functions fail: a process that shares it kept its initialization lock for %d seconds (error %d, Windows error %u)",
+                   MAX_INIT_EVENT_WAIT / 1000, result, winerror);
+        return;
+    }
+
+    if(haswinerror)
+    {
+        switch(winerror)
+        {
+            case ERROR_ACCESS_DENIED:
+                cause = "access to its shared memory or locks was denied: processes of another account may use the same ucache.apppoolid (or APP_POOL_ID) and ucache.namesalt";
+                break;
+            case ERROR_COMMITMENT_LIMIT:
+                cause = "the paging file has no room for it (the system commit limit)";
+                break;
+            default:
+                break;
+        }
+    }
+
+    if(cause != NULL)
+    {
+        zend_error(E_CORE_WARNING, "ucache: the user cache could not be created, so the ucache functions fail: %s (error %d, Windows error %u)",
+                   cause, result, winerror);
+    }
+    else if(haswinerror)
+    {
+        zend_error(E_CORE_WARNING, "ucache: the user cache could not be created, so the ucache functions fail (error %d, Windows error %u)",
+                   result, winerror);
+    }
+    else
+    {
+        zend_error(E_CORE_WARNING, "ucache: the user cache could not be created, so the ucache functions fail (error %d)", result);
+    }
 }
 
 /* A prefix that makes valid PHP function names: letters, digits, underscores and the bytes */
@@ -375,12 +613,28 @@ PHP_MINIT_FUNCTION(ucache)
         goto Finished;
     }
 
-    /* set up the app pool ID */
-    UCG(apppoolid) = utils_get_apppool_name();
+    /* First, before anything uses them: an empty ucache.apppoolid, ucache.filemapdir or ucache.namesalt is not set */
+    /* ("ucache.apppoolid=", or none, off, no, false or null, which the INI parser makes empty). Otherwise every process */
+    /* with an empty id would share one cache whatever APP_POOL_ID or its parent process, the file of the cache would go */
+    /* to the root of the current drive, and an empty salt would keep a cache apart from the unsalted one although */
+    /* ini_get() shows the same for both. The INI values themselves are left alone (see ucache_namesalt) */
+    if(UCG(apppoolid) != NULL && UCG(apppoolid)[0] == '\0')
+    {
+        UCG(apppoolid) = NULL;
+    }
 
-    /* Compare value of globals with minimum and maximum allowed */
-    UCG(ucachesize)  = (UCG(ucachesize)  < ZCACHE_SIZE_MINIMUM) ? ZCACHE_SIZE_MINIMUM : UCG(ucachesize);
-    UCG(ucachesize)  = (UCG(ucachesize)  > ZCACHE_SIZE_MAXIMUM) ? ZCACHE_SIZE_MAXIMUM : UCG(ucachesize);
+    if(UCG(filemapdir) != NULL && UCG(filemapdir)[0] == '\0')
+    {
+        UCG(filemapdir) = NULL;
+    }
+
+    if(UCG(namesalt) != NULL && UCG(namesalt)[0] == '\0')
+    {
+        UCG(namesalt) = NULL;
+    }
+
+    /* Then the size, with its startup warning */
+    size_validate();
 
     /* Truncate namesalt to 8 characters, in a copy (see ucache_namesalt) */
     if(UCG(namesalt) != NULL && strlen(UCG(namesalt)) > NAMESALT_LENGTH_MAXIMUM)
@@ -393,6 +647,11 @@ PHP_MINIT_FUNCTION(ucache)
 
     /* Even if enabled is set to false, create cache */
     /* because scripts can selectively enable it */
+
+    /* The warning of a failure gives the Windows error that the failing step recorded: start from none, since */
+    /* error_glerror is kept for the whole process (see startup_failure_warning) */
+    SetLastError(ERROR_SUCCESS);
+    error_setlasterror();
 
     /* Call filemap global initialized. Terminate in MSHUTDOWN */
     result = filemap_global_initialize();
@@ -431,6 +690,9 @@ Finished:
     if(FAILED(result))
     {
         dprintimportant("failure %d in php_minit", result);
+
+        /* PHP keeps running and the functions fail, as before, but the warning says why */
+        startup_failure_warning(result);
 
         if(pzcache != NULL)
         {
@@ -504,6 +766,11 @@ PHP_MINFO_FUNCTION(ucache)
     if(!UCG(enablecli) && !strcmp(sapi_module.name, "cli"))
     {
         php_info_print_table_row(2, "User cache", "disabled");
+    }
+    else if(UCG(zvucache) == NULL)
+    {
+        /* MINIT could not create it: its startup warning says why */
+        php_info_print_table_row(2, "User cache", "unavailable");
     }
     else
     {

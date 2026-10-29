@@ -37,11 +37,11 @@
 #include "precomp.h"
 
 #ifdef _WIN64
-#define LOCK_SUFFIX_FORMAT              "_%u_%u_%u_x64_"
-#define LOCK_NAMESALT_SUFFIX_FORMAT     "_%u_%s_%u_%u_x64_"
+#define LOCK_SUFFIX_FORMAT              "_%u_%u_%s_x64_"
+#define LOCK_NAMESALT_SUFFIX_FORMAT     "_%u_%s_%u_%s_x64_"
 #else  /* not _WIN64 */
-#define LOCK_SUFFIX_FORMAT              "_%u_%u_%u_"
-#define LOCK_NAMESALT_SUFFIX_FORMAT     "_%u_%s_%u_%u_"
+#define LOCK_SUFFIX_FORMAT              "_%u_%u_%s_"
+#define LOCK_NAMESALT_SUFFIX_FORMAT     "_%u_%s_%u_%s_"
 #endif /* _WIN64 */
 
 /* Prefix of every named lock object, so that lock (and init event) */
@@ -128,12 +128,12 @@ int lock_get_nameprefix(
     size_t * pcchnew_prefix
     )
 {
-    int    result  = NONFATAL;
-    char * objname = 0;
-    size_t namelen = 0;
-    int    actual_len = 0;
-    int    pid     = 0;
-    int    ppid    = 0;
+    int          result     = NONFATAL;
+    char *       objname    = 0;
+    size_t       namelen    = 0;
+    int          actual_len = 0;
+    int          pid        = 0;
+    const char * group      = NULL;
 
     /* Get the initial length of name prefix */
     namelen = strlen(name);
@@ -145,13 +145,14 @@ int lock_get_nameprefix(
         namelen += strlen(UCG(namesalt)) + 1;
     }
 
-    /* A lock shared by the processes of the pool has the ppid in its name. The pid */
-    /* stays 0 in the name: only the process-local lock type, now removed, set it */
+    /* A lock shared by the processes of the group has the group in its name (see */
+    /* filemap_global_initialize). The pid stays 0 in the name: only the */
+    /* process-local lock type, now removed, set it */
     switch(type)
     {
         case LOCK_TYPE_SHARED:
-            ppid = UCG(fmapgdata)->ppid;
-            namelen += PID_MAX_LENGTH;
+            group = UCG(fmapgdata)->group;
+            namelen += GROUP_MAX_LENGTH;
             break;
         default:
             result = FATAL_LOCK_INVALID_TYPE;
@@ -159,7 +160,7 @@ int lock_get_nameprefix(
     }
 
     /* Add 6 for underscores, 1 for null termination, */
-    /* LOCK_NUMBER_MAX_STRLEN for adding cachekey, 2 for 0 (unused pid/ppid), */
+    /* LOCK_NUMBER_MAX_STRLEN for adding cachekey, 2 for the pid (always 0), */
     /* PHP_UCACHE_VERSION_LEN, plus the length of the PHP Maj.Min version. */
     namelen  = namelen + LOCK_NUMBER_MAX_STRLEN + 9;
     namelen += sizeof(STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION));
@@ -188,14 +189,14 @@ int lock_get_nameprefix(
 
     ZeroMemory(objname, namelen + 1);
 
-    /* Create nameprefix as name_pid_ppid_ */
+    /* Create nameprefix as name_pid_group_ */
     if(UCG(namesalt) == NULL)
     {
-        actual_len = _snprintf_s(objname, namelen + 1, namelen, LOCK_NAME_PREFIX "%s_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION LOCK_SUFFIX_FORMAT, name, cachekey, pid, ppid);
+        actual_len = _snprintf_s(objname, namelen + 1, namelen, LOCK_NAME_PREFIX "%s_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION LOCK_SUFFIX_FORMAT, name, cachekey, pid, group);
     }
     else
     {
-        actual_len = _snprintf_s(objname, namelen + 1, namelen, LOCK_NAME_PREFIX "%s_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION LOCK_NAMESALT_SUFFIX_FORMAT, name, cachekey, UCG(namesalt), pid, ppid);
+        actual_len = _snprintf_s(objname, namelen + 1, namelen, LOCK_NAME_PREFIX "%s_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION LOCK_NAMESALT_SUFFIX_FORMAT, name, cachekey, UCG(namesalt), pid, group);
     }
 
     if (-1 == actual_len)
@@ -239,8 +240,6 @@ int lock_initialize(lock_context * plock, char * name, unsigned short cachekey, 
     int    result  = NONFATAL;
     char * objname = 0;
     size_t namelen = 0;
-    int    pid     = 0;
-    int    ppid    = 0;
 
     dprintverbose("start lock_initialize");
 
