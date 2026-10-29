@@ -461,6 +461,11 @@ function render_overview(array $info, array $mem) {
             $facts['Last run'] = format_duration($info['last_scavenge_seconds']) . ' ago';
             $facts['Last run removed'] = format_number($info['last_scavenge_count']);
         }
+        // Builds before 1.0.0.2 do not report the locks found abandoned
+        if (isset($info['total_abandoned_lock_count'])) {
+            $facts['Abandoned locks'] = '<span title="Times a process found the cache lock or the allocator lock abandoned by a process that ended while it held it (killed or crashed); what that process was updating was put back">'
+                . format_number($info['total_abandoned_lock_count']) . '</span>';
+        }
         echo stat_tile(ICON_SCAVENGER, 'Scavenged entries', format_number($info['total_scavenged_count']), '', $facts);
     }
 

@@ -1480,6 +1480,7 @@ PHP_FUNCTION(ucache_info)
     zend_ulong           index       = 1;
     const char *         valuetype   = NULL;
     zvcache_info         zvinfo      = {0};
+    alloc_info           ainfo       = {0};
     zend_bool            summaryonly = 0;   /* "b" stores a zend_bool (bool since PHP 8.0) */
     char *               entrykey    = NULL;
     size_t               entrylen    = 0;
@@ -1548,6 +1549,13 @@ PHP_FUNCTION(ucache_info)
     add_assoc_long(return_value, "last_scavenge_count", zvinfo.sccount);
     add_assoc_long(return_value, "total_scavenged_count", (zend_long)zvinfo.scremoved);
     add_assoc_long(return_value, "total_evicted_count", (zend_long)zvinfo.scevicted);
+
+    /* The cache lock and the allocator's lock found abandoned (a process that held one ended without */
+    /* releasing it, and what it left half done was undone, see zvcache_lock and alloc_lock). The */
+    /* allocator's count is read here, once the cache lock is released: waiting for the allocator's lock */
+    /* under the cache lock would make the reads of the other processes wait behind copies into the cache */
+    alloc_getinfo(UCG(zvucache)->zvalloc, &ainfo);
+    add_assoc_long(return_value, "total_abandoned_lock_count", (zend_long)zvinfo.abandoned + (zend_long)ainfo.abandoned);
 
     array_init(&zfentries);
 

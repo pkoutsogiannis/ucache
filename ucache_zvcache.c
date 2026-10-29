@@ -148,6 +148,22 @@ static int  copyout_reference(zvcache_context * pcache, zvcopy_context * pcopy, 
 /* for this long, killed most likely (see zvcache_clear): its batches are short */
 #define CLEAR_SWEEPER_STALE_MS      1000
 
+/*
+ * Writes a field of the shared memory in an update under the cache lock, after logging what it held (see
+ * lock_undo_write in ucache_lock.c): every write of an update that changes more than one field goes
+ * through it (the links of a hash chain and the count of entries, the fields of a ucache_clear(), the end
+ * of a batch of its sweep, the record of a scavenger step), the update ends with lock_undo_commit(), and
+ * the lock is taken with zvcache_lock().  Not logged: the fields of an entry that no chain leads to (before
+ * it is added, once it is removed), and the single writes (the counts of hits and misses, use_ticks, the
+ * value of ucache_inc()), which a process ended at any instruction leaves whole.  An update logs 7 fields
+ * at most: see LOCK_UNDO_MAXIMUM.
+ */
+#define ZVCACHE_SET(pcache, field, value)  LOCK_UNDO_SET(&(pcache)->undo, field, value)
+
+/* undocount next to last_owner, in one aligned 8 bytes: zvcache_lock() reads what lock_lock() has just written */
+C_ASSERT(FIELD_OFFSET(zvcache_header, undocount) / 8 == FIELD_OFFSET(zvcache_header, last_owner) / 8);
+
+static int  zvcache_lock(zvcache_context * pcache);
 static zvcache_value * find_zvcache_entry(zvcache_context * pcache, const char * key, unsigned int index, unsigned char prune);
 static int  create_zvcache_data(zvcache_context * pcache, const char * key, zvcopy_prepared * pprep, unsigned int ttl, zvcache_value ** ppvalue);
 static void destroy_cached_zval(zvcache_context * pcache, zval * pzval);
@@ -2139,6 +2155,53 @@ Finished:
 }
 
 /*
+ * Takes the cache lock, the only way to take it.  A process that ended in the middle of an update of
+ * the cache (see ZVCACHE_SET) left its log in the cache header: the update is undone first, so that an
+ * entry being removed is still in its chain, an entry being added is not (its memory is lost), and a
+ * ucache_clear() did not happen.  The log is replayed whenever it is not empty, not only when the mutex
+ * was abandoned: the mutex is created again if every process closed it (a process that starts while
+ * the last one of the pool exits, which closes its handles before its views), and the segment can
+ * outlive it.  Reading the count costs nothing: it is next to last_owner, which lock_lock() has just
+ * written.  The abandoned mutexes are counted (header->abandoned, for ucache_info()); a mutex created
+ * again is not.  Returns NONFATAL with the lock held; with a failure the lock is not held, and the
+ * caller must neither use the cache nor release the lock: FATAL_LOCK_WAIT if the wait failed,
+ * FATAL_LOCK_UNDO if the log cannot be replayed (see lock_undo_replay), which stays so for every process
+ * until the cache is created again.  Call it only once zvcache_initialize() has set the header up.
+ */
+static int zvcache_lock(zvcache_context * pcache)
+{
+    int              result = NONFATAL;
+    int              undone = 0;
+    zvcache_header * header = pcache->zvheader;
+
+    result = lock_lock(pcache->zvlock);
+    if(result == WARNING_LOCK_ABANDONED)
+    {
+        header->abandoned++;
+        result = NONFATAL;
+    }
+
+    if(FAILED(result))
+    {
+        return result;
+    }
+
+    if(header->undocount != 0)
+    {
+        undone = lock_undo_replay(&pcache->undo);
+        if(undone < 0)
+        {
+            lock_unlock(pcache->zvlock);
+            return FATAL_LOCK_UNDO;
+        }
+
+        dprintcritical("zvcache_lock: put back %d fields of an update of the cache that a process left half done", undone);
+    }
+
+    return NONFATAL;
+}
+
+/*
  * Call this method under lock.  Returns the entry of key that has not expired and was not cleared,
  * NULL if there is none.  With prune, the expired and cleared entries it passes in the bucket, of
  * any key, are removed on the way (their memory is freed by free_pending_entries() once the lock is
@@ -2419,10 +2482,16 @@ static void destroy_zvcache_data(zvcache_context * pcache, zvcache_value * pvalu
     return;
 }
 
+/*
+ * Call this method under write lock.  One update (see ZVCACHE_SET), which logs 2 fields: the link to the
+ * entry, at the end of its chain, and the count.  The entry's own fields are written first, without a log:
+ * nothing leads to it before the link, nor after an undo, which leaves it out (its memory is lost).
+ */
 static void add_zvcache_entry(zvcache_context * pcache, unsigned int index, zvcache_value * pvalue)
 {
     zvcache_header * header  = NULL;
     zvcache_value *  pcheck  = NULL;
+    size_t           offset  = 0;
 
     dprintverbose("start add_zvcache_entry");
 
@@ -2431,6 +2500,7 @@ static void add_zvcache_entry(zvcache_context * pcache, unsigned int index, zvca
 
     header = pcache->zvheader;
     pcheck = ZVCACHE_VALUE(pcache->zvalloc, header->values[index]);
+    offset = alloc_get_valueoffset(pcache->zvalloc, pvalue);
 
     while(pcheck != NULL)
     {
@@ -2442,22 +2512,22 @@ static void add_zvcache_entry(zvcache_context * pcache, unsigned int index, zvca
         pcheck = ZVCACHE_VALUE(pcache->zvalloc, pcheck->next_value);
     }
 
+    /* Set here, under the lock: an entry built during a ucache_clear() and added after it stays */
+    pvalue->cleargen   = header->cleargen;
+    pvalue->next_value = 0;
+    pvalue->prev_value = alloc_get_valueoffset(pcache->zvalloc, pcheck);
+
     if(pcheck != NULL)
     {
-        pcheck->next_value = alloc_get_valueoffset(pcache->zvalloc, pvalue);
-        pvalue->next_value = 0;
-        pvalue->prev_value = alloc_get_valueoffset(pcache->zvalloc, pcheck);
+        ZVCACHE_SET(pcache, pcheck->next_value, offset);
     }
     else
     {
-        header->values[index] = alloc_get_valueoffset(pcache->zvalloc, pvalue);
-        pvalue->next_value = 0;
-        pvalue->prev_value = 0;
+        ZVCACHE_SET(pcache, header->values[index], offset);
     }
 
-    /* Set here, under the lock: an entry built during a ucache_clear() and added after it stays */
-    pvalue->cleargen = header->cleargen;
-    header->itemcount++;
+    ZVCACHE_SET(pcache, header->itemcount, header->itemcount + 1);
+    lock_undo_commit(&pcache->undo);
 
     dprintverbose("end add_zvcache_entry");
 
@@ -2472,7 +2542,9 @@ static void add_zvcache_entry(zvcache_context * pcache, unsigned int index, zvca
  * process of the pool has exited, so the list holds at most FREELIST_MAXIMUM entries: beyond that
  * (a step or a full pass that removes many entries), the entry is freed at once, under the lock,
  * where a kill loses at most the entry being freed.  The sweep of a ucache_clear() stops a batch
- * before that (see sweep_cleared_entries).
+ * before that (see sweep_cleared_entries).  The unlink is one update (see ZVCACHE_SET), which logs 3
+ * fields at most (the count, the 2 links to the entry): a kill before its end leaves the entry in its
+ * chain, and the queue reuses the entry's links only after it.
  */
 static void remove_zvcache_entry(zvcache_context * pcache, unsigned int index, zvcache_value * pvalue)
 {
@@ -2489,39 +2561,42 @@ static void remove_zvcache_entry(zvcache_context * pcache, unsigned int index, z
     header  = pcache->zvheader;
 
     /* Decrement itemcount, or clearitems for a cleared entry, and remove entry from hashtable. Not */
-    /* below 0: a process killed in the middle of zvcache_clear() can leave the counts off */
+    /* below 0, for memory that a build without the undo log shared */
     if(!entry_cleared(header, pvalue))
     {
         if(header->itemcount != 0)
         {
-            header->itemcount--;
+            ZVCACHE_SET(pcache, header->itemcount, header->itemcount - 1);
         }
     }
     else if(header->clearitems != 0)
     {
-        header->clearitems--;
+        ZVCACHE_SET(pcache, header->clearitems, header->clearitems - 1);
     }
 
     if(pvalue->prev_value == 0)
     {
-        header->values[index] = pvalue->next_value;
+        ZVCACHE_SET(pcache, header->values[index], pvalue->next_value);
         if(pvalue->next_value != 0)
         {
             ptemp = ZVCACHE_VALUE(apalloc, pvalue->next_value);
-            ptemp->prev_value = 0;
+            ZVCACHE_SET(pcache, ptemp->prev_value, 0);
         }
     }
     else
     {
         ptemp = ZVCACHE_VALUE(apalloc, pvalue->prev_value);
-        ptemp->next_value = pvalue->next_value;
+        ZVCACHE_SET(pcache, ptemp->next_value, pvalue->next_value);
 
         if(pvalue->next_value != 0)
         {
             ptemp = ZVCACHE_VALUE(apalloc, pvalue->next_value);
-            ptemp->prev_value = pvalue->prev_value;
+            ZVCACHE_SET(pcache, ptemp->prev_value, pvalue->prev_value);
         }
     }
+
+    /* The entry is out of the cache from here on: its links are free for the queue */
+    lock_undo_commit(&pcache->undo);
 
     if(pcache->freecount < FREELIST_MAXIMUM)
     {
@@ -2605,6 +2680,7 @@ static void sweep_cleared_entries(zvcache_context * pcache, LONGLONG budget, uns
     unsigned int     scanned = 0;
     size_t           bytes   = 0;
     unsigned char    full    = 0;
+    unsigned char    held    = 0;
     LARGE_INTEGER    started;
 
     dprintverbose("start sweep_cleared_entries");
@@ -2613,7 +2689,10 @@ static void sweep_cleared_entries(zvcache_context * pcache, LONGLONG budget, uns
 
     while(clear_pending(header) && (budget == 0 || scavenger_elapsed_us(&started) < budget))
     {
-        lock_lock(pcache->zvlock);
+        if(FAILED(zvcache_lock(pcache)))
+        {
+            break;
+        }
 
         if(owner)
         {
@@ -2672,29 +2751,35 @@ static void sweep_cleared_entries(zvcache_context * pcache, LONGLONG budget, uns
         }
 
         /* At the end of the table, every entry cleared since the last ucache_clear() is gone: a count left */
-        /* (a process killed while it cleared) would only make the next sweeps go through the table for nothing */
+        /* (by memory that a build without the undo log shared) would only make the next sweeps go through */
+        /* the table for nothing. One update (see ZVCACHE_SET), 3 fields at most */
         if(index >= header->valuecount)
         {
-            header->clearitems = 0;
+            ZVCACHE_SET(pcache, header->clearitems, 0);
         }
 
-        header->clearnext = (header->clearitems == 0) ? header->valuecount : index;
+        ZVCACHE_SET(pcache, header->clearnext, (header->clearitems == 0) ? header->valuecount : index);
 
         /* The sweep is over, whoever ended it: the next ucache_clear() sweeps */
         if(header->clearnext >= header->valuecount)
         {
-            header->sweeper = 0;
+            ZVCACHE_SET(pcache, header->sweeper, 0);
         }
 
+        lock_undo_commit(&pcache->undo);
         lock_unlock(pcache->zvlock);
 
         /* The allocator's lock once for the batch, not for each block: with several processes sweeping, */
-        /* taking it for each block made them queue for it at every free (see alloc_hold) */
+        /* taking it for each block made them queue for it at every free (see alloc_hold). If it cannot */
+        /* be taken, each free tries to */
         if(pcache->freelist != 0)
         {
-            alloc_hold(palloc);
+            held = SUCCEEDED(alloc_hold(palloc));
             free_pending_entries(pcache);
-            alloc_release(palloc);
+            if(held)
+            {
+                alloc_release(palloc);
+            }
         }
     }
 
@@ -2882,11 +2967,17 @@ static unsigned int eviction_group(unsigned int idle)
  */
 static void reclaim_free(zvcache_context * pcache)
 {
+    unsigned char held = 0;
+
     if(pcache->freelist != 0)
     {
-        alloc_hold(pcache->zvalloc);
+        /* If the lock cannot be taken, each free tries to */
+        held = SUCCEEDED(alloc_hold(pcache->zvalloc));
         free_pending_entries(pcache);
-        alloc_release(pcache->zvalloc);
+        if(held)
+        {
+            alloc_release(pcache->zvalloc);
+        }
     }
 }
 
@@ -3050,14 +3141,16 @@ static unsigned int reclaim_entries(zvcache_context * pcache, zend_long * pperce
     *ppercent = percent;
 
     /* A step for the waits of zvcache_run_scavenger(), after which a write finds only what expires */
-    /* or goes unused later: the pass went over the whole table */
-    pheader->lscavenge  = ticks;
-    pheader->scwait     = SCAVENGER_WRITE_GAP_MS;
-    pheader->scticks    = ticks;
-    pheader->sccount    = count;
-    pheader->scruns    += 1;
-    pheader->scremoved += count;
-    pheader->scevicted += evicted;
+    /* or goes unused later: the pass went over the whole table. One update (see ZVCACHE_SET), the */
+    /* longest of the cache: 7 fields */
+    ZVCACHE_SET(pcache, pheader->lscavenge, ticks);
+    ZVCACHE_SET(pcache, pheader->scwait, SCAVENGER_WRITE_GAP_MS);
+    ZVCACHE_SET(pcache, pheader->scticks, ticks);
+    ZVCACHE_SET(pcache, pheader->sccount, count);
+    ZVCACHE_SET(pcache, pheader->scruns, pheader->scruns + 1);
+    ZVCACHE_SET(pcache, pheader->scremoved, pheader->scremoved + count);
+    ZVCACHE_SET(pcache, pheader->scevicted, pheader->scevicted + evicted);
+    lock_undo_commit(&pcache->undo);
 
     dprintimportant("reclaim_entries: removed %u entries, %u of them evicted (%d%% free)", count, evicted, (int)percent);
     dprintverbose("end reclaim_entries");
@@ -3148,9 +3241,11 @@ int zvcache_run_scavenger(zvcache_context * pcache, unsigned int force)
 
         if(threshold > (unsigned int)limit)
         {
-            /* Counts as a step for the waits above, for writes as for the end of requests */
-            pheader->lscavenge = ticks;
-            pheader->scwait    = SCAVENGER_WRITE_GAP_MS;
+            /* Counts as a step for the waits above, for writes as for the end of requests (one update, */
+            /* see ZVCACHE_SET) */
+            ZVCACHE_SET(pcache, pheader->lscavenge, ticks);
+            ZVCACHE_SET(pcache, pheader->scwait, SCAVENGER_WRITE_GAP_MS);
+            lock_undo_commit(&pcache->undo);
             goto Finished;
         }
 
@@ -3212,16 +3307,16 @@ int zvcache_run_scavenger(zvcache_context * pcache, unsigned int force)
         }
     }
 
-    pheader->scstart = (sindex < pheader->valuecount) ? sindex : 0;
-
-    /* The wait before the next step on a write: shorter while the steps find entries to remove */
-    pheader->scwait = (count == 0) ? SCAVENGER_WRITE_GAP_MS : (urgent ? SCAVENGER_WRITE_URGENT_MS : SCAVENGER_WRITE_BUSY_MS);
-
-    /* For ucache_info(): the steps that ran, not the ones skipped above */
-    pheader->scticks    = ticks;
-    pheader->sccount    = (unsigned int)count;
-    pheader->scruns    += 1;
-    pheader->scremoved += (size_t)count;
+    /* One update (see ZVCACHE_SET), 6 fields: where the next step starts; the wait before the next step */
+    /* on a write, shorter while the steps find entries to remove; and for ucache_info(), the steps that */
+    /* ran, not the ones skipped above */
+    ZVCACHE_SET(pcache, pheader->scstart, (sindex < pheader->valuecount) ? sindex : 0);
+    ZVCACHE_SET(pcache, pheader->scwait, (count == 0) ? SCAVENGER_WRITE_GAP_MS : (urgent ? SCAVENGER_WRITE_URGENT_MS : SCAVENGER_WRITE_BUSY_MS));
+    ZVCACHE_SET(pcache, pheader->scticks, ticks);
+    ZVCACHE_SET(pcache, pheader->sccount, (unsigned int)count);
+    ZVCACHE_SET(pcache, pheader->scruns, pheader->scruns + 1);
+    ZVCACHE_SET(pcache, pheader->scremoved, pheader->scremoved + (size_t)count);
+    lock_undo_commit(&pcache->undo);
 
 Finished:
 
@@ -3254,9 +3349,11 @@ void zvcache_scavenge_periodic(zvcache_context * pcache)
         return;
     }
 
-    lock_lock(pcache->zvlock);
-    zvcache_run_scavenger(pcache, 1);
-    lock_unlock(pcache->zvlock);
+    if(SUCCEEDED(zvcache_lock(pcache)))
+    {
+        zvcache_run_scavenger(pcache, 1);
+        lock_unlock(pcache->zvlock);
+    }
 
     free_pending_entries(pcache);
 }
@@ -3293,6 +3390,7 @@ int zvcache_create(zvcache_context ** ppcache)
     pcache->freelist    = 0;
     pcache->freecount   = 0;
     pcache->maxfree     = 0;
+    memset(&pcache->undo, 0, sizeof(pcache->undo));
 
     *ppcache = pcache;
 
@@ -3414,6 +3512,9 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
 
     header = pcache->zvheader;
 
+    /* The undo log of the cache, in its header (see zvcache_lock) */
+    lock_undo_initialize(&pcache->undo, pcache->zvmemaddr, segsize, &header->undocount, header->undo);
+
     /* The most the cache holds never changes while its segment lives (see zvcache_set) */
     pcache->maxfree = alloc_capacity(pcache->zvalloc);
 
@@ -3439,7 +3540,9 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
         /* the init mutex, and none uses a segment that is not marked */
         header->hitcount     = 0;
         header->misscount    = 0;
+        header->abandoned    = 0;
         header->last_owner   = 0;
+        header->undocount    = 0;
 
         header->lscavenge    = cticks;
         header->scwait       = SCAVENGER_WRITE_GAP_MS;
@@ -3663,7 +3766,12 @@ int zvcache_get(zvcache_context * pcache, const char * key, zval ** pvalue)
     header = pcache->zvheader;
     index = utils_getindex(key, pcache->zvheader->valuecount);
 
-    lock_lock(pcache->zvlock);
+    result = zvcache_lock(pcache);
+    if(FAILED(result))
+    {
+        goto Finished;
+    }
+
     flock = 1;
 
     pentry = find_zvcache_entry(pcache, key, index, 1);
@@ -3819,7 +3927,10 @@ static int make_room(zvcache_context * pcache, const char * key, zvcopy_prepared
                 break;
             }
 
-            lock_lock(pcache->zvlock);
+            if(FAILED(zvcache_lock(pcache)))
+            {
+                break;
+            }
 
             if(header->rcgen != gen)
             {
@@ -3900,7 +4011,12 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
 
     index = utils_getindex(key, pcache->zvheader->valuecount);
 
-    lock_lock(pcache->zvlock);
+    result = zvcache_lock(pcache);
+    if(FAILED(result))
+    {
+        goto Finished;
+    }
+
     flock = 1;
 
     pentry = find_zvcache_entry(pcache, key, index, 1);
@@ -3977,7 +4093,12 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
         goto Finished;
     }
 
-    lock_lock(pcache->zvlock);
+    result = zvcache_lock(pcache);
+    if(FAILED(result))
+    {
+        goto Finished;
+    }
+
     flock = 1;
 
     zvcache_run_scavenger(pcache,0);
@@ -4055,7 +4176,12 @@ int zvcache_delete(zvcache_context * pcache, const char * key)
 
     index = utils_getindex(key, pcache->zvheader->valuecount);
 
-    lock_lock(pcache->zvlock);
+    result = zvcache_lock(pcache);
+    if(FAILED(result))
+    {
+        goto Finished;
+    }
+
     flock = 1;
 
     zvcache_run_scavenger(pcache,0);
@@ -4103,7 +4229,8 @@ Finished:
  * again from its start, and this call returns at once.  The others help in short steps (a write that
  * needs memory, the end of a request).  If the process that sweeps is killed (an IIS FastCGI timeout),
  * the cache stays cleared, and the entries left are removed by those steps, by the lookups and the
- * scavenger steps that pass them, or by the next ucache_clear(), which takes the sweep over.
+ * scavenger steps that pass them, or by the next ucache_clear(), which takes the sweep over.  A process
+ * killed in the middle of the update that clears leaves the cache as it was (see zvcache_lock).
  */
 int zvcache_clear(zvcache_context * pcache)
 {
@@ -4119,31 +4246,45 @@ int zvcache_clear(zvcache_context * pcache)
 
     header = pcache->zvheader;
 
-    lock_lock(pcache->zvlock);
+    result = zvcache_lock(pcache);
+    if(FAILED(result))
+    {
+        goto Finished;
+    }
 
-    /* In this order: a process killed in between leaves the entries cleared, and at worst counts off */
-    header->cleargen++;
-    header->clearitems += header->itemcount;
-    header->itemcount   = 0;
-    header->clearnext   = 0;
-
-    /* A full cache that left no room is no longer full */
-    header->rcfutile    = 0;
+    /* One update (see ZVCACHE_SET), 6 fields: a process killed before its end leaves the cache as it */
+    /* was, not cleared */
+    ZVCACHE_SET(pcache, header->cleargen, header->cleargen + 1);
+    ZVCACHE_SET(pcache, header->clearitems, header->clearitems + header->itemcount);
+    ZVCACHE_SET(pcache, header->itemcount, 0);
+    ZVCACHE_SET(pcache, header->clearnext, 0);
 
     /* This process sweeps, unless another one goes on with the sweep of an earlier clear */
     ticks = GetTickCount64();
     if(clear_pending(header) && (header->sweeper == 0 || header->sweeper == pid || utils_ticksdiff(ticks, header->sweepticks) >= CLEAR_SWEEPER_STALE_MS))
     {
-        header->sweeper    = pid;
-        header->sweepticks = ticks;
+        ZVCACHE_SET(pcache, header->sweeper, pid);
+        ZVCACHE_SET(pcache, header->sweepticks, ticks);
         owner = 1;
     }
+
+    lock_undo_commit(&pcache->undo);
+
+    /* A full cache that left no room is no longer full (a hint, written without the lock elsewhere) */
+    header->rcfutile = 0;
 
     lock_unlock(pcache->zvlock);
 
     if(owner)
     {
         sweep_cleared_entries(pcache, 0, 1);
+    }
+
+Finished:
+
+    if(FAILED(result))
+    {
+        dprintimportant("failure %d in zvcache_clear", result);
     }
 
     dprintverbose("end zvcache_clear");
@@ -4167,7 +4308,12 @@ int zvcache_exists(zvcache_context * pcache, const char * key, unsigned char * p
     *pexists = 0;
     index = utils_getindex(key, pcache->zvheader->valuecount);
 
-    lock_lock(pcache->zvlock);
+    result = zvcache_lock(pcache);
+    if(FAILED(result))
+    {
+        goto Finished;
+    }
+
     flock = 1;
 
     pentry = find_zvcache_entry(pcache, key, index, 1);
@@ -4182,6 +4328,8 @@ int zvcache_exists(zvcache_context * pcache, const char * key, unsigned char * p
     }
 
     _ASSERT(SUCCEEDED(result));
+
+Finished:
 
     if(flock)
     {
@@ -4336,7 +4484,15 @@ int zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, z
 
     header = pcache->zvheader;
 
-    lock_lock(pcache->zvlock);
+    /* Before the lock: the list is destroyed on any failure */
+    zend_llist_init(plist, sizeof(zvcache_info_entry), zvcache_info_entry_dtor, 0);
+
+    result = zvcache_lock(pcache);
+    if(FAILED(result))
+    {
+        goto Finished;
+    }
+
     flock = 1;
 
     /* Under the lock: an entry added or a scavenger step run before it was taken would be */
@@ -4352,8 +4508,7 @@ int zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, z
     pcinfo->sccount   = header->sccount;
     pcinfo->scremoved = header->scremoved;
     pcinfo->scevicted = header->scevicted;
-
-    zend_llist_init(plist, sizeof(zvcache_info_entry), zvcache_info_entry_dtor, 0);
+    pcinfo->abandoned = header->abandoned;
 
     pcinfo->initage = (unsigned int)(utils_ticksdiff(cticks, header->init_ticks) / 1000);
 
@@ -4378,6 +4533,8 @@ int zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, z
         flock = 0;
         zend_bailout();
     }
+
+Finished:
 
     if(flock)
     {
@@ -4414,7 +4571,12 @@ int zvcache_change(zvcache_context * pcache, const char * key, zend_long delta, 
     *newvalue = 0;
     index = utils_getindex(key, pcache->zvheader->valuecount);
 
-    lock_lock(pcache->zvlock);
+    result = zvcache_lock(pcache);
+    if(FAILED(result))
+    {
+        goto Finished;
+    }
+
     flock = 1;
 
     zvcache_run_scavenger(pcache,0);
@@ -4478,7 +4640,12 @@ int zvcache_compswitch(zvcache_context * pcache, const char * key, zend_long old
 
     index = utils_getindex(key, pcache->zvheader->valuecount);
 
-    lock_lock(pcache->zvlock);
+    result = zvcache_lock(pcache);
+    if(FAILED(result))
+    {
+        goto Finished;
+    }
+
     flock = 1;
 
     zvcache_run_scavenger(pcache,0);

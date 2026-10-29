@@ -51,6 +51,8 @@
 
 /* lock_context - LOCAL - 32 bytes */
 /* last_owner - SHARED */
+/* lock_undo - LOCAL */
+/* lock_undo_entry - SHARED */
 
 typedef struct lock_context lock_context;
 struct lock_context
@@ -66,6 +68,41 @@ struct lock_context
     unsigned int * last_owner;        /* Pointer to shared memory which has the last owner PID */
 };
 
+/*
+ * The undo log of the updates that a process makes under a lock to the segment that the lock guards (see
+ * lock_undo_write in ucache_lock.c).  Its count and its LOCK_UNDO_MAXIMUM entries are in the header of
+ * the segment; lock_undo says where, in each process.  An update logs 13 fields at most (a free that joins
+ * the free blocks on both sides of the block, see free_block in ucache_alloc.c; the longest update of the
+ * cache, the record of a full pass in reclaim_entries in ucache_zvcache.c, logs 7): the log has room for
+ * more.  Count the fields of any update added or changed, and keep the most below LOCK_UNDO_MAXIMUM.
+ */
+#define LOCK_UNDO_MAXIMUM       24
+
+/* The count of a log that an update overflowed (see lock_undo_write) */
+#define LOCK_UNDO_OVERFLOW      0xFFFFFFFF
+
+typedef struct lock_undo_entry lock_undo_entry;
+struct lock_undo_entry
+{
+    size_t                  where;    /* Offset of the field from the start of the segment, plus 1 if it takes 8 bytes (else 4) */
+    unsigned __int64        value;    /* What the field held before the update */
+};
+
+typedef struct lock_undo lock_undo;
+struct lock_undo
+{
+    volatile unsigned int * pcount;   /* Entries in the log, 0 between updates (shared) */
+    lock_undo_entry *       pentries; /* Its LOCK_UNDO_MAXIMUM entries (shared) */
+    char *                  pbase;    /* Start of the segment */
+    size_t                  size;     /* Size of the segment */
+};
+
+/* Writes value into field, a field of 4 or 8 bytes of the segment of pundo (a field of another size does not */
+/* compile), after logging what it held. Call it under the lock, for every write of an update that a process */
+/* reading the segment after an undo would see */
+#define LOCK_UNDO_SET(pundo, field, value) \
+    lock_undo_write((pundo), (void *)&(field), sizeof(char[(sizeof(field) == 4 || sizeof(field) == 8) ? 1 : -1]) * sizeof(field), (unsigned __int64)(value))
+
 extern int  lock_create(lock_context ** pplock);
 extern void lock_destroy(lock_context * plock);
 
@@ -79,7 +116,12 @@ extern int lock_get_nameprefix(
 extern int  lock_initialize(lock_context * plock, char * name, unsigned short cachekey, unsigned short type, unsigned int * plast_owner);
 extern void lock_terminate(lock_context * plock);
 
-extern void lock_lock(lock_context * plock);
+extern int  lock_lock(lock_context * plock);
 extern void lock_unlock(lock_context * plock);
+
+extern void lock_undo_initialize(lock_undo * pundo, void * pbase, size_t size, unsigned int * pcount, lock_undo_entry * pentries);
+extern void lock_undo_write(lock_undo * pundo, void * pfield, size_t width, unsigned __int64 value);
+extern void lock_undo_commit(lock_undo * pundo);
+extern int  lock_undo_replay(lock_undo * pundo);
 
 #endif /* _UCACHE_LOCK_H_ */

@@ -339,9 +339,16 @@ void lock_terminate(lock_context * plock)
     dprintverbose("end lock_terminate");
 }
 
-/* Acquire write lock */
-void lock_lock(lock_context * plock)
+/*
+ * Acquire write lock.  Returns NONFATAL; WARNING_LOCK_ABANDONED if the process that held the mutex
+ * ended without releasing it (killed, for example by an IIS FastCGI timeout, or crashed): the mutex is
+ * ours all the same, and what it guards may be half updated (see lock_undo_write); or FATAL_LOCK_WAIT if
+ * the wait failed (an invalid handle): the lock is not held then, and the caller must not use what it
+ * guards nor release the lock.
+ */
+int lock_lock(lock_context * plock)
 {
+    int    result    = NONFATAL;
     DWORD  ret       = 0;
     unsigned int last_owner = 0;
 
@@ -365,12 +372,14 @@ void lock_lock(lock_context * plock)
         error_setlasterror();
         dprintcritical("lock_lock: acquired abandoned mutex %s (last owner pid %u). Something bad happend in another process!",
                         plock->nameprefix, last_owner);
+        result = WARNING_LOCK_ABANDONED;
     }
 
     if (ret == WAIT_FAILED)
     {
         dprintcritical("lock_lock: Failure waiting on lock %s (%d, last owner pid %u). Something bad happened!",
                         plock->nameprefix, error_setlasterror(), last_owner);
+        result = FATAL_LOCK_WAIT;
         goto Finished;
     }
 
@@ -385,7 +394,167 @@ void lock_lock(lock_context * plock)
 Finished:
 
     dprintverbose("end lock_lock     %p", plock);
-    return;
+    return result;
+}
+
+/*
+ * The undo log.  IIS ends a FastCGI process at any instruction (activityTimeout, requestTimeout, a
+ * stopped or recycled pool), and a process can crash.  If that happens while it holds a mutex in the
+ * middle of an update of shared memory made of several writes (a split or a free of the allocator,
+ * which changes block headers, the lists of free blocks and the counts; a hash chain of the cache and
+ * its count), the update is left half done, and every process of the pool would go on with it: the
+ * same memory given out twice, a crash, every later write failing, a chain that leads to freed memory.
+ * So each such update writes every field that another process could see afterwards through
+ * lock_undo_write(), which first records in the log, in the same shared memory, what the field held,
+ * and ends with lock_undo_commit(), which empties the log.  The log is never empty when the lock is
+ * free unless the process before ended inside an update (the mutex was abandoned, or created again
+ * while the memory lived on), and the next process to take the lock puts the fields back from it,
+ * the last first (lock_undo_replay), so that the update did not happen.  Nothing else is undone: the
+ * other processes go on, their own updates complete.
+ *
+ * Order: an entry is complete before the count includes it, the count includes it before the field
+ * changes, and the log is emptied only after the last write of the update, and before any write that
+ * follows the update (a removed entry's links are reused for the queue of entries to free).  x64 makes
+ * the writes of a process visible to the others in program order, and a process that is ended has
+ * made visible every write it executed, so only the compiler could reorder them:
+ * WholeProgramOptimization inlines these functions into the updates, and a volatile write (/volatile:ms)
+ * only keeps the accesses before it before it, not the ones after.  _ReadWriteBarrier() keeps both in
+ * place; it costs no instruction.  A replay is idempotent: a process ended while it replays leaves the
+ * log as it was, and the next one replays it again.
+ */
+void lock_undo_initialize(lock_undo * pundo, void * pbase, size_t size, unsigned int * pcount, lock_undo_entry * pentries)
+{
+    _ASSERT(pundo    != NULL);
+    _ASSERT(pbase    != NULL);
+    _ASSERT(pcount   != NULL);
+    _ASSERT(pentries != NULL);
+
+    pundo->pcount   = pcount;
+    pundo->pentries = pentries;
+    pundo->pbase    = (char *)pbase;
+    pundo->size     = size;
+}
+
+/* An update logs more fields than the log holds (see lock_undo_write): out of line, it never happens */
+static __declspec(noinline) void lock_undo_overflow(lock_undo * pundo)
+{
+    if(*pundo->pcount != LOCK_UNDO_OVERFLOW)
+    {
+        dprintcritical("lock_undo_write: an update writes more than %u fields: it cannot be undone", LOCK_UNDO_MAXIMUM);
+        *pundo->pcount = LOCK_UNDO_OVERFLOW;
+    }
+}
+
+/*
+ * Writes value into the field of width bytes (4 or 8) at pfield, after logging what the field held (see
+ * above); use LOCK_UNDO_SET.  A log never takes more than LOCK_UNDO_MAXIMUM entries: an update that would
+ * log more (no update does, see LOCK_UNDO_MAXIMUM) writes its fields without logging them, and marks the
+ * log LOCK_UNDO_OVERFLOW.  If the process completes the update, the log is emptied as usual; if it ends
+ * first, the next owner of the lock cannot undo the update whole, and does not use the structures the lock
+ * guards (see lock_undo_replay): the calls fail rather than work on half-updated memory.
+ */
+void lock_undo_write(lock_undo * pundo, void * pfield, size_t width, unsigned __int64 value)
+{
+    unsigned int      count  = *pundo->pcount;
+    lock_undo_entry * pentry = NULL;
+
+    _ASSERT(count < LOCK_UNDO_MAXIMUM);
+    _ASSERT(width == 4 || width == 8);
+    _ASSERT((char *)pfield >= pundo->pbase && (char *)pfield + width <= pundo->pbase + pundo->size);
+
+    if(count < LOCK_UNDO_MAXIMUM)
+    {
+        pentry = pundo->pentries + count;
+        pentry->where = (size_t)((char *)pfield - pundo->pbase) | ((width == 8) ? 1 : 0);
+        pentry->value = (width == 8) ? *(unsigned __int64 *)pfield : *(unsigned int *)pfield;
+
+        /* The entry before the count that includes it */
+        _ReadWriteBarrier();
+        *pundo->pcount = count + 1;
+    }
+    else
+    {
+        lock_undo_overflow(pundo);
+    }
+
+    /* The count before the field */
+    _ReadWriteBarrier();
+
+    if(width == 8)
+    {
+        *(unsigned __int64 *)pfield = value;
+    }
+    else
+    {
+        *(unsigned int *)pfield = (unsigned int)value;
+    }
+}
+
+/* The update is complete: a process ended from here on leaves nothing to undo */
+void lock_undo_commit(lock_undo * pundo)
+{
+    /* Every write of the update before the log is emptied, and every write after the update after it */
+    _ReadWriteBarrier();
+    *pundo->pcount = 0;
+    _ReadWriteBarrier();
+}
+
+/*
+ * Call under the lock, when the log is not empty: puts back the fields of the update that the process
+ * before left half done, the last first, and empties the log.  Returns how many, or -1 if the log cannot
+ * be replayed: an update overflowed it (see lock_undo_write), or the memory is not a log (an entry outside
+ * the segment, a count past the log).  It is left as it is then, nothing put back, so that every process
+ * finds it so: the caller must not use the structures the lock guards.  Out of line: it runs only after a
+ * process ended inside an update.
+ */
+__declspec(noinline) int lock_undo_replay(lock_undo * pundo)
+{
+    unsigned int      count  = *pundo->pcount;
+    unsigned int      index  = 0;
+    size_t            offset = 0;
+    size_t            width  = 0;
+    lock_undo_entry * pentry = NULL;
+
+    if(count > LOCK_UNDO_MAXIMUM)
+    {
+        dprintcritical("lock_undo_replay: the log of an update that was not completed counts %u entries: it cannot be replayed", count);
+        return -1;
+    }
+
+    for(index = 0; index < count; index++)
+    {
+        pentry = pundo->pentries + index;
+        width  = (pentry->where & 1) ? 8 : 4;
+        offset = pentry->where & ~(size_t)1;
+
+        if(offset % width != 0 || pundo->size < width || offset > pundo->size - width)
+        {
+            dprintcritical("lock_undo_replay: entry %u of the log of an update that was not completed is outside the segment: it cannot be replayed", index);
+            return -1;
+        }
+    }
+
+    for(index = count; index > 0; index--)
+    {
+        pentry = pundo->pentries + index - 1;
+        offset = pentry->where & ~(size_t)1;
+
+        if(pentry->where & 1)
+        {
+            *(unsigned __int64 *)(pundo->pbase + offset) = pentry->value;
+        }
+        else
+        {
+            *(unsigned int *)(pundo->pbase + offset) = (unsigned int)pentry->value;
+        }
+    }
+
+    /* Every field back before the log is emptied */
+    _ReadWriteBarrier();
+    *pundo->pcount = 0;
+    _ReadWriteBarrier();
+
+    return (int)count;
 }
 
 /* Release write lock */

@@ -65,6 +65,8 @@
 #define FATAL_LOCK_SHORT_BUFFER             FATAL_LOCK_BASE + 4
 #define FATAL_LOCK_NUMBER_LARGE             FATAL_LOCK_BASE + 5
 #define FATAL_LOCK_INVALID_TYPE             FATAL_LOCK_BASE + 6
+#define FATAL_LOCK_WAIT                     FATAL_LOCK_BASE + 7
+#define FATAL_LOCK_UNDO                     FATAL_LOCK_BASE + 8
 
 /* Error codes used in filemap functionality */
 #define FATAL_FILEMAP_BASE                  200
@@ -105,6 +107,7 @@
 #define WARNING_ZVCACHE_RESCOPYIN           WARNING_COMMON_BASE + 8
 #define WARNING_ZVCACHE_CASNEQ              WARNING_COMMON_BASE + 9
 #define WARNING_APPPOOL_NAME_NOT_FOUND      WARNING_COMMON_BASE + 13
+#define WARNING_LOCK_ABANDONED              WARNING_COMMON_BASE + 14
 
 /* SUCCEEDED and FAILED macros */
 #ifdef SUCCEEDED

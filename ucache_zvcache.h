@@ -70,8 +70,11 @@ struct zvcache_header
     unsigned int      mapcount;          /* Number of processes using this zval cache */
     unsigned int      hitcount;          /* Cache items cumulative hit count */
     unsigned int      misscount;         /* Cache items cumulative miss count */
+    unsigned int      abandoned;         /* Times a process found the cache lock abandoned since the cache was created */
     ULONGLONG         init_ticks;        /* GetTickCount64() when the cache was created */
     unsigned int      last_owner;        /* PID of last owner for lock */
+    unsigned int      undocount;         /* Entries in undo: an update of the cache in progress, 0 between updates; in the 8 */
+                                         /* bytes of last_owner, which every lock_lock() writes (see zvcache_lock) */
 
     ULONGLONG         lscavenge;         /* GetTickCount64() of the last scavenger step, or of a look at the free memory that skipped one (see zvcache_run_scavenger) */
     ULONGLONG         scwait;            /* Milliseconds after lscavenge before a write runs the next step (see zvcache_run_scavenger) */
@@ -92,6 +95,7 @@ struct zvcache_header
     unsigned int      clearnext;         /* Next bucket that the sweep of the cleared entries goes through, valuecount when none is left */
     unsigned int      sweeper;           /* PID of the process that sweeps them to the end (its ucache_clear()), 0 if none */
     ULONGLONG         sweepticks;        /* GetTickCount64() when that process last went on with it */
+    lock_undo_entry   undo[LOCK_UNDO_MAXIMUM]; /* What the update of the cache in progress changed (see lock_undo_write) */
     size_t            values[1];         /* valuecount zvcache_value offsets */
 };
 
@@ -146,6 +150,7 @@ struct zvcache_context
     size_t            freelist;          /* Entries unlinked under the lock, freed once it is released (chained by next_value) */
     unsigned int      freecount;         /* How many entries freelist holds */
     size_t            maxfree;           /* The most the cache holds, its free memory when it is empty (alloc_capacity); 0 if not known */
+    lock_undo         undo;              /* The undo log of the cache, in its header (see zvcache_lock) */
 };
 
 typedef struct zvcache_info zvcache_info;
@@ -160,6 +165,7 @@ struct zvcache_info
     unsigned int      sccount;           /* Entries the last scavenger step removed */
     size_t            scremoved;         /* Entries the scavenger removed since the cache was created */
     size_t            scevicted;         /* Of those, entries evicted before their time */
+    unsigned int      abandoned;         /* Times a process found the cache lock abandoned (not the allocator's) */
 };
 
 typedef struct zvcache_info_entry zvcache_info_entry;

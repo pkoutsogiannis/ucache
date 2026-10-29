@@ -76,6 +76,8 @@ typedef void   (*fn_free)(void * palloc, size_t hoffset, void * addr);
 /* ("DONE" in memory). Any other value, 0 in a new segment, means that it is still to be initialized */
 #define ALLOC_SEGMENT_INITDONE          0x454E4F44
 
+/* The first 64 bytes, one cache line (a segment starts on a page), hold what every allocation and free */
+/* reads or writes, the count of the undo log included */
 typedef struct alloc_segment_header alloc_segment_header;
 struct alloc_segment_header
 {
@@ -86,8 +88,11 @@ struct alloc_segment_header
     size_t       total_size;  /* Total size of shared memory segment */
     size_t       free_size;   /* Bytes left to be allocated */
     size_t       cacheheader1;/* Offset to memory which contains 1st cache_header */
+    unsigned int undocount;   /* Entries in undo: an update of the allocator in progress, 0 between updates (see alloc_lock) */
+    unsigned int abandoned;   /* Times a process found the lock of the allocator abandoned since the segment was created */
     unsigned int freemap[ALLOC_CLASS_WORDS];   /* Bit c set: the list of class c is not empty */
     size_t       freelists[ALLOC_CLASS_COUNT]; /* Offset of the first free block of each class, 0 if none */
+    lock_undo_entry undo[LOCK_UNDO_MAXIMUM];   /* What the update in progress changed (see lock_undo_write) */
 };
 
 /* Each free block will have following information */
@@ -107,8 +112,8 @@ struct alloc_used_header
 {
     size_t       size;        /* size of this used block */
     unsigned int is_free;     /* marker which differentiate this block from free block */
-    size_t       dummy1;      /* Dummy variable to make size equal to free header */
-    size_t       dummy2;      /* Dummy variable to make size equal to free header */
+    size_t       dummy1;      /* Dummy variable to make size equal to free header (never written, never read) */
+    size_t       dummy2;      /* Dummy variable to make size equal to free header (never written, never read) */
     /* used block will have size written in the end */
 };
 
@@ -142,6 +147,7 @@ struct alloc_context
     alloc_segment_header * header;    /* Address of header for this alloc_context */
     unsigned int           held;      /* Nesting of alloc_hold(): the process holds the lock between the calls (see alloc_hold) */
     unsigned int           heldfrees; /* Blocks freed since the held lock was last taken */
+    lock_undo              undo;      /* The undo log of the segment (see alloc_lock) */
 };
 
 typedef struct alloc_info alloc_info;
@@ -152,6 +158,7 @@ struct alloc_info
     unsigned int usedcount;   /* number of used blocks */
     unsigned int freecount;   /* number of free blocks */
     size_t       mem_overhead;/* overhead of used/free headers */
+    unsigned int abandoned;   /* times a process found the lock of the allocator abandoned */
 };
 
 extern int    alloc_create(alloc_context ** ppalloc);
@@ -159,7 +166,7 @@ extern void   alloc_destroy(alloc_context * palloc);
 extern int    alloc_initialize(alloc_context * palloc, char * name, unsigned short cachekey, void * staddr, size_t size, unsigned char * pinitmemory);
 extern void   alloc_initdone(alloc_context * palloc);
 extern void   alloc_terminate(alloc_context * palloc);
-extern void   alloc_hold(alloc_context * palloc);
+extern int    alloc_hold(alloc_context * palloc);
 extern void   alloc_release(alloc_context * palloc);
 extern int    alloc_create_mpool(alloc_context * palloc, size_t * phoffset, size_t size);
 extern void   alloc_trim_mpool(alloc_context * palloc, size_t hoffset);

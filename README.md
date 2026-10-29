@@ -307,9 +307,9 @@ This extension has no constants defined.
 
 The sources of UCache include a PHP script, ucache.php (WinCache's wincache.php for UCache), that can be used to
 obtain cache information and statistics: the server and cache settings, the memory use, the hit and miss counts, what
-the scavenger removed and evicted and when it last ran, the list of entries (250 per page, with links to the other
-pages) and the value stored under a key; with authentication on and a password other than the default, it can also
-clear the whole cache.
+the scavenger removed and evicted and when it last ran, the locks found abandoned (`total_abandoned_lock_count`), the
+list of entries (250 per page, with links to the other pages) and the value stored under a key; with authentication on
+and a password other than the default, it can also clear the whole cache.
 
 To use ucache.php, copy it into a root folder of a web site that runs with the extension loaded, or into any
 subfolder, preferably one that only administrators can reach. To protect the script, open it in any text editor and
@@ -444,8 +444,12 @@ Values are copied in without holding the cache lock, and objects are unserialize
 run under the lock either: the cache functions free PHP values only once it has been released (a `ucache_get()` that
 fails frees what it had copied then), so PHP's garbage collector, which can call destructors when a value is freed,
 never runs under it. Nor does a fatal error in a cache function leave the cross-process lock held: the other processes
-of the pool go on. UCache serializes and unserializes each object as a top-level `serialize()` or `unserialize()`
-would, independently of any `serialize()` or `unserialize()` that the caller is in the middle of.
+of the pool go on. On PHP builds that end the process at memory_limit instead of raising the fatal error, such as the
+CVE-patched PHP 7.2, a `ucache_get()` that reaches memory_limit while it copies a value out ends the process while it
+holds the cache lock: the next process takes the lock, which the end of its owner released, and counts it in
+`total_abandoned_lock_count` (a copy out changes nothing in the cache, so nothing is undone). UCache serializes and
+unserializes each object as a top-level `serialize()` or `unserialize()` would, independently of any `serialize()` or
+`unserialize()` that the caller is in the middle of.
 
 ### memory_limit
 
@@ -543,7 +547,7 @@ going through a table that holds many entries can take more than 5 minutes.
 
 When `ucache_set()` or `ucache_add()` runs out of shared memory for a value (in the array forms, for any of the
 keys), it does not fail at once, unless the value takes more memory than the empty cache holds, the `memory_free` of
-`ucache_meminfo()` with no entries (8,254,728 bytes for the default 8 MB): such a call fails at once, before it takes
+`ucache_meminfo()` with no entries (8,253,952 bytes for the default 8 MB): such a call fails at once, before it takes
 any shared memory, so nothing is removed or evicted for it and the writes of the other processes do not run out of
 memory because of it. Otherwise it takes the cache lock and runs a full pass over the whole table, without the 1 ms
 limit, that removes what a step removes. If `ucache.gc.evict` is > 0 and less than `ucache.gc.evict` percent of the
@@ -585,8 +589,23 @@ are freed at once, under the lock, and so is everything the full pass of a full 
 waiting for the memory, and the next process that runs out of it, see what is really free (the full pass frees them
 32 entries at a time, taking the lock of the allocator once for each batch). If a process is killed while it frees,
 for example by an IIS FastCGI timeout, the memory of the entries it had not freed yet (32 at most) stays lost until
-every process of the pool has exited; a process killed in the middle of a free under the lock loses the rest of that
-entry.
+every process of the pool has exited, and so does the rest of an entry it was freeing.
+
+A process can be killed at any instruction, also in the middle of an update of what the processes share: a hash
+chain and the count of entries, under the cache lock, or the lists of free blocks, the headers of blocks and the counts
+of the memory allocator, under its lock. Each of these updates first saves, in a log kept in the shared memory, what
+every field it changes held, and empties the log when it is complete. The next process that takes the lock finds the
+log of an update that was cut off and puts those fields back, so that the update did not happen: an entry being
+removed stays in its chain, an entry being added is left out (its memory is lost), a `ucache_clear()` did not clear,
+a block being allocated stays free, and a block being freed stays in use, lost with the rest of its entry. The other
+processes go on with consistent structures. `total_abandoned_lock_count` in `ucache_info()` counts the locks that a
+process found abandoned (the process that held one ended without releasing it), whether or not it was in the middle of
+an update; a log is also put back when the lock was created again while the memory lived on (a process that starts
+while the last process of the pool exits), which is not counted. The log costs little in single calls: measured on
+PHP 7.2 and 8.5 against a build without it, `ucache_set()`, `ucache_get()` and `ucache_delete()` took at most about
+5% longer (on 7.2 the difference was within the noise), and so did those of 4 processes writing at once; but
+`ucache_clear()` frees its entries about a quarter to a third slower (50,000 arrays in 25 ms instead of 18.5): a free
+under the lock of the allocator, which its batches make one after the other, logs 5 to 13 fields.
 
 `ucache_clear()` clears the cache at once, under the cache lock: from then on no process sees the entries that were in
 it (the calls miss them, the listing and `total_item_count` leave them out), and an entry stored afterwards is kept.
@@ -597,9 +616,9 @@ most. The call returns once the batches are done. A `ucache_clear()` while anoth
 entries of an earlier one clears the cache at once in the same way and returns: that process goes on, through the
 whole table again. Meanwhile, a write that runs out of memory helps for about a millisecond at a time (see
 [A full cache](#a-full-cache)), and so does the end of every request while `ucache.gc.interval` > 0. Measured on PHP 7.2
-with a full cache of 512 MB (2.5 million entries of about 200 bytes): the clear took 1.2 to 1.6 seconds; meanwhile a
-read in another process waited at most 0.6 ms, a small write 1 ms, and a write of 1000 bytes, which needed memory,
-at most 19 ms (28 of 11,131 such writes failed), and a second `ucache_clear()` took less than 0.1 ms. If the process
+with a full cache of 512 MB (2.5 million entries of about 200 bytes): the clear took 1.5 to 2.1 seconds; meanwhile a
+read in another process waited at most 0.6 ms, a small write 2 ms, and a write of 1000 bytes, which needed memory,
+at most 19 ms (35 of 15,608 such writes failed), and a second `ucache_clear()` took less than 0.1 ms. If the process
 that frees the entries is killed, the cache stays cleared, and the entries left are freed by those helpers, by the
 lookups and steps that pass them, or by the next `ucache_clear()`, which takes over once that process has done nothing
 for a second.
@@ -1390,6 +1409,11 @@ negative, or memory_limit was reached while the entries were listed). The array 
 - `total_scavenged_count` - the entries that steps and full passes removed since the cache was created, evicted
   entries included
 - `total_evicted_count` - the entries evicted from a full cache since the cache was created
+- `total_abandoned_lock_count` - the times since the cache was created that a process found the cache lock or the lock
+  of the memory allocator abandoned: the process that held it ended without releasing it (killed, for example by an
+  IIS FastCGI timeout, or crashed), and what it had left half updated was put back as it was (see
+  [Freeing memory](#freeing-memory)). A process that held both locks counts twice; a process that held none, or a lock
+  that was created again in the meantime, does not count.
 - `ucache_entries` - an array, indexed from 1 (from `offset` + 1 without `key`: the position of the entry in the
   full listing), that contains the information about the cached entries:
   - `key_name` - name of the key which is used to store the data
@@ -1433,6 +1457,7 @@ Array
     [last_scavenge_count] => 0
     [total_scavenged_count] => 0
     [total_evicted_count] => 0
+    [total_abandoned_lock_count] => 0
     [ucache_entries] => Array
         (
             [1] => Array
@@ -1486,6 +1511,7 @@ Array
     [last_scavenge_count] => 0
     [total_scavenged_count] => 0
     [total_evicted_count] => 0
+    [total_abandoned_lock_count] => 0
     [ucache_entries] => Array
         (
             [1] => Array
@@ -1574,7 +1600,7 @@ The above example will output:
 Array
 (
     [memory_total] => 8388608
-    [memory_free] => 8254728
+    [memory_free] => 8253952
     [num_used_blks] => 1
     [num_free_blks] => 1
     [memory_overhead] => 128
@@ -1829,10 +1855,13 @@ single process cannot, such as a cache shared by several processes and which pro
 cannot be created, the release of the cache lock after a fatal error, the scavenger at the end of requests and on
 writes, a full cache (eviction, and values larger than the empty cache while another process writes), `ucache_clear()`
 of a full cache while other processes read and write, storing in a fragmented cache, the memory that stored arrays
-take, and the processes that start while the last process of their pool closes the cache or after one died while it
-created the cache (a Windows PowerShell script holds named objects of the cache as such processes find them; without
-`powershell.exe`, or where it runs in ConstrainedLanguage mode, these checks are skipped, with a `SKIP` line). They need
-a writable temporary folder, free local ports and Windows PowerShell, and every process they start has a timeout.
+take, processes killed while they clear, evict, store or replace entries (the cache they leave must be consistent; the
+checks of a clear, a full pass and replaces print a `NOTE` line when none of their attempts killed the process while it
+held a lock), and the processes that start while the last process of their pool closes the cache or after one died
+while it created the cache (a Windows PowerShell script holds named objects of the cache as such processes find them;
+without `powershell.exe`, or where it runs in ConstrainedLanguage mode, these checks are skipped, with a `SKIP` line).
+They need a writable temporary folder, free local ports and Windows PowerShell, and every process they start has a
+timeout.
 Without the argument, all the checks with several processes are skipped, with one `SKIP` line. The second run, with
 opcache, goes through the immutable arrays of opcache, which take other paths through the copy code.
 
@@ -1927,7 +1956,7 @@ Several of these change what existing code sees.
 - `ucache_clear()` holds the cache lock only for a moment: the cache is empty for every process at once, and its
   entries are then freed in batches of at most 32, the lock released between them, so the other processes go on
   reading and writing (with a full cache of 512 MB, a read in another process waited at most 0.6 ms during a clear of
-  1.2 to 1.6 seconds); a `ucache_clear()` while the entries of an earlier one are being freed returns at once; and a
+  1.5 to 2.1 seconds); a `ucache_clear()` while the entries of an earlier one are being freed returns at once; and a
   process killed during the clear leaves the cache cleared (see [Freeing memory](#freeing-memory)). WinCache 2.0.0.8
   freed every entry under the cache lock, so every other process of the pool waited until the clear ended, and a
   process killed during the clear left the entries it had not reached in the cache.
@@ -2046,6 +2075,14 @@ Several of these change what existing code sees.
 - A fatal error during a cache call (for example memory_limit while `ucache_get()` copies a big value) does not leave
   the cross-process lock held. In WinCache 2.0.0.8 it did, which blocked every other process of the pool until the
   failing one exited.
+- A process that ends while it holds the cache lock or the lock of the memory allocator (killed by IIS at a FastCGI
+  timeout, for example, or crashed) leaves the shared memory consistent: the next process to take the lock undoes the
+  update that the process left half done, so that only the memory it was working on is lost (see
+  [Freeing memory](#freeing-memory)), and `total_abandoned_lock_count` in `ucache_info()` counts such locks. WinCache
+  2.0.0.8 only wrote an ETW event for the abandoned lock and went on with the half-done update, in every process of
+  the pool until all of them had exited: depending on where the process ended, the list of free blocks could give the
+  same memory out twice or crash the next process that used it, every later write could fail, or a hash chain could
+  keep pointing to an entry after its memory was freed.
 - Deleting, replacing, clearing or expiring a large entry frees a few blocks (the parts of its arrays lie in one
   block), after the cache lock has been released (see [Freeing memory](#freeing-memory)). WinCache 2.0.0.8 took time
   quadratic in its size, while the cache lock was held: for an entry of 100,000 small arrays it took 14-21 s, and

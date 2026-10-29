@@ -989,9 +989,12 @@ if (PHP_VERSION_ID >= 80000) {
 $info = ucache_info();
 check('ucache_info() returns the expected keys', is_array($info) && array_keys($info) ===
       ['total_cache_uptime', 'is_local_cache', 'total_item_count', 'total_hit_count', 'total_miss_count', 'last_scavenge_seconds',
-       'last_scavenge_count', 'total_scavenged_count', 'total_evicted_count', 'ucache_entries'],
+       'last_scavenge_count', 'total_scavenged_count', 'total_evicted_count', 'total_abandoned_lock_count', 'ucache_entries'],
       is_array($info) ? array_keys($info) : $info);
 check('the user cache is not a local cache', $info['is_local_cache'] === false, $info['is_local_cache']);
+check('ucache_info() reports no abandoned lock in a cache whose processes all released their locks (total_abandoned_lock_count is 0)',
+      isset($info['total_abandoned_lock_count']) && $info['total_abandoned_lock_count'] === 0,
+      isset($info['total_abandoned_lock_count']) ? $info['total_abandoned_lock_count'] : null);
 /* Writes do not run the scavenger here (ucache.gc.threshold 0), none has run out of shared memory yet (which runs a full
    scavenger pass), and the end of the request is still to come: the counts are those at the start, and the seconds since
    the last step are still null, or have grown */
@@ -2521,6 +2524,76 @@ function holder_memory($holder, $timeout = 30)
     return null;
 }
 
+/*
+ * The checks of a process killed in the middle of an update of what the processes of a pool share (see below). An attempt
+ * runs on a cache of its own: a holder keeps the cache, the victim fills it ('kill_victim'), and once both say READY, the
+ * parent creates the victim's flag, waits a random delay of at most $maxDelay ms (a busy wait: usleep() can sleep a timer
+ * tick longer) and kills the victim, which meanwhile runs what the check is about; then a checker looks at the cache
+ * ('kill_check'). A kill lands at any instruction, while the victim holds a lock or not; total_abandoned_lock_count tells
+ * which.
+ */
+function kill_attempt_start($scenario, $attempt, array $ini)
+{
+    global $poolBase, $holderScript, $killScript;
+
+    $a = new stdClass();
+    $a->scenario = $scenario;
+    $a->pool     = $poolBase . $scenario . $attempt;
+    $a->ini      = $ini;
+    $a->name     = "$scenario$attempt";
+    $a->flag     = "$scenario$attempt.flag";
+    $a->holder   = child_start("$scenario$attempt-holder", child_php_args($a->pool, $ini, $holderScript));
+    $a->victim   = child_start("$scenario$attempt-victim", child_php_args($a->pool, $ini, $killScript, ['kill_victim', $scenario, $a->flag]));
+    $a->checker  = null;
+    $a->ready    = false;
+    $a->delay    = null;
+    $a->done     = null;
+    $a->exit     = null;
+    $a->result   = null;
+
+    return $a;
+}
+
+function kill_attempt_kill($a, $maxDelay)
+{
+    global $childDir, $killScript;
+
+    $a->ready = child_wait_for($a->holder, '/^READY/m', 30) && child_wait_for($a->victim, '/^READY/m', 60);
+    $a->delay = mt_rand(min(2, $maxDelay), $maxDelay);
+    touch($childDir . DIRECTORY_SEPARATOR . $a->flag);
+    $until = microtime(true) + $a->delay / 1000;
+    while (microtime(true) < $until) {
+    }
+    child_kill($a->victim);
+    $killedAt = microtime(true);
+    $a->done = strpos(child_output($a->victim), 'DONE') !== false;
+
+    /* A process killed while it swept the entries of a ucache_clear() is taken over by a ucache_clear() a second later */
+    $a->checker = child_start("{$a->name}-checker", child_php_args($a->pool, $a->ini, $killScript,
+                              ['kill_check', sprintf('%.3F', ($a->scenario === 'kc') ? $killedAt + 1.1 : 0)]));
+}
+
+function kill_attempt_finish($a)
+{
+    $a->exit   = child_finish($a->checker, 60);
+    $a->result = child_result($a->checker);
+    child_send($a->holder, 'done');
+    child_finish($a->holder, 30);
+}
+
+/* Whether the cache was consistent after the kill (see kill_check): the counts match the listing, no key is listed twice,
+   every entry reads back a value it was given, new entries are stored and read back, and a ucache_clear() leaves the cache
+   header and what the killed process had taken out of the cache at most: 32 entries waiting to be freed (FREELIST_MAXIMUM)
+   and one being stored, of 4 blocks at most each; and no more free blocks than used ones, since a free block is always
+   joined with the free blocks beside it (more would mean counts that drifted) */
+function kill_attempt_ok($a)
+{
+    $r = $a->result;
+
+    return $a->ready && $a->exit === 0 && is_array($r) && count($r) === 7 && is_int($r[0]) && $r[1][0] === $r[1][1] && $r[2] === 0
+           && $r[3] === 0 && $r[4] === [0, 0] && $r[5] === true && $r[6][0] === 0 && $r[6][1] <= 1 + 33 * 4 && $r[6][2] <= $r[6][1];
+}
+
 /* The expected exit code of a process that reaches memory_limit: the fatal error (255), or exit code 1 on PHP 7
    builds such as the CVE-patched 7.2, which end the process instead */
 function limit_exit_ok($exit)
@@ -2582,9 +2655,9 @@ if ($childDir !== null) {
 <?php
 /* Keeps the cache of its group alive. Stores its arguments (key value key value ...), prints "READY" and
    the ucache.namesalt it sees, then waits for a line on stdin: "memory" prints "MEMORY ", memory_free and
-   num_used_blks, and waits for the next line; "free" deletes every entry and gives memory_free before and
-   after; another line is a key to read (serialize()d). Prints "RESULT " and its serialize()d result in
-   base64. */
+   num_used_blks, and waits for the next line; "free" deletes every entry and gives memory_free and
+   num_used_blks before and after, and total_abandoned_lock_count; another line is a key to read
+   (serialize()d). Prints "RESULT " and its serialize()d result in base64. */
 for ($i = 1; $i + 1 < $argc; $i += 2) {
     ucache_set($argv[$i], $argv[$i + 1]);
 }
@@ -2608,7 +2681,8 @@ if ($line === 'free') {
     }
     $after = ucache_meminfo();
     $result = ['memory_free' => [$before['memory_free'], $after['memory_free']],
-               'num_used_blks' => [$before['num_used_blks'], $after['num_used_blks']]];
+               'num_used_blks' => [$before['num_used_blks'], $after['num_used_blks']],
+               'abandoned' => ucache_info(true)['total_abandoned_lock_count']];
 } else {
     $result = serialize(ucache_get($line));
 }
@@ -3103,8 +3177,10 @@ switch ($argv[1]) {
         break;
 
     case 'lock':
+        /* [stored, seconds, total_abandoned_lock_count] */
         $start = microtime(true);
         $result = [ucache_set('lock_probe', 1), round(microtime(true) - $start, 3)];
+        $result[] = ucache_info(true)['total_abandoned_lock_count'];
         break;
 
     case 'listed':
@@ -4287,6 +4363,217 @@ echo "RESULT ", base64_encode(serialize($result)), "\n";
 CHILDSCRIPT
     );
 
+    /* The processes of the checks of a killed process, in a script of their own: the checks of memory_limit in client.php
+       depend on how much memory its code takes */
+    $killScript = $childDir . DIRECTORY_SEPARATOR . 'kill.php';
+    file_put_contents($killScript, <<<'CHILDSCRIPT'
+<?php
+/* A process of the checks of a killed process (see kill_attempt_start in test-build.php); argv[1] says what it does.
+   Prints "RESULT " and its serialize()d result in base64. */
+
+/* The keys of the check of a killed process that replaces entries: forms of one word in upper and lower case (the bits of
+   $number), which all go into one hash bucket (utils_getindex() takes A-Z as a-z), so that the chain is long and each
+   call goes through it holding the cache lock */
+function kill_chained_key($number)
+{
+    $word = 'krchainedkeys';
+    for ($i = 0; $i < strlen($word); $i++) {
+        if ($number & (1 << $i)) {
+            $word[$i] = strtoupper($word[$i]);
+        }
+    }
+    return $word;
+}
+
+/* Version $version of the value of a key ("<letters><number>", or a chained key: see kill_chained_key), every third an
+   array (4 blocks of the allocator), the others an integer (2 blocks) or a string (3 blocks) of 10 to 400 bytes */
+function kill_value($key, $version)
+{
+    $number = preg_match('/\d+$/', $key, $digits) ? (int)$digits[0] : crc32($key) % 100000;
+    switch ($number % 3) {
+        case 0:  return ['k' => $key, 'v' => $version, 's' => str_repeat(chr(97 + ($number + $version) % 26), 10 + ($number * 7 + $version * 13) % 390)];
+        case 1:  return "$key|$version|" . str_repeat(chr(97 + ($number + $version) % 26), 10 + ($number * 7 + $version * 13) % 390);
+        default: return $number * 1000 + $version;
+    }
+}
+
+/* Whether $value is one of the versions of the value of $key (the version it holds, or any up to 1000) */
+function kill_valid($key, $value)
+{
+    if (is_array($value)) {
+        return isset($value['k'], $value['v']) && $value === kill_value($key, $value['v']);
+    }
+    if (is_string($value)) {
+        $parts = explode('|', $value, 3);
+        return count($parts) === 3 && $value === kill_value($key, (int)$parts[1]);
+    }
+    if (is_int($value)) {
+        return $value === kill_value($key, $value % 1000);
+    }
+    return false;
+}
+
+/* The keys and the values that 'kr' stores, made before the calls that the parent kills, so that these take most of the
+   time: versions 1 and 2 of each value */
+$krKeys = [];
+$krValues = [1 => [], 2 => []];
+
+/* Fills the cache (see 'kill_victim') */
+function kill_prepare($scenario)
+{
+    global $krKeys, $krValues;
+
+    switch ($scenario) {
+        case 'kc':
+            /* 100000 entries of every kind (about 50 MB), which ucache_clear() then sweeps */
+            for ($i = 0; $i < 100000; $i++) {
+                ucache_set("kc$i", kill_value("kc$i", 0));
+            }
+            break;
+
+        case 'kf':
+            /* Entries until less than 5% is free, every fifth deleted: the full pass of a set that does not fit then evicts
+               entries, whose frees join the free blocks around them */
+            for ($i = 0; ; $i++) {
+                ucache_set("kf$i", kill_value("kf$i", 0));
+                if ($i % 1000 === 999) {
+                    $memory = ucache_meminfo();
+                    if ($memory['memory_free'] < $memory['memory_total'] / 20) {
+                        break;
+                    }
+                }
+            }
+            for ($j = 0; $j <= $i; $j += 5) {
+                ucache_delete("kf$j");
+            }
+            break;
+
+        case 'ks':
+            /* 30000 entries (about 15 MB), every fourth deleted: the next sets split the free blocks between the others */
+            for ($i = 0; $i < 30000; $i++) {
+                ucache_set("ks$i", kill_value("ks$i", 0));
+            }
+            for ($i = 0; $i < 30000; $i += 4) {
+                ucache_delete("ks$i");
+            }
+            break;
+
+        case 'kr':
+            /* 8000 entries in one hash chain, every fourth deleted */
+            for ($i = 0; $i < 8000; $i++) {
+                $krKeys[$i] = kill_chained_key($i);
+                $krValues[1][$i] = kill_value($krKeys[$i], 1);
+                $krValues[2][$i] = kill_value($krKeys[$i], 2);
+                ucache_set($krKeys[$i], kill_value($krKeys[$i], 0));
+            }
+            for ($i = 0; $i < 8000; $i += 4) {
+                ucache_delete($krKeys[$i]);
+            }
+            break;
+    }
+}
+
+/* What the parent kills (see 'kill_victim'): ucache_clear() of the full cache (kc); a set that does not fit, whose full
+   pass evicts until half of the cache is free (kf, run with ucache.gc.evict 50); sets of 30000 new keys (ks); replaces
+   of the entries of the chain, some deleted and added again (kr), for 2 seconds at most */
+function kill_run($scenario)
+{
+    global $krKeys, $krValues;
+
+    $end = microtime(true) + 2;
+    switch ($scenario) {
+        case 'kc':
+            ucache_clear();
+            break;
+
+        case 'kf':
+            ucache_set('kf_big', str_repeat('B', 2000000));
+            break;
+
+        case 'ks':
+            for ($i = 30000; $i < 60000 && microtime(true) < $end; $i++) {
+                ucache_set("ks$i", kill_value("ks$i", 0));
+            }
+            break;
+
+        case 'kr':
+            for ($round = 0; microtime(true) < $end; $round++) {
+                $version = 1 + $round % 2;
+                for ($i = 1; $i < 8000 && microtime(true) < $end; $i++) {
+                    if ($i % 4 === 0) {
+                        continue;
+                    }
+                    ucache_set($krKeys[$i], $krValues[$version][$i]);
+                    if ($i % 5 === 0) {
+                        ucache_delete($krKeys[$i]);
+                        ucache_add($krKeys[$i], $krValues[$version][$i]);
+                    }
+                }
+            }
+            break;
+    }
+}
+
+/* After the kill: [total_abandoned_lock_count, [total_item_count, keys listed], keys listed twice, entries that do not read
+   back as a version of their value, [sets that failed, values that did not read back] of 2000 new entries, cleared,
+   [total_item_count, num_used_blks, num_free_blks] after a ucache_clear() once $notBefore (microtime) has passed] */
+function kill_check($notBefore)
+{
+    $info = ucache_info();
+    $keys = [];
+    foreach ($info['ucache_entries'] as $entry) {
+        $keys[] = $entry['key_name'];
+    }
+    $bad = 0;
+    foreach ($keys as $key) {
+        $value = ucache_get($key, $ok);
+        $bad += ($ok && kill_valid($key, $value)) ? 0 : 1;
+    }
+    $failed = 0;
+    $wrong = 0;
+    for ($i = 0; $i < 2000; $i++) {
+        $failed += ucache_set("kn$i", kill_value("kn$i", 0)) ? 0 : 1;
+    }
+    for ($i = 0; $i < 2000; $i++) {
+        $wrong += kill_valid("kn$i", ucache_get("kn$i")) ? 0 : 1;
+    }
+    /* A process killed while it swept the entries of a ucache_clear() is taken over by a clear a second later */
+    while (microtime(true) < $notBefore) {
+        usleep(10000);
+    }
+    $cleared = ucache_clear();
+    $memory = ucache_meminfo();
+    $after = ucache_info(true);
+    return [$info['total_abandoned_lock_count'], [$info['total_item_count'], count($keys)], count($keys) - count(array_unique($keys)),
+            $bad, [$failed, $wrong], $cleared, [$after['total_item_count'], $memory['num_used_blks'], $memory['num_free_blks']]];
+}
+
+switch ($argv[1]) {
+    case 'kill_victim':
+        /* Fills the cache for the check argv[2] (kc, kf, ks, kr: see kill_prepare), says READY, waits until the file argv[3]
+           exists (polled without a pause, so that it starts at once; 30 s at most), then runs what the parent kills
+           (kill_run). Says DONE if it was not killed, then waits for a line */
+        kill_prepare($argv[2]);
+        echo "READY\n";
+        $end = microtime(true) + 30;
+        while (!file_exists($argv[3]) && microtime(true) < $end) {
+            clearstatcache();
+        }
+        kill_run($argv[2]);
+        echo "DONE\n";
+        fgets(STDIN);
+        $result = true;
+        break;
+
+    case 'kill_check':
+        /* After a check's victim was killed: see kill_check; argv[2] is the microtime of the final clear */
+        $result = kill_check((float)$argv[2]);
+        break;
+}
+echo "RESULT ", base64_encode(serialize($result)), "\n";
+CHILDSCRIPT
+    );
+
     file_put_contents($childDir . DIRECTORY_SEPARATOR . 'router.php', <<<'CHILDSCRIPT'
 <?php
 /* Router of the php -S servers of the checks with several processes */
@@ -4428,8 +4715,11 @@ CHILDSCRIPT
     /* A php -S process runs out of memory_limit while ucache_get() copies a big value out, which it does
        holding the cache lock: the fatal error must not leave the lock taken. On PHP 8.2.35 and 8.3.36
        memory_limit is only raised when ucache_get() has returned (false); some PHP 7 builds end the process
-       instead */
+       instead, which abandons the lock: a holder keeps the cache, so that the next process finds the lock
+       abandoned (and counts it in total_abandoned_lock_count) instead of a new cache */
     $pool = $poolBase . 'b';
+    $bHolder = child_start('b-holder', child_php_args($pool, ['ucache.size' => '32'], $holderScript));
+    $bReady = child_wait_for($bHolder, '/^READY/m', 30);
     $server = server_start('b-server', $pool, ['ucache.size' => '32', 'memory_limit' => '8M', 'display_errors' => '1', 'html_errors' => '0'], $port);
     if ($server === null) {
         check('a php -S server starts', false);
@@ -4445,14 +4735,16 @@ CHILDSCRIPT
         $outOfMemory = strpos((string)$reply, 'Allowed memory size') !== false || strpos((string)$reply, 'got false') !== false;
         $endedOnLimit = PHP_VERSION_ID < 80000 && $serverExit === 1 && strpos(child_output($server), 'Allowed memory size') !== false;
         check('a php -S process that runs out of memory_limit while ucache_get() copies a value out survives and gives the cache lock back'
-              . ($endedOnLimit ? ' (this PHP 7 build ends the process on memory_limit instead, which gives the lock back too)' : ''),
-              $setExit === 0 && child_result($setter) === true && (($alive && $outOfMemory) || $endedOnLimit)
-              && $probeExit === 0 && is_array($lock) && $lock[0] === true && $lock[1] < 5,
+              . ($endedOnLimit ? ' (this PHP 7 build ends the process on memory_limit instead, which abandons the lock: the next process takes it and counts it in total_abandoned_lock_count)' : ', and total_abandoned_lock_count stays 0'),
+              $bReady && $setExit === 0 && child_result($setter) === true && (($alive && $outOfMemory) || $endedOnLimit)
+              && $probeExit === 0 && is_array($lock) && $lock[0] === true && $lock[1] < 5 && $lock[2] === ($endedOnLimit ? 1 : 0),
               ['set' => [$setExit, child_result($setter)], 'reply' => substr(trim(preg_replace('/\s+/', ' ', (string)$reply)), -300),
                'server exit code' => $serverExit, 'server alive' => $alive, 'server output' => child_tail($server),
-               'other process (exit code, [set, seconds])' => [$probeExit, $lock]]);
+               'other process (exit code, [set, seconds, total_abandoned_lock_count])' => [$probeExit, $lock]]);
         child_kill($server);
     }
+    child_send($bHolder, 'done');
+    child_finish($bHolder, 30);
 
     /* The server of the check of a loop of writes that run the scavenger (see below), started now with a holder of its
        cache (which outlives the server on PHP 7 builds that end the process on memory_limit): its writes run a step
@@ -4475,8 +4767,9 @@ CHILDSCRIPT
     $holderExit = child_finish($holder, 30);
     $memory = child_result($holder);
     $fatal = strpos(child_output($victim), 'fatal error in __sleep') !== false;
-    check('a fatal error in __sleep() while ucache_set() copies a value in gives back the shared memory the copy had taken',
-          $ready && $fatal && $victimExit === 255 && $holderExit === 0 && is_array($memory) && $memory['memory_free'][0] === $memory['memory_free'][1],
+    check('a fatal error in __sleep() while ucache_set() copies a value in gives back the shared memory the copy had taken, and abandons no lock (total_abandoned_lock_count 0)',
+          $ready && $fatal && $victimExit === 255 && $holderExit === 0 && is_array($memory) && $memory['memory_free'][0] === $memory['memory_free'][1]
+          && $memory['abandoned'] === 0,
           ['exit codes (holder, process with the fatal error)' => [$holderExit, $victimExit], 'memory' => $memory,
            'output' => [child_tail($holder), child_tail($victim)]]);
 
@@ -4565,9 +4858,9 @@ CHILDSCRIPT
         $stepRan = $listerExit === 0 && is_array($listed) && $listed[0] === ['lasting', 'later', 'lock_probe', 'poke'] && $listed[1] === 1;
         $endedOnLimit = PHP_VERSION_ID < 80000 && $serverExit === 1 && strpos(child_output($eServer), 'Allowed memory size') !== false;
         check('a php -S process that runs out of memory_limit in a loop of ucache_inc() calls, the first of which runs a scavenger step (ucache.gc.threshold 100), does not keep the cache lock'
-              . ($endedOnLimit ? ' (this PHP 7 build ends the process on memory_limit instead, which gives the lock back too)' : ''),
+              . ($endedOnLimit ? ' (this PHP 7 build ends the process on memory_limit instead, outside the cache lock: total_abandoned_lock_count stays 0)' : ', and total_abandoned_lock_count stays 0'),
               $seeded && (($alive && $outOfMemory) || $endedOnLimit) && $stepRan && $probeExit === 0 && is_array($lock) && $lock[0] === true
-              && $lock[1] < 5,
+              && $lock[1] < 5 && $lock[2] === 0,
               ['first requests stored their entries' => $seeded, 'reply' => substr(trim(preg_replace('/\s+/', ' ', (string)$reply)), -300),
                'server exit code' => $serverExit, 'server alive' => $alive, '[keys listed after the loop, removed in all, by the last step]' => $listed,
                'server output' => child_tail($eServer), 'other process (exit code, [set, seconds])' => [$probeExit, $lock]]);
@@ -4705,6 +4998,18 @@ CHILDSCRIPT
     $poolSizes = child_start('ps-pool-sizes', child_php_args($poolBase . 'ps', [], $clientScript, ['pool_sizes']));
     $contactFree = child_start('cf-contact-free', child_php_args($poolBase . 'cf', [], $clientScript, ['contact_free']));
 
+    /* The first attempts of the checks of a killed process (see kill_attempt_start): they fill their caches meanwhile.
+       A set holds a lock in its own code only for moments, so the check of sets makes its 3 attempts at once */
+    $killIni = ['kc' => ['ucache.size' => '64'], 'kf' => ['ucache.size' => '32', 'ucache.gc.evict' => '50'],
+                'ks' => ['ucache.size' => '32'], 'kr' => ['ucache.size' => '32']];
+    $killDelay = ['kc' => 30, 'kf' => 10, 'ks' => 120, 'kr' => 400];
+    $killAttempts = [];
+    foreach ($killIni as $scenario => $ini) {
+        for ($attempt = 1; $attempt <= (($scenario === 'ks') ? 3 : 1); $attempt++) {
+            $killAttempts[$scenario][] = kill_attempt_start($scenario, $attempt, $ini);
+        }
+    }
+
     /* The processes of the checks of ucache_clear() and of the allocator below: they fill their caches meanwhile */
     $clFlag = 'cl-cleared.flag';
     $crFlag = 'cr-cleared.flag';
@@ -4723,6 +5028,13 @@ CHILDSCRIPT
         $gcDtorProberReady = child_wait_for($gcDtorProber, '/^READY/m', 30);
         $gcDtor = child_start('v3-fiber-gc-dtor', child_php_args($poolBase . 'v3', ['fiber.stack_size' => '2M'], $clientScript,
                                                                 ['fiber_get_gc_dtor', 'v3-destructor.flag']));
+    }
+
+    /* The victims of the first attempts are killed once they are ready; their checkers run meanwhile, checked below */
+    foreach ($killAttempts as $scenario => $attempts) {
+        foreach ($attempts as $a) {
+            kill_attempt_kill($a, $killDelay[$scenario]);
+        }
     }
 
     $exit = child_finish($incAlive, 60);
@@ -4942,6 +5254,59 @@ CHILDSCRIPT
     check('(in another process) in a full cache, a string of the length of the one just deleted is stored in the free block it left',
           $exit === 0 && is_array($result) && $result[0] > 50 && $result[1] === true && $result[2] === true,
           ['exit code' => $exit, '[entries stored, stored into the hole, read back]' => $result, 'output' => child_tail($holeFit)]);
+
+    /* A process killed (an IIS FastCGI timeout) in the middle of an update of what the processes share: a hash chain and
+       the count of entries under the cache lock, the lists of free blocks, the block headers and the counts of the allocator
+       under its lock. The next process to take the lock undoes the update (WinCache 2.0.0.8 went on with it: the same
+       memory given out twice, every write failing, a chain leading to freed memory). A kill lands at any instruction, so
+       each check makes up to 3 attempts, until one kills the victim while it holds a lock (total_abandoned_lock_count);
+       every attempt must leave a consistent cache, and one that never hit a lock is only noted */
+    for ($round = 2; $round <= 3; $round++) {
+        $retry = [];
+        foreach ($killAttempts as $scenario => $attempts) {
+            $last = end($attempts);
+            if ($last->result === null) {
+                kill_attempt_finish($last);
+            }
+            if (count($attempts) < 3 && (!is_array($last->result) || $last->result[0] === 0)) {
+                $retry[] = $scenario;
+            }
+        }
+        foreach ($retry as $scenario) {
+            $killAttempts[$scenario][] = kill_attempt_start($scenario, $round, $killIni[$scenario]);
+        }
+        foreach ($retry as $scenario) {
+            /* A victim that was done before the kill gets a shorter delay */
+            $last = $killAttempts[$scenario][count($killAttempts[$scenario]) - 2];
+            kill_attempt_kill(end($killAttempts[$scenario]), $last->done ? max(2, intdiv($last->delay, 2)) : $killDelay[$scenario]);
+        }
+    }
+    $killChecks = [
+        'kc' => 'during a ucache_clear() of 100000 entries, which it frees in batches holding the cache lock, then the allocator\'s',
+        'kf' => 'during the full pass of a set that does not fit (ucache.gc.evict 50), which evicts entries and frees them in batches in a fragmented cache',
+        'ks' => 'while it stores new entries, whose blocks split the free blocks of a fragmented cache (a set holds the allocator\'s lock in its own code only for moments, so the kill seldom lands there: any point of a set)',
+        'kr' => 'while it replaces, deletes and adds entries in a hash chain of 6000 (unlinks and links in the chain, which each call goes through holding the cache lock, frees and splits of blocks)',
+    ];
+    foreach ($killAttempts as $scenario => $attempts) {
+        $ok = true;
+        $hit = 0;
+        $details = [];
+        foreach ($attempts as $a) {
+            if ($a->result === null) {
+                kill_attempt_finish($a);
+            }
+            $ok = $ok && kill_attempt_ok($a);
+            $hit = max($hit, is_array($a->result) ? (int)$a->result[0] : 0);
+            $details[] = ['delay ms' => $a->delay, 'done before the kill' => $a->done, 'ready' => $a->ready, 'checker exit code' => $a->exit,
+                          '[abandoned, [items, listed], listed twice, bad, [new failed, new wrong], cleared, [items, used, free blocks]]' => $a->result,
+                          'output' => [child_tail($a->victim), child_tail($a->checker)]];
+        }
+        check("(in other processes) a process killed $killChecks[$scenario] leaves a consistent cache: total_item_count equals the entries listed, no key twice, every entry reads back a value it was given, new entries are stored and read back, and ucache_clear() gives back all but what the killed process held (33 entries at most), with no more free blocks than used ones",
+              $ok, $details);
+        if ($hit === 0 && $scenario !== 'ks') {
+            echo "NOTE: none of the ", count($attempts), " attempts of the check above killed the process while it held a lock\n";
+        }
+    }
 
     /* Changes made by __sleep() while the value is copied in (see above), in the forms that crash PHP or
        store a broken entry when the copy reads freed memory, so in a process of their own */
@@ -5299,12 +5664,12 @@ CHILDSCRIPT
     child_send($holder, 'free');
     $holderExit = child_finish($holder, 30);
     $memory = child_result($holder);
-    check('ucache_set() of 200000 strings held by two lists each, with memory_limit 4 MB above the usage, stores them (the copy needs no request memory), and deleting them gives back all the shared memory',
+    check('ucache_set() of 200000 strings held by two lists each, with memory_limit 4 MB above the usage, stores them (the copy needs no request memory), and deleting them gives back all the shared memory; neither process, nor the one that reached memory_limit in __sleep() before them, abandoned a lock (total_abandoned_lock_count 0)',
           $sharerExit === 0 && $stored === true && $holderExit === 0 && $afterVictim !== null && is_array($memory)
-          && $memory['memory_free'][1] === $afterVictim[0],
+          && $memory['memory_free'][1] === $afterVictim[0] && $memory['abandoned'] === 0,
           ['exit codes (holder, process that stores)' => [$holderExit, $sharerExit], 'set' => $stored,
            'memory_free before and after' => [($afterVictim === null) ? null : $afterVictim[0], is_array($memory) ? $memory['memory_free'][1] : null],
-           'output' => child_tail($sharer)]);
+           'total_abandoned_lock_count' => is_array($memory) ? $memory['abandoned'] : null, 'output' => child_tail($sharer)]);
 
     /* The translation table of phase 2 is keyed by the addresses of what it records, such as the strings that a value holds
        more than once. zend_mm gives every block over 3 KB pages of its own, so the addresses of 4 KB strings are multiples
