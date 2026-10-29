@@ -139,7 +139,7 @@ if ($page == UCACHE_DATA && isset($_GET['key']) && is_string($_GET['key']) && $_
 // example because ucache.filemapdir names a folder that does not exist), ucache_info() and ucache_meminfo() fail.
 $ucache_info = uc('info', true);
 $ucache_mem_info = uc('meminfo');
-$user_cache_available = ini_get('ucache.enabled') === '1' && is_array($ucache_info) && is_array($ucache_mem_info);
+$user_cache_available = ini_bool(ini_get('ucache.enabled')) && is_array($ucache_info) && is_array($ucache_mem_info);
 
 // The clear form must send back the token kept in this cookie. The cookie is SameSite=Strict: another site can
 // neither read the token nor make the browser send the cookie, so it cannot get a logged-in browser to clear the cache.
@@ -156,7 +156,8 @@ if (USE_AUTHENTICATION && $user_cache_available && $clear_user_cache) {
         exit;
     }
     uc('clear');
-    header('Location: ' . $PHP_SELF . '?page=' . UCACHE_DATA);
+    // Relative to the page itself: $PHP_SELF is escaped for HTML, which would break a path with & or non-ASCII characters
+    header('Location: ?page=' . UCACHE_DATA);
     exit;
 }
 
@@ -254,6 +255,13 @@ function env_value($name) {
     return ($value === false || $value === '') ? null : $value;
 }
 
+// A boolean setting as PHP reads it: "on", "yes" or "true" in any case, or a number other than 0. ini_get() returns the
+// string as it was set, which can be "On" or "2" as well as "1", and "" for Off
+function ini_bool($value) {
+    $value = strtolower((string)$value);
+    return $value === 'on' || $value === 'yes' || $value === 'true' || (int)$value !== 0;
+}
+
 // A row of a two-column table, with a placeholder for a value that is not set
 function kv_row($label, $value, $missing = 'Not set') {
     $cell = ($value === null || $value === '') ? placeholder($missing) : html_escape($value);
@@ -267,11 +275,11 @@ function kv_group($title) {
 
 // The value of a ucache setting in the Cache settings card (HTML), with what it does under it where needed
 function setting_cell($name, $value) {
+    if ($name === 'ucache.enabled' || $name === 'ucache.enablecli') {
+        return ini_bool($value) ? 'enabled' : 'disabled';
+    }
     if ($value === '') {
         return placeholder('Not set');
-    }
-    if ($name === 'ucache.enabled' || $name === 'ucache.enablecli') {
-        return $value === '1' ? 'enabled' : 'disabled';
     }
     $note = setting_note($name, $value);
     return html_escape($value) . ($note !== null ? '<span class="note">' . html_escape($note) . '</span>' : '');
@@ -1005,7 +1013,7 @@ if ($host === null) {
                         echo kv_row('PHPRC', server_value('PHPRC'), 'Not defined');
                         echo kv_row('Application pool ID', env_value('APP_POOL_ID'), 'Not available');
                         echo kv_row('Site ID', server_value('INSTANCE_ID'), 'Not available');
-                        echo kv_row('FastCGI impersonation', ini_get('fastcgi.impersonate') === '1' ? 'enabled' : 'disabled');
+                        echo kv_row('FastCGI impersonation', ini_bool(ini_get('fastcgi.impersonate')) ? 'enabled' : 'disabled');
                         echo kv_group('Machine');
                         echo kv_row('Machine name', env_value('COMPUTERNAME'));
                         echo kv_row('Operating system', php_uname('s') . ' ' . php_uname('r'));

@@ -67,8 +67,6 @@
  */
 C_ASSERT(SIZEOF_SIZE_T <= SIZEOF_ZEND_LONG);
 
-#define PER_RUN_SCAVENGE_COUNT       16
-
 /*
  * One hash bucket per this many bytes of the cache (the largest prime up to that number of buckets).
  * An entry takes at least about 200 bytes (208 with a key of 40 characters and an integer value), so

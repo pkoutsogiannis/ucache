@@ -95,13 +95,15 @@ To install and enable the extension, follow these steps:
 > **Note:** Do not forget to remove the phpinfo.php file from the web site's root folder after verifying that the
 > extension has been enabled.
 
-> **Note:** To replace an older php_ucache.dll, stop the application pool or the web server completely, replace the
-> DLL, and then start it. Old and new PHP processes must never run at the same time: they would share one cache,
-> because the names of its shared memory and synchronization objects stay the same, although the two DLLs can store
-> values differently (an old process can crash on arrays that a new one stored). An overlapped recycle, the IIS
-> default, starts the new processes while the old ones are still running. For the same reason, do not rename a loaded
-> DLL or switch PHP folders under a running pool, unless `ucache.namesalt` changes in its first 8 characters (the only
-> ones used) at the same time, which gives the new processes a cache of their own.
+> **Note:** To replace php_ucache.dll, stop the application pool or the web server completely, replace the DLL, and
+> then start it. Old and new PHP processes must not run at the same time. The names of the cache's shared memory and
+> synchronization objects include the PHP and UCache versions: processes of the same UCache version (a rebuilt DLL)
+> would share one cache, although the two builds can store values differently (an old process can crash on arrays
+> that a new one stored), and processes of different versions would each use a cache of their own, so that neither
+> sees what the other stores. An overlapped recycle, the IIS default, starts the new processes while the old ones are
+> still running. For the same reason, do not rename a loaded DLL or switch PHP folders under a running pool, unless
+> `ucache.namesalt` changes in its first 8 characters (the only ones used) at the same time, which gives the new
+> processes a cache of their own.
 
 > **Note:** Under the CLI, the cache is only created when `ucache.enablecli=1`, in php.ini or on the command line:
 > `php -d ucache.enablecli=1 script.php`.
@@ -1296,22 +1298,22 @@ Array
         (
             [1] => Array
                 (
-                    [key_name] => blue
-                    [value_type] => array
-                    [value_size] => 128
-                    [ttl_seconds] => 300
-                    [age_seconds] => 0
-                    [hitcount] => 0
-                )
-
-            [2] => Array
-                (
                     [key_name] => green
                     [value_type] => long
                     [value_size] => 16
                     [ttl_seconds] => 0
                     [age_seconds] => 0
                     [hitcount] => 1
+                )
+
+            [2] => Array
+                (
+                    [key_name] => blue
+                    [value_type] => array
+                    [value_size] => 128
+                    [ttl_seconds] => 300
+                    [age_seconds] => 0
+                    [hitcount] => 0
                 )
 
         )
@@ -1432,7 +1434,7 @@ The above example will output:
 Array
 (
     [memory_total] => 8388608
-    [memory_free] => 8386744
+    [memory_free] => 8257272
     [num_used_blks] => 1
     [num_free_blks] => 1
     [memory_overhead] => 128
@@ -1760,9 +1762,9 @@ Several of these change what existing code sees.
   default 8 MB, 262139 for 128 MB), so its chains hold 2 to 3 entries on average even in a cache full of the smallest
   entries, and the whole key is hashed. WinCache 2.0.0.8 had one bucket per 32 to 64 KB (197 for 8 MB, 3203 for
   128 MB) and put every key longer than 260 characters into the same bucket. With 500,000 entries of 40-character
-  keys in 128 MB, its chains held about 156 entries, and a read through them took about 8 microseconds, 16 for a
-  missing key, where UCache takes about 1; with 5,000 keys of 300 characters, a read took about 8 microseconds and a
-  miss 14, against 1.5.
+  keys in 128 MB, its chains would hold about 156 entries: a read through chains that long takes about 8
+  microseconds, 16 for a missing key, against about 1 with UCache's table. 5,000 keys of 300 characters in one chain
+  make a read take about 8 microseconds and a miss 14, against 1.5 when they are spread.
 - A `ttl` is taken as given up to 4294967295 seconds, and as 4294967295 above. WinCache 2.0.0.8 cut it to 32 bits:
   2147483648 to 4294967295 were refused as negative ttls, 4294967296 meant no expiry and 4294967297 one second.
 - `$GLOBALS` can be stored, as a value or with the array forms (see [Values](#values)). WinCache 2.0.0.8 stored none
