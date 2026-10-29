@@ -201,8 +201,9 @@ echo ====================================================
 echo.
 
 REM Build the project with the toolset of the PHP version (the global property overrides the vcxproj's v143),
-REM into the build's folder (OutDir is relative to the project, and must end with a backslash), without PDB files
-%MSBUILD% php_ucache.vcxproj /p:Configuration=%CONFIG% /p:Platform=x64 /p:PlatformToolset=%TOOLSET% /p:WindowsTargetPlatformVersion=%WINSDK_VERSION% /p:OutDir=%OUT_DIR%\ /p:DebugSymbols=false /p:DebugType=None /p:GenerateDebugInformation=false /v:minimal /m
+REM into the build's folder (OutDir is relative to the project, and must end with a backslash). The vcxproj
+REM links without debug information and compiles without /FC: no PDB file, and no path of this machine in the DLL
+%MSBUILD% php_ucache.vcxproj /p:Configuration=%CONFIG% /p:Platform=x64 /p:PlatformToolset=%TOOLSET% /p:WindowsTargetPlatformVersion=%WINSDK_VERSION% /p:OutDir=%OUT_DIR%\ /v:minimal /m
 
 REM Not "IF ERRORLEVEL 1": that is false for the negative exit codes of a crashed process
 IF NOT "%ERRORLEVEL%"=="0" (

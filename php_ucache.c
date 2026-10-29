@@ -1103,8 +1103,7 @@ static void set_or_add(INTERNAL_FUNCTION_PARAMETERS, unsigned char isadd)
         goto Finished;
     }
 
-    /* A ttl beyond the entry's unsigned int is its maximum: an entry expires once its age in */
-    /* GetTickCount() milliseconds passes it, and no age passes 4294967 seconds anyway */
+    /* A ttl beyond the entry's unsigned int (4294967295 seconds, about 136 years) is its maximum */
     ttl = ((zend_ulong)lttl > UINT_MAX) ? UINT_MAX : (unsigned int)lttl;
 
     if(pzval && Z_TYPE_P(pzval) == IS_RESOURCE)

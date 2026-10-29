@@ -195,8 +195,10 @@ values are ignored.
 
 `ucache.gc.threshold` *int*
 
-Defines a free memory percentage. When > 0, every write runs a scavenger step while free memory is at or below it,
-and the steps at the end of requests run only then. 0: writes do not run steps. See [The Scavenger](#the-scavenger).
+Defines a free memory percentage, 0 to 100 (negative values act as 0, higher values as 100). When > 0, writes also run
+scavenger steps while free memory is at or below it, one a second at most, more often while the steps find entries to
+remove, and the steps at the end of requests run only then. 0: writes do not run steps. See
+[The Scavenger](#the-scavenger).
 
 `ucache.gc.interval` *int*
 
@@ -510,19 +512,27 @@ Steps run:
   or since the last step, in any process that shares the cache, the first request to end runs one step. The requests
   that end in between do not take the cache lock. `ucache.gc.interval=0` turns these steps off, and a request that
   ends with `ucache.enabled=0` does not run one.
-- On writes, when `ucache.gc.threshold` > 0: every `ucache_delete()`, `ucache_inc()`, `ucache_dec()` and
-  `ucache_cas()`, and every `ucache_set()` or `ucache_add()` that gets as far as storing its value, runs one step
-  while free memory is at or below `ucache.gc.threshold` percent of the cache. The steps at the end of requests then
-  also run only while free memory is that low; one that is skipped for this reason still counts as a step for
-  `ucache.gc.interval`.
+- On writes, when `ucache.gc.threshold` > 0: while free memory is at or below `ucache.gc.threshold` percent of the
+  cache, a `ucache_delete()`, `ucache_inc()`, `ucache_dec()` or `ucache_cas()`, or a `ucache_set()` or `ucache_add()`
+  that gets as far as storing its value (each key of the array forms counts), runs one step once a second has passed
+  since the last step, in any process that shares the cache; a tenth of a second after a step that removed entries;
+  and a hundredth of a second after a step that removed entries while at most a quarter of `ucache.gc.threshold`
+  percent was free. So, however many writes there are, the steps on writes hold the cache lock about 1 ms a second
+  while they find nothing to remove, about 1% of the time while they find entries, and up to about 10% while free
+  memory is that low. The steps at the end of requests also run only while free memory is at or below
+  `ucache.gc.threshold`. A step skipped because more memory is free still counts as a step for these times and for
+  `ucache.gc.interval`, so the other writes and requests do not look at the free memory either.
 
 A step goes through `ucache.gc.step` buckets, at most the whole table. The default, 0, takes the larger of 16 and
-buckets x `ucache.gc.interval` / 300, rounded up, so that the steps at the end of requests go through the whole table
-in at most about 5 minutes while requests keep coming (16 buckets when `ucache.gc.interval` is 0). The table has a
-prime number of buckets, the largest prime up to one bucket per 512 bytes of `ucache.size`: 16381 for the default
-8 MB (547 buckets a step), 1904621 for 930 MB (63488 buckets a step). A step also stops after about 1 ms of work
-under the cache lock, and the next step goes on from there. So a step holds the cache lock for about 1 ms at most,
-but going through a table that holds many entries can take more than 5 minutes.
+buckets x `ucache.gc.interval` / 300, rounded up (buckets / 300 when `ucache.gc.interval` is 0), so that the steps at
+the end of requests go through the whole table in at most about 5 minutes while requests keep coming, and the steps
+on writes, a second apart, `ucache.gc.interval` times faster (in about 5 minutes when `ucache.gc.interval` is 0, while
+writes keep coming). The table has a prime number of buckets, the largest prime up to one bucket per 512 bytes of
+`ucache.size`: 16381 for the default 8 MB (547 buckets a step), 1904621 for 930 MB (63488 buckets a step). A step also
+stops after about 1 ms of work under the cache lock, and the next step goes on from there: the clock is read every 256
+buckets, and after each bucket where the step removed entries, since each removal beyond the first 32 frees its memory
+under the lock (see [Freeing memory](#freeing-memory)). So a step holds the cache lock for about 1 ms at most, but
+going through a table that holds many entries can take more than 5 minutes.
 
 ### A full cache
 
@@ -560,15 +570,17 @@ killed in the middle of a free under the lock loses the rest of that entry.
 
 `ucache_info()` shows what the scavenger did: `last_scavenge_seconds` and `last_scavenge_count` for the last step or
 full pass, `total_scavenged_count` for all the entries that steps and full passes removed, evicted entries included,
-and `total_evicted_count` for the evicted ones. A step that `ucache.gc.threshold` skips is not counted, and neither
-are removals on contact, deletes, replaces and clears.
+and `total_evicted_count` for the evicted ones. A step that is skipped (see [Steps](#steps)) is not counted, and
+neither are removals on contact, deletes, replaces and clears.
 
 ### Tuning
 
 - To go through the table faster or slower than the automatic step does, set `ucache.gc.step`: going through it then
-  takes about buckets / `ucache.gc.step` x `ucache.gc.interval` seconds, more if steps reach the 1 ms limit. A fixed
-  value does not grow with the cache: 1000 buckets every 10 seconds take about 5 hours to go through the 1904621
-  buckets of a 930 MB cache.
+  takes about buckets / `ucache.gc.step` x `ucache.gc.interval` seconds with the steps at the end of requests, and
+  about buckets / `ucache.gc.step` seconds with the steps on writes (a tenth of that while they find entries to
+  remove), more if steps reach the 1 ms limit. A fixed value does not grow with the cache: 1000 buckets every 10
+  seconds take about 5 hours to go through the 1904621 buckets of a 930 MB cache, and steps on writes of 16 buckets
+  take about 17 minutes for the 16381 buckets of 8 MB and about 18 hours for the 1048573 of 512 MB.
 - With the defaults, an entry without a ttl stays until it is deleted, replaced or cleared. If keys go out of use
   (one per user, per page or per day, for example), set `ucache.gc.ttl` above the longest time between two uses of
   an entry that should stay, for example 86400 (a day).
@@ -577,9 +589,20 @@ are removals on contact, deletes, replaces and clears.
   longest time, `ucache_clear()` removes everything, for every process of the pool. A very low value frees little,
   so full passes come often, and each one holds the cache lock while it goes through the whole table. A
   `total_evicted_count` that keeps growing means that the cache is too small for what is stored in it.
-- `ucache.gc.interval=0` turns off the steps at the end of requests: expired entries are then removed only on
-  contact, by steps on writes (`ucache.gc.threshold`) and by the full pass of a full cache. It suits a cache where no
-  entry has a ttl and `ucache.gc.ttl` is 0, since steps have nothing to remove there.
+- `ucache.gc.threshold` makes the scavenger work harder once the cache is that full: with the default
+  `ucache.gc.interval`, the steps on writes go through the table ten times faster than the steps at the end of requests,
+  for about 1 ms of cache lock a second, and faster again while they find entries to remove. It only helps where entries
+  expire or go unused (`ucache.gc.ttl`): otherwise the steps find nothing to remove. It does not keep up with a mass
+  expiry: steps on writes remove some thousands of entries a second there. Measured on PHP 7.2, with 500,000 expired
+  entries in 128 MB and `ucache.gc.threshold=50`: about 1,000 a second at first and 6,000 later, so that free memory was
+  back above 50% after about 45 seconds, with steps holding the cache lock about 1% of the time (in a fuller cache,
+  about 10,000 a second while at most a quarter of 50% was free). If new values fill the cache first, the full pass of a
+  full cache removes all the expired entries at once, and every process of the pool waits for it: it held the cache lock
+  for about 1 second for 660,000 expired entries in 128 MB. Steps on writes cannot prevent that pass then: spread the
+  ttls of entries stored together, or give the cache room for them.
+- `ucache.gc.interval=0` turns off the steps at the end of requests: expired entries are then removed only on contact,
+  by steps on writes (`ucache.gc.threshold`) and by the full pass of a full cache. It suits a cache where no entry has a
+  ttl and `ucache.gc.ttl` is 0, since steps have nothing to remove there.
 
 ## UCache Functions
 
@@ -638,9 +661,8 @@ Not used in the array form. A resource there still makes the call fail, with a w
 
 Time for the variable to live in the cache in seconds. After the value specified in `ttl` has passed, the stored
 variable can no longer be read, and the scavenger frees it (see [The Scavenger](#the-scavenger)). The default value
-of 0 means that the variable never expires. A negative `ttl` makes the call fail. A `ttl` above 4294967295 counts as
-4294967295, and a variable with a `ttl` above 4294967 (about 49.7 days) never expires: the age of an entry is
-measured with the millisecond tick count of Windows, a 32-bit number.
+of 0 means that the variable never expires. A negative `ttl` makes the call fail. A `ttl` above 4294967295 (about
+136 years) counts as 4294967295.
 
 #### Return Values
 
@@ -1318,8 +1340,8 @@ negative, or memory_limit was reached while the entries were listed). The array 
 - `total_hit_count` - number of times the data has been served from the cache
 - `total_miss_count` - number of times the data has not been found in the cache
 - `last_scavenge_seconds` - seconds since the scavenger last ran a step (at the end of a request or on a write) or a
-  full pass (when the cache was full), or null if it has not run since the cache was created. A step that
-  `ucache.gc.threshold` skips does not count.
+  full pass (when the cache was full), or null if it has not run since the cache was created. A step that is
+  skipped (see [Steps](#steps)) does not count.
 - `last_scavenge_count` - the entries that step or pass removed
 - `total_scavenged_count` - the entries that steps and full passes removed since the cache was created, evicted
   entries included
@@ -1508,7 +1530,7 @@ The above example will output:
 Array
 (
     [memory_total] => 8388608
-    [memory_free] => 8257272
+    [memory_free] => 8257224
     [num_used_blks] => 1
     [num_free_blks] => 1
     [memory_overhead] => 128
@@ -1563,9 +1585,8 @@ Not used in the array form. A resource there still makes the call fail, with a w
 
 Time for the variable to live in the cache in seconds. After the value specified in `ttl` has passed, the stored
 variable can no longer be read, and the scavenger frees it (see [The Scavenger](#the-scavenger)). The default value
-of 0 means that the variable never expires. A negative `ttl` makes the call fail. A `ttl` above 4294967295 counts as
-4294967295, and a variable with a `ttl` above 4294967 (about 49.7 days) never expires: the age of an entry is
-measured with the millisecond tick count of Windows, a 32-bit number.
+of 0 means that the variable never expires. A negative `ttl` makes the call fail. A `ttl` above 4294967295 (about
+136 years) counts as 4294967295.
 
 #### Return Values
 
@@ -1700,10 +1721,13 @@ It then rewrites `php_ucache.props` with the pack's include and lib paths and im
 branches are named after the versions, `1.0.0.2` for example), or else the version in `precomp.h`, and
 `php<major><minor>` is `php72`, `php73`, `php74`, `php80`, `php81`, `php82`, `php83`, `php84` or `php85`, so that the
 builds of different versions do not overwrite each other, with the version's toolset and the newest Windows SDK it finds
-(in `%ProgramFiles(x86)%\Windows Kits\10`, or else in the folder of the registry value `KitsRoot10`), without PDB files;
-the `obj` folder is deleted. If the build fails and vswhere finds no Visual Studio with that toolset, `build.bat` names
-the component to install. Do not retarget the project to another toolset, as MSBuild's error MSB8020 suggests: on PHP
-7.4 and later, the DLL would not load.
+(in `%ProgramFiles(x86)%\Windows Kits\10`, or else in the folder of the registry value `KitsRoot10`), without debug
+information: `php_ucache.vcxproj` links without `/DEBUG` and compiles without `/FC`, so no PDB file is written next to
+the DLL and the DLL holds no path of the build machine. The compiler's own PDB goes to the `obj` folder, which is
+deleted, and the link-time code generation files that v141 writes next to the DLL (`.iobj`, `.ipdb`) are deleted too. If
+the build fails and vswhere finds no Visual Studio with that toolset, `build.bat` names the component to install. Do not
+retarget the project to another toolset, as MSBuild's error MSB8020 suggests: on PHP 7.4 and later, the DLL would not
+load.
 
 The DLL is tested before anything is installed (see [Verifying the build](#verifying-the-build)). With `install`, the
 DLL is copied into `%PHP_DIR%\ext` only if both test runs passed, and the version's folder is then deleted
@@ -1750,25 +1774,31 @@ it cannot run) and exits with 1 if a check failed. It clears the cache it runs a
 - `ucache.enablecli=1`, without which the CLI has no cache;
 - a cache that no other process uses while it runs, since it checks hit and miss counts and free memory.
 
-With the path of the DLL under test as its argument, as `build.bat` passes it, it also starts other PHP processes
-that load that DLL, each group on a cache of its own (a unique `ucache.apppoolid` or `APP_POOL_ID`): a holder keeps a
-cache alive while other processes use it, and `php -S` servers on 127.0.0.1 stand for the FastCGI processes of a
-pool, which survive the fatal error of a request. They check what a single process cannot, such as a cache shared by
-several processes and which processes share one (`ucache.apppoolid`, `APP_POOL_ID`, the parent process), the settings
-read at startup (`ucache.size`, `ucache.prefix`) and a cache that cannot be created, the release of the cache lock
-after a fatal error, the scavenger at the end of requests, and the processes that start while the last process of
-their pool closes the cache or after one died while it created the cache (a Windows PowerShell script holds named
-objects of the cache as such processes find them; without `powershell.exe`, or where it runs in ConstrainedLanguage
-mode, these checks are skipped, with a `SKIP` line). They need a writable temporary folder, free local ports and
-Windows PowerShell, and every process they start has a timeout. Without the argument, all the checks with several
-processes are skipped, with one `SKIP` line. The second run, with opcache, goes through the immutable arrays of
-opcache, which take other paths through the copy code.
+With the path of the DLL under test as its argument, as `build.bat` passes it, it also checks the DLL file: that it
+holds no path of the build machine (of a PDB file or of the sources: a DLL built with debug information fails this
+check), and that it imports `GetTickCount64()` and not `GetTickCount()`, whose count wraps every 49.7 days, longer than
+a test can wait. And it starts other PHP processes that load that DLL, each group on a cache of its own (a unique
+`ucache.apppoolid` or `APP_POOL_ID`): a holder keeps a cache alive while other processes use it, and `php -S` servers on
+127.0.0.1 stand for the FastCGI processes of a pool, which survive the fatal error of a request. They check what a
+single process cannot, such as a cache shared by several processes and which processes share one (`ucache.apppoolid`,
+`APP_POOL_ID`, the parent process), the settings read at startup (`ucache.size`, `ucache.prefix`) and a cache that
+cannot be created, the release of the cache lock after a fatal error, the scavenger at the end of requests and on
+writes, and the processes that start while the last process of their pool closes the cache or after one died while it
+created the cache (a Windows PowerShell script holds named objects of the cache as such processes find them; without
+`powershell.exe`, or where it runs in ConstrainedLanguage mode, these checks are skipped, with a `SKIP` line). They need
+a writable temporary folder, free local ports and Windows PowerShell, and every process they start has a timeout.
+Without the argument, all the checks with several processes are skipped, with one `SKIP` line. The second run, with
+opcache, goes through the immutable arrays of opcache, which take other paths through the copy code.
 
 ### Debug builds
 
 Builds compiled with `UCACHE_DEBUG` (which defines `UCACHE_TEST`) also have `ucache_lasterror()`, the last internal
 error code of the user cache in this process, and `ucache_runtests()`, which runs the internal self tests (results go
 to the debug trace).
+
+To debug the DLL with symbols, set `GenerateDebugInformation` to `true` in the `Link` settings of
+`php_ucache.vcxproj` on your machine: the build then writes a PDB file next to the DLL and puts its path in the DLL,
+so the check of `test-build.php` that the DLL holds no path of the build machine fails for that build.
 
 ## Migrating from WinCache
 
@@ -1846,6 +1876,11 @@ Several of these change what existing code sees.
   make a read take about 8 microseconds and a miss 14, against 1.5 when they are spread.
 - A `ttl` is taken as given up to 4294967295 seconds, and as 4294967295 above. WinCache 2.0.0.8 cut it to 32 bits:
   2147483648 to 4294967295 were refused as negative ttls, 4294967296 meant no expiry and 4294967297 one second.
+- UCache measures times with the 64-bit millisecond tick count of Windows, which does not wrap: an entry expires on
+  time whatever its `ttl`, and `total_cache_uptime` and `age_seconds` go on counting after 49.7 days. WinCache 2.0.0.8
+  used the 32-bit tick count, which wraps every 49.7 days: an entry with a `ttl` of 4294967 seconds (about 49.7 days)
+  or more never expired, an expired entry that its scavenger had not removed could be read again for `ttl` seconds
+  every 49.7 days, and `total_cache_uptime` and `age_seconds` started again from 0 every 49.7 days.
 - `$GLOBALS` can be stored, as a value or with the array forms, and so can the arrays that `array_merge()`,
   `array_slice()` and the like make of it, except a list of its entries (see [Values](#values)). On PHP 7, `$GLOBALS`
   holds the variables that the code at the top level of the script uses through slots, which those functions copy as

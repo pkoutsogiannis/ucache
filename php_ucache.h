@@ -51,7 +51,7 @@ extern zend_module_entry ucache_module_entry;
 /* OnUpdateLong writes a full zend_long at the field address */
 ZEND_BEGIN_MODULE_GLOBALS(ucache)
     zvcache_context *        zvucache;    /* User controlled user cache */
-    zend_long                ucgc_threshold;  /* Free memory % at or below which the scavenger runs, also on writes; 0 = always, not on writes */
+    zend_long                ucgc_threshold;  /* Free memory % at or below which the scavenger runs, also on writes (spaced out, see zvcache_run_scavenger); 0 or less = always, not on writes; above 100 = 100 */
     zend_long                ucgc_interval;  /* Seconds between scavenger runs at the end of requests, 0 = none */
     zend_long                ucgc_ttl;  /* Seconds without use after which the scavenger also removes an entry, 0 = never */
     zend_long                ucgc_step;  /* Hash buckets the scavenger scans per step, 0 = automatic */

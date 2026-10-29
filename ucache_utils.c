@@ -39,11 +39,6 @@
 #include <Sddl.h>
 #include <Aclapi.h>
 
-/* intsafe.h (included by the PHP 8.5 headers) defines DWORD_MAX as 0xffffffffUL */
-#ifndef DWORD_MAX
-#define DWORD_MAX    0xFFFFFFFF
-#endif
-
 /* Temp files are in the format of "ucache_" + suffix + ".tmp" */
 #define TEMP_FILE_PREFIX_CHARS 11
 
@@ -389,26 +384,18 @@ Finished:
     return retval;
 }
 
-unsigned int utils_ticksdiff(unsigned int present, unsigned int past)
+/*
+ * Milliseconds from past to present, two GetTickCount64() values: they count from the start of
+ * Windows and do not wrap (GetTickCount() wrapped every 49.7 days).  0 if past is the later one:
+ * a time that another process stored after this one read the clock.
+ */
+ULONGLONG utils_ticksdiff(ULONGLONG present, ULONGLONG past)
 {
-    unsigned int ticksdiff = 0;
+    ULONGLONG ticksdiff = 0;
 
-    _ASSERT(past != 0);
-
-    /* If present is 0, get current tickcount */
-    if(present == 0)
-    {
-        present = GetTickCount();
-    }
-
-    /* Take care of rollover while calculating difference */
-    if(present >= past)
+    if(present > past)
     {
         ticksdiff = present - past;
-    }
-    else
-    {
-        ticksdiff = (DWORD_MAX - past) + present;
     }
 
     return ticksdiff;

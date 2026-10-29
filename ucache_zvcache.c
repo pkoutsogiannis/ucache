@@ -69,12 +69,18 @@ C_ASSERT(SIZEOF_SIZE_T <= SIZEOF_ZEND_LONG);
 
 /*
  * One hash bucket per this many bytes of the cache (the largest prime up to that number of buckets).
- * An entry takes at least about 200 bytes (208 with a key of 40 characters and an integer value), so
- * the chains of a cache full of the smallest entries hold 2 to 3 entries on average, and the buckets
- * (8 bytes each) take about 1.6% of the cache.  WinCache had one bucket per 32 to 64 KB: 197 for 8 MB,
- * whose chains could hold hundreds of small entries each.
+ * An entry takes 160 bytes or more (200 with a key of 40 characters and an integer value), so the
+ * chains of a cache full of small entries hold 2 to 3 entries on average, and the buckets (8 bytes
+ * each) take about 1.6% of the cache.  WinCache had one bucket per 32 to 64 KB: 197 for 8 MB, whose
+ * chains could hold hundreds of small entries each.
  */
 #define ZVCACHE_BUCKET_BYTES         512
+
+/* The bytes above: a zvcache_value of 56 bytes, its key and the top-level zval, each in a block of */
+/* the allocator (x64; config.w32 also allows an x86 build, where the structure is smaller) */
+#ifdef _WIN64
+C_ASSERT(sizeof(zvcache_value) == 56);
+#endif
 
 #ifndef UCACHE_MAX_ZVKEY_LENGTH
 #define UCACHE_MAX_ZVKEY_LENGTH      0xFFFF
@@ -100,6 +106,8 @@ C_ASSERT(SIZEOF_SIZE_T <= SIZEOF_ZEND_LONG);
 #define ZOFFSET(pcopy, pbuffer)      ((pbuffer == NULL) ? 0 : (((char *)pbuffer) - (pcopy)->pbaseadr))
 #define ZVALUE(pcopy, offset)        ((offset == 0) ? NULL : ((pcopy)->pbaseadr + (offset)))
 #define ZVCACHE_VALUE(p, o)          ((zvcache_value *)alloc_get_cachevalue(p, o))
+/* The key of an entry, with its NUL: right after the zvcache_value, in the same block (see create_zvcache_data) */
+#define ZVCACHE_KEY(pvalue)          ((char *)((pvalue) + 1))
 #define ZVALUE_HT_GET_DATA_ADDR(pcopy, ht) \
   ((char*)(ZVALUE((pcopy),(size_t)(ht)->arData)) - HT_HASH_SIZE((ht)->nTableMask))
 
@@ -130,7 +138,7 @@ static void destroy_zvcache_data(zvcache_context * pcache, zvcache_value * pvalu
 static void add_zvcache_entry(zvcache_context * pcache, unsigned int index, zvcache_value * pvalue);
 static void remove_zvcache_entry(zvcache_context * pcache, unsigned int index, zvcache_value * pvalue);
 static void free_pending_entries(zvcache_context * pcache);
-static zend_bool entry_expired(zvcache_value * pvalue, unsigned int ticks);
+static zend_bool entry_expired(zvcache_value * pvalue, ULONGLONG ticks);
 static unsigned int reclaim_entries(zvcache_context * pcache, zend_long percent);
 
 /* Globals */
@@ -1888,7 +1896,7 @@ static zvcache_value * find_zvcache_entry(zvcache_context * pcache, const char *
     zvcache_header * header = NULL;
     zvcache_value *  pvalue = NULL;
     zvcache_value *  pnext  = NULL;
-    unsigned int     ticks  = GetTickCount();
+    ULONGLONG        ticks  = GetTickCount64();
 
     dprintverbose("start find_zvcache_entry");
 
@@ -1910,7 +1918,7 @@ static zvcache_value * find_zvcache_entry(zvcache_context * pcache, const char *
                 remove_zvcache_entry(pcache, index, pvalue);
             }
         }
-        else if(strcmp(pcache->zvmemaddr + pvalue->keystr, key) == 0)
+        else if(strcmp(ZVCACHE_KEY(pvalue), key) == 0)
         {
             break;
         }
@@ -1938,7 +1946,7 @@ static int create_zvcache_data(zvcache_context * pcache, const char * key, zvcop
     zvcopy_context   incopy;
     zvcopy_stack     stack;
     HashTable        xlate;
-    unsigned int     cticks  = 0;
+    ULONGLONG        cticks  = 0;
     volatile unsigned char bailout = 0;
 
     dprintverbose("start create_zvcache_data");
@@ -1988,7 +1996,7 @@ static int create_zvcache_data(zvcache_context * pcache, const char * key, zvcop
 
     /* Only set zvcache_value to 0. Set keyname after zvcache_value */
     memset(pvalue, 0, sizeof(zvcache_value));
-    memcpy_s((char *)pvalue + sizeof(zvcache_value), keylen, key, keylen);
+    memcpy_s(ZVCACHE_KEY(pvalue), keylen, key, keylen);
 
     /* Reset allocsize before calling copyin */
     pcopy->allocsize = 0;
@@ -2033,12 +2041,10 @@ static int create_zvcache_data(zvcache_context * pcache, const char * key, zvcop
         goto Finished;
     }
 
-    pvalue->keystr     = ZOFFSET(pcopy, pvalue) + sizeof(zvcache_value);
-    pvalue->keylen     = (unsigned short)(keylen - 1);
     pvalue->sizeb      = pcopy->allocsize;
     pvalue->zvalue     = ZOFFSET(pcopy, pcopied);
 
-    cticks = GetTickCount();
+    cticks = GetTickCount64();
     pvalue->add_ticks  = cticks;
     pvalue->use_ticks  = cticks;
 
@@ -2150,7 +2156,7 @@ static void destroy_zvcache_data(zvcache_context * pcache, zvcache_value * pvalu
             pzval = NULL;
         }
 
-        /* No need to call free for keystr as value and keystr are allocated together */
+        /* The key is in the block of the entry (see ZVCACHE_KEY) */
         ZFREE(pcache->incopy, pvalue);
         pvalue = NULL;
     }
@@ -2169,7 +2175,6 @@ static void add_zvcache_entry(zvcache_context * pcache, unsigned int index, zvca
 
     _ASSERT(pcache         != NULL);
     _ASSERT(pvalue         != NULL);
-    _ASSERT(pvalue->keystr != 0);
 
     header = pcache->zvheader;
     pcheck = ZVCACHE_VALUE(pcache->zvalloc, header->values[index]);
@@ -2223,7 +2228,6 @@ static void remove_zvcache_entry(zvcache_context * pcache, unsigned int index, z
 
     _ASSERT(pcache         != NULL);
     _ASSERT(pvalue         != NULL);
-    _ASSERT(pvalue->keystr != 0);
 
     apalloc = pcache->zvalloc;
     header  = pcache->zvheader;
@@ -2291,7 +2295,7 @@ static void free_pending_entries(zvcache_context * pcache)
 }
 
 /* Whether an entry has expired, by the rule of the reads: more than ttl whole seconds since it was stored */
-static zend_bool entry_expired(zvcache_value * pvalue, unsigned int ticks)
+static zend_bool entry_expired(zvcache_value * pvalue, ULONGLONG ticks)
 {
     return (pvalue->ttlive > 0 && utils_ticksdiff(ticks, pvalue->add_ticks) / 1000 > pvalue->ttlive) ? 1 : 0;
 }
@@ -2357,27 +2361,39 @@ zend_bool zvcache_peak_over_memory_limit(size_t peak0)
 }
 
 /*
- * ucache.gc.interval in milliseconds, for an interval > 0.  A difference of GetTickCount() values
- * stays below 2^32 ms (49.7 days), so a longer interval never passes.
+ * ucache.gc.interval in milliseconds, for an interval > 0.  An interval whose milliseconds do not
+ * fit in 64 bits (over 584 million years) is the largest value, which never passes.
  */
-static unsigned int scavenger_interval_ms(void)
+static ULONGLONG scavenger_interval_ms(void)
 {
     zend_long interval = UCG(ucgc_interval);
 
-    return (interval >= (zend_long)(UINT_MAX / 1000)) ? UINT_MAX : (unsigned int)interval * 1000;
+    return (interval > (zend_long)(ULLONG_MAX / 1000)) ? ULLONG_MAX : (ULONGLONG)interval * 1000;
 }
 
 /* ucache.gc.step 0: a whole sweep of the table in about this many seconds of steps at the end of */
-/* requests, and never fewer buckets than WinCache's steps */
+/* requests (of steps on writes a second apart, when ucache.gc.interval is 0), and never fewer */
+/* buckets than WinCache's steps */
 #define SCAVENGER_SWEEP_SECONDS     300
 #define SCAVENGER_STEP_MINIMUM      16
 
 /* A step stops after about this much work under the cache lock, and the next one goes on from */
 /* there; the clock is read every SCAVENGER_CLOCK_EVERY buckets, which hold a few hundred entries */
 /* on average in a full cache (see ZVCACHE_BUCKET_BYTES). Most buckets are empty otherwise: read */
-/* every 16 buckets, the clock took about half the time of a step */
+/* every 16 buckets, the clock took about half the time of a step. It is also read after a bucket */
+/* where the step removed entries: past FREELIST_MAXIMUM, each one is freed under the lock (5 to */
+/* 30 microseconds early in a mass removal), and steps that removed a few hundred held the lock */
+/* 2 to 7 ms */
 #define SCAVENGER_STEP_BUDGET_US    1000
 #define SCAVENGER_CLOCK_EVERY       256
+
+/* With ucache.gc.threshold, a write runs a step once zvcache_header.scwait milliseconds have passed */
+/* since the last step, in any of the processes that share the cache: GAP after a step that removed */
+/* nothing, BUSY after one that removed entries, URGENT after one that removed entries while free */
+/* memory was at or below a quarter of ucache.gc.threshold (see zvcache_run_scavenger) */
+#define SCAVENGER_WRITE_GAP_MS      1000
+#define SCAVENGER_WRITE_BUSY_MS     100
+#define SCAVENGER_WRITE_URGENT_MS   10
 
 /* Eviction (ucache.gc.evict) by groups of idle time: group g holds the entries unused for */
 /* [2^(g-1), 2^g) seconds, group 0 those used in the last second */
@@ -2396,7 +2412,8 @@ static unsigned int scavenger_step(zvcache_header * pheader)
 
     if(step <= 0)
     {
-        interval = (interval < 0) ? 0 : MIN(interval, SCAVENGER_SWEEP_SECONDS);
+        /* ucache.gc.interval 0: only writes run steps, a second apart unless they remove entries */
+        interval = (interval < 1) ? 1 : MIN(interval, SCAVENGER_SWEEP_SECONDS);
         step = ((zend_long)pheader->valuecount * interval + SCAVENGER_SWEEP_SECONDS - 1) / SCAVENGER_SWEEP_SECONDS;
         step = MAX(step, SCAVENGER_STEP_MINIMUM);
     }
@@ -2420,15 +2437,16 @@ static LONGLONG scavenger_elapsed_us(const LARGE_INTEGER * pstart)
     return (now.QuadPart - pstart->QuadPart) * 1000000 / frequency.QuadPart;
 }
 
-/* Seconds since an entry was last used: read with ucache_get(), stored, or changed or compared by inc/dec/cas */
-static unsigned int entry_idle(zvcache_value * pvalue, unsigned int ticks)
+/* Seconds since an entry was last used: read with ucache_get(), stored, or changed or compared by inc/dec/cas. */
+/* GetTickCount64() counts from the start of Windows, so this stays far below 2^32 seconds (136 years) */
+static unsigned int entry_idle(zvcache_value * pvalue, ULONGLONG ticks)
 {
-    return utils_ticksdiff(ticks, pvalue->use_ticks) / 1000;
+    return (unsigned int)(utils_ticksdiff(ticks, pvalue->use_ticks) / 1000);
 }
 
 /* Whether the scavenger removes an entry: expired (by the rule of the reads), or, with */
 /* ucache.gc.ttl > 0, not used for that many seconds */
-static zend_bool scavenger_removes(zvcache_value * pvalue, unsigned int ticks, zend_long idlettl)
+static zend_bool scavenger_removes(zvcache_value * pvalue, ULONGLONG ticks, zend_long idlettl)
 {
     if(entry_expired(pvalue, ticks))
     {
@@ -2469,7 +2487,7 @@ static unsigned int reclaim_entries(zvcache_context * pcache, zend_long percent)
     alloc_context *  palloc  = pcache->zvalloc;
     zvcache_value *  pvalue  = NULL;
     zvcache_value *  ptemp   = NULL;
-    unsigned int     ticks   = GetTickCount();
+    ULONGLONG        ticks   = GetTickCount64();
     zend_long        idlettl = UCG(ucgc_ttl);
     unsigned int     index   = 0;
     unsigned int     count   = 0;
@@ -2558,7 +2576,10 @@ static unsigned int reclaim_entries(zvcache_context * pcache, zend_long percent)
         }
     }
 
+    /* A step for the waits of zvcache_run_scavenger(), after which a write finds only what expires */
+    /* or goes unused later: the pass went over the whole table */
     pheader->lscavenge  = ticks;
+    pheader->scwait     = SCAVENGER_WRITE_GAP_MS;
     pheader->scticks    = ticks;
     pheader->sccount    = count;
     pheader->scruns    += 1;
@@ -2578,24 +2599,38 @@ static unsigned int reclaim_entries(zvcache_context * pcache, zend_long percent)
  * the error, and every other process of the pool would block on it.
  *
  * force 0: a write, which runs a step while ucache.gc.threshold is set and free memory is at or
- * below it.  force 1: the end of a request (zvcache_scavenge_periodic), which runs a step once
- * ucache.gc.interval seconds have passed since the last one, while ucache.gc.threshold allows it.
- * A step examines scavenger_step() buckets, or fewer when it reaches SCAVENGER_STEP_BUDGET_US,
- * and removes what scavenger_removes() says; the memory comes back in free_pending_entries().
+ * below it, once zvcache_header.scwait milliseconds have passed since the last step, in any of the
+ * processes that share the cache: SCAVENGER_WRITE_GAP_MS after a step that removed nothing,
+ * SCAVENGER_WRITE_BUSY_MS after one that removed entries, SCAVENGER_WRITE_URGENT_MS after one that
+ * removed entries while free memory was at or below a quarter of the threshold.  A step can hold
+ * the cache lock for SCAVENGER_STEP_BUDGET_US: run by every write, it made each one wait that long
+ * (0.6 ms instead of 4 microseconds for a set with 500,000 entries in 128 MB), whatever the step
+ * found.  The short waits let the steps keep up with entries that expire in large numbers, for at
+ * most about 1% and 10% of the time of the cache lock.  force 1: the end of a request
+ * (zvcache_scavenge_periodic), which runs a step once ucache.gc.interval seconds have passed since
+ * the last one, while ucache.gc.threshold allows it.  A look at the free memory that finds more
+ * than ucache.gc.threshold free counts as a step for these waits: otherwise every write, and every
+ * request that ends, would take the allocator's lock for it.  A step examines scavenger_step()
+ * buckets, or fewer when it reaches SCAVENGER_STEP_BUDGET_US, and removes what scavenger_removes()
+ * says; the memory comes back in free_pending_entries().
  */
 int zvcache_run_scavenger(zvcache_context * pcache, unsigned int force)
 {
-    int count = 0;
+    int count   = 0;
+    int counted = 0;
 
     alloc_info   info;
 
-    unsigned int threshold = 0;
-    unsigned int sindex    = 0;
-    unsigned int eindex    = 0;
-    unsigned int scanned   = 0;
-    unsigned int ticks     = GetTickCount();
-    unsigned int step      = 0;
-    zend_long    ttl       = UCG(ucgc_ttl);
+    unsigned int  threshold = 0;
+    unsigned int  sindex    = 0;
+    unsigned int  eindex    = 0;
+    unsigned int  scanned   = 0;
+    ULONGLONG     ticks     = GetTickCount64();
+    ULONGLONG     wait      = 0;
+    unsigned int  step      = 0;
+    unsigned char urgent    = 0;
+    zend_long     ttl       = UCG(ucgc_ttl);
+    zend_long     limit     = MIN(MAX(UCG(ucgc_threshold), 0), 100);
 
     zvcache_header * pheader = NULL;
     alloc_context *  palloc  = NULL;
@@ -2610,29 +2645,44 @@ int zvcache_run_scavenger(zvcache_context * pcache, unsigned int force)
     pheader = pcache->zvheader;
     palloc  = pcache->zvalloc;
 
-    if ((!force && (UCG(ucgc_threshold) == 0)) || (force && utils_ticksdiff(ticks, pheader->lscavenge) < scavenger_interval_ms()))
+    if(!force)
     {
-	goto Finished;
+        /* Writes run steps only with ucache.gc.threshold (a negative one is 0) */
+        if(limit == 0)
+        {
+            goto Finished;
+        }
+
+        wait = pheader->scwait;
+    }
+    else
+    {
+        wait = scavenger_interval_ms();
     }
 
-    if (UCG(ucgc_threshold) > 0) {
+    if(utils_ticksdiff(ticks, pheader->lscavenge) < wait)
+    {
+        goto Finished;
+    }
+
+    if(limit > 0)
+    {
         /* On the stack: see above */
         alloc_getinfo(palloc, &info);
 
-        threshold = (unsigned int) ((100*info.free_size)/info.total_size);
+        threshold = (unsigned int)((100 * info.free_size) / info.total_size);
 
-        if (threshold > UCG(ucgc_threshold))
+        if(threshold > (unsigned int)limit)
         {
-            /* A run at the end of a request counts as done all the same: otherwise every request */
-            /* that ends would take the cache lock to look at the free memory, until the next run */
-            if (force)
-            {
-                pheader->lscavenge = ticks;
-            }
+            /* Counts as a step for the waits above, for writes as for the end of requests */
+            pheader->lscavenge = ticks;
+            pheader->scwait    = SCAVENGER_WRITE_GAP_MS;
             goto Finished;
         }
+
+        urgent = (threshold * 4 <= (unsigned int)limit);
     }
-    
+
     pheader->lscavenge = ticks;
 
     /* Run scavenger starting from where the last step stopped */
@@ -2648,12 +2698,14 @@ int zvcache_run_scavenger(zvcache_context * pcache, unsigned int force)
     for( ;sindex < eindex; sindex++)
     {
         /* About SCAVENGER_STEP_BUDGET_US of work under the lock: the next step goes on from here */
-        if(scanned != 0 && (scanned % SCAVENGER_CLOCK_EVERY) == 0 && scavenger_elapsed_us(&started) > SCAVENGER_STEP_BUDGET_US)
+        if(scanned != 0 && ((scanned % SCAVENGER_CLOCK_EVERY) == 0 || count != counted)
+            && scavenger_elapsed_us(&started) > SCAVENGER_STEP_BUDGET_US)
         {
             break;
         }
 
         scanned++;
+        counted = count;
 
         if(pheader->values[sindex] == 0)
         {
@@ -2676,6 +2728,9 @@ int zvcache_run_scavenger(zvcache_context * pcache, unsigned int force)
     }
 
     pheader->scstart = (sindex < pheader->valuecount) ? sindex : 0;
+
+    /* The wait before the next step on a write: shorter while the steps find entries to remove */
+    pheader->scwait = (count == 0) ? SCAVENGER_WRITE_GAP_MS : (urgent ? SCAVENGER_WRITE_URGENT_MS : SCAVENGER_WRITE_BUSY_MS);
 
     /* For ucache_info(): the steps that ran, not the ones skipped above */
     pheader->scticks    = ticks;
@@ -2701,7 +2756,7 @@ void zvcache_scavenge_periodic(zvcache_context * pcache)
 {
     _ASSERT(pcache != NULL);
 
-    if(utils_ticksdiff(GetTickCount(), pcache->zvheader->lscavenge) < scavenger_interval_ms())
+    if(utils_ticksdiff(GetTickCount64(), pcache->zvheader->lscavenge) < scavenger_interval_ms())
     {
         return;
     }
@@ -2782,7 +2837,7 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
     unsigned int     msize     = 0;
 
     unsigned int    zvcount    = 256;
-    unsigned int    cticks     = 0;
+    ULONGLONG       cticks     = 0;
     unsigned char   isfirst    = 0;
     unsigned char   islocked   = 0;
     unsigned char   initmemory = 0;
@@ -2881,7 +2936,7 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
     /* Initialize the zvcache_header if alloc_initialize initialized the segment */
     if(initmemory)
     {
-        cticks = GetTickCount();
+        cticks = GetTickCount64();
 
         /* No need to get a write lock: the other processes wait for */
         /* the init mutex, and none uses a segment that is not marked */
@@ -2890,6 +2945,7 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
         header->last_owner   = 0;
 
         header->lscavenge    = cticks;
+        header->scwait       = SCAVENGER_WRITE_GAP_MS;
         header->scstart      = 0;
         header->itemcount    = 0;
         header->valuecount   = zvcount;
@@ -3128,7 +3184,8 @@ int zvcache_get(zvcache_context * pcache, const char * key, zval ** pvalue)
     _ASSERT(pentry->zvalue  != 0);
     _ASSERT(pcache->outcopy != NULL);
 
-    InterlockedExchange(&pentry->use_ticks, GetTickCount());
+    /* A plain store: use_ticks of an entry in the cache is only written and read under the cache lock */
+    pentry->use_ticks = GetTickCount64();
     pcached = (zval *)ZVALUE(pcache->incopy, pentry->zvalue);
 
     /* Private copy of the context, with the C stack of this copy (see ucache_stack_exhausted) */
@@ -3241,7 +3298,7 @@ static int make_room(zvcache_context * pcache, const char * key, zvcopy_prepared
 
     while(result == FATAL_OUT_OF_SMEMORY && tries++ < RECLAIM_TRIES_MAXIMUM)
     {
-        if(header->rcfutile && utils_ticksdiff(GetTickCount(), header->rcticks) < header->rcwait)
+        if(header->rcfutile && utils_ticksdiff(GetTickCount64(), header->rcticks) < header->rcwait)
         {
             break;
         }
@@ -3279,8 +3336,8 @@ static int make_room(zvcache_context * pcache, const char * key, zvcopy_prepared
 
         if(ran && removed == 0)
         {
-            header->rcwait   = (unsigned int)MAX(RECLAIM_FUTILE_MS, MIN(spent * 20, 60000));
-            header->rcticks  = GetTickCount();
+            header->rcwait   = (ULONGLONG)MAX(RECLAIM_FUTILE_MS, MIN(spent * 20, 60000));
+            header->rcticks  = GetTickCount64();
             header->rcfutile = 1;
             break;
         }
@@ -3628,7 +3685,7 @@ static void zvcache_info_entry_dtor(void * pvoid)
  * key, the entries in the order of the table: the first offset ones are skipped without copying
  * their keys, and at most limit ones are added (all of them with limit 0).
  */
-static int list_zvcache_entries(zvcache_context * pcache, zend_bool summaryonly, char * pkey, zend_ulong offset, zend_ulong limit, unsigned int cticks, zend_llist * plist)
+static int list_zvcache_entries(zvcache_context * pcache, zend_bool summaryonly, char * pkey, zend_ulong offset, zend_ulong limit, ULONGLONG cticks, zend_llist * plist)
 {
     int                  result   = NONFATAL;
     zvcache_header *     header   = pcache->zvheader;
@@ -3649,7 +3706,7 @@ static int list_zvcache_entries(zvcache_context * pcache, zend_bool summaryonly,
 
         if(pvalue != NULL)
         {
-            pinfo.key = alloc_estrdup(ZVALUE(pcache->incopy, pvalue->keystr));
+            pinfo.key = alloc_estrdup(ZVCACHE_KEY(pvalue));
             if(pinfo.key == NULL)
             {
                 result = FATAL_OUT_OF_LMEMORY;
@@ -3657,7 +3714,7 @@ static int list_zvcache_entries(zvcache_context * pcache, zend_bool summaryonly,
             }
 
             pinfo.ttl      = pvalue->ttlive;
-            pinfo.age      = utils_ticksdiff(cticks, pvalue->add_ticks) / 1000;
+            pinfo.age      = (unsigned int)(utils_ticksdiff(cticks, pvalue->add_ticks) / 1000);
             pinfo.type     = Z_TYPE_P((zval *)ZVALUE(pcache->incopy, pvalue->zvalue));
             pinfo.sizeb    = pvalue->sizeb;
             pinfo.hitcount = pvalue->hitcount;
@@ -3689,7 +3746,7 @@ static int list_zvcache_entries(zvcache_context * pcache, zend_bool summaryonly,
                     continue;
                 }
 
-                pinfo.key = alloc_estrdup(ZVALUE(pcache->incopy, pvalue->keystr));
+                pinfo.key = alloc_estrdup(ZVCACHE_KEY(pvalue));
                 if(pinfo.key == NULL)
                 {
                     result = FATAL_OUT_OF_LMEMORY;
@@ -3697,7 +3754,7 @@ static int list_zvcache_entries(zvcache_context * pcache, zend_bool summaryonly,
                 }
 
                 pinfo.ttl      = pvalue->ttlive;
-                pinfo.age      = utils_ticksdiff(cticks, pvalue->add_ticks) / 1000;
+                pinfo.age      = (unsigned int)(utils_ticksdiff(cticks, pvalue->add_ticks) / 1000);
                 pinfo.type     = Z_TYPE_P((zval *)ZVALUE(pcache->incopy, pvalue->zvalue));
                 pinfo.sizeb    = pvalue->sizeb;
                 pinfo.hitcount = pvalue->hitcount;
@@ -3730,7 +3787,7 @@ int zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, z
     int                  result   = NONFATAL;
     unsigned char        flock    = 0;
     zvcache_header *     header   = NULL;
-    unsigned int         cticks   = 0;
+    ULONGLONG            cticks   = 0;
     volatile unsigned char bailout = 0;
 
     dprintverbose("start zvcache_list");
@@ -3745,22 +3802,22 @@ int zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, z
     flock = 1;
 
     /* Under the lock: an entry added or a scavenger step run before it was taken would be */
-    /* newer than ticks read earlier, and the difference would wrap to 49.7 days */
-    cticks  = GetTickCount();
+    /* newer than ticks read earlier, and its age would read 0 */
+    cticks  = GetTickCount64();
 
     pcinfo->hitcount  = header->hitcount;
     pcinfo->misscount = header->misscount;
     pcinfo->itemcount = header->itemcount;
 
     pcinfo->scavenged = (header->scruns != 0);
-    pcinfo->scage     = pcinfo->scavenged ? utils_ticksdiff(cticks, header->scticks) / 1000 : 0;
+    pcinfo->scage     = pcinfo->scavenged ? (unsigned int)(utils_ticksdiff(cticks, header->scticks) / 1000) : 0;
     pcinfo->sccount   = header->sccount;
     pcinfo->scremoved = header->scremoved;
     pcinfo->scevicted = header->scevicted;
 
     zend_llist_init(plist, sizeof(zvcache_info_entry), zvcache_info_entry_dtor, 0);
 
-    pcinfo->initage = utils_ticksdiff(cticks, header->init_ticks) / 1000;
+    pcinfo->initage = (unsigned int)(utils_ticksdiff(cticks, header->init_ticks) / 1000);
 
     /*
      * Copying the keys can hit memory_limit, whose fatal error longjmps out of here.
@@ -3832,8 +3889,8 @@ int zvcache_change(zvcache_context * pcache, const char * key, zend_long delta, 
         goto Finished;
     }
 
-    /* A use, for ucache.gc.ttl */
-    InterlockedExchange(&pvalue->use_ticks, GetTickCount());
+    /* A use, for ucache.gc.ttl (a plain store, under the cache lock: see zvcache_get) */
+    pvalue->use_ticks = GetTickCount64();
 
     _ASSERT(pvalue->zvalue != 0);
     pzval = (zval *)ZVALUE(pcache->incopy, pvalue->zvalue);
@@ -3896,8 +3953,8 @@ int zvcache_compswitch(zvcache_context * pcache, const char * key, zend_long old
         goto Finished;
     }
 
-    /* A use, for ucache.gc.ttl */
-    InterlockedExchange(&pentry->use_ticks, GetTickCount());
+    /* A use, for ucache.gc.ttl (a plain store, under the cache lock: see zvcache_get) */
+    pentry->use_ticks = GetTickCount64();
 
     _ASSERT(pentry->zvalue != 0);
     pzval = (zval *)ZVALUE(pcache->incopy, pentry->zvalue);

@@ -15,7 +15,8 @@
  *   APP_POOL_ID environment variable) and ucache.namesalt share one cache; without either, so do the
  *   processes started by the same parent process (php.exe started from one command prompt, the
  *   php-cgi.exe of one FastCGI pool); an empty ucache.apppoolid counts as not set;
- * - optionally, the path of the DLL under test as the first argument. The checks with several
+ * - optionally, the path of the DLL under test as the first argument. Two checks read the DLL file
+ *   (it holds no path of the build machine, and it imports GetTickCount64). The checks with several
  *   processes start other php.exe processes with that DLL, on caches of their own (one unique
  *   ucache.apppoolid or APP_POOL_ID per group), php -S servers among them. Without the argument
  *   they are skipped, with one "SKIP:" line. One of the servers runs copies of ucache.php, read from
@@ -760,6 +761,8 @@ check('set with ttl 1 stores the entry with ttl_seconds 1', $set === true && $en
 ucache_set('smoke_ttl_listed', 'short-lived', 1);
 ucache_set('smoke_ttl_delete', 'short-lived', 1);
 $ttlSetAt = microtime(true);
+/* The uptime of the cache now, to check after the pause how much it has grown */
+$uptimeAtSet = [microtime(true), ucache_info(true)['total_cache_uptime']];
 
 /*
  * Arrays of keys
@@ -1157,6 +1160,7 @@ if ($wait > 0) {
 }
 
 /* First, before any call looks a key up */
+$infoAt = microtime(true);
 $info = ucache_info();
 $listed = [];
 foreach (['smoke_ttl', 'smoke_ttl_listed', 'smoke_ttl_delete'] as $key) {
@@ -1165,6 +1169,23 @@ foreach (['smoke_ttl', 'smoke_ttl_listed', 'smoke_ttl_delete'] as $key) {
 }
 check('expired entries that no call has looked up are still listed by ucache_info(), with ttl_seconds 1',
       $listed === ['smoke_ttl' => 1, 'smoke_ttl_listed' => 1, 'smoke_ttl_delete' => 1], ['ttl_seconds of each key (null: not listed)' => $listed]);
+
+/* Ages and uptime are whole seconds of the 64-bit tick count. Another process may have created the cache before this one
+   (see the top), so only the growth of the uptime is checked here; the checks with several processes check the uptime
+   of caches that their servers created */
+$sinceSet = $infoAt - $ttlSetAt;
+$ages = [];
+foreach (['smoke_ttl', 'smoke_ttl_listed', 'smoke_ttl_delete'] as $key) {
+    $entry = find_entry($info, $key);
+    $ages[$key] = ($entry === null) ? null : $entry['age_seconds'];
+}
+$grown = is_int($info['total_cache_uptime']) && is_int($uptimeAtSet[1]) ? $info['total_cache_uptime'] - $uptimeAtSet[1] : null;
+$between = $infoAt - $uptimeAtSet[0];
+check('age_seconds counts the whole seconds since the entry was stored, and total_cache_uptime grows by the seconds that pass',
+      array_filter($ages, function ($age) use ($sinceSet) { return !is_int($age) || abs($age - (int)$sinceSet) > 1; }) === []
+      && is_int($grown) && $grown >= (int)floor($between) - 1 && $grown <= (int)ceil($between) + 1,
+      ['age_seconds of each key' => $ages, 'seconds since they were stored' => $sinceSet,
+       'total_cache_uptime then and now' => [$uptimeAtSet[1], $info['total_cache_uptime']], 'seconds between the two' => $between]);
 
 $freeBefore = ucache_meminfo()['memory_free'];
 $success = 'unset';
@@ -2402,11 +2423,11 @@ function children_cleanup()
 }
 
 /* The reply of a php -S server to GET $path (headers and body), '' if it closed the connection without
-   one, null if it did not accept the connection or did not answer within $timeout seconds */
-function http_get($port, $path, $timeout)
+   one, null if it did not accept the connection within $connect seconds or did not answer within $timeout */
+function http_get($port, $path, $timeout, $connect = 0.5)
 {
     /* A short connect timeout: Windows takes 2 s to report that nothing listens on the port */
-    $socket = @stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 0.5);
+    $socket = @stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, $connect);
     if ($socket === false) {
         return null;
     }
@@ -2459,9 +2480,11 @@ function server_start($name, $pool, array $ini, &$port)
 
         $server = child_start("$name-$attempt", array_merge(child_php_args($pool, $ini),
                               ['-S', "127.0.0.1:$port", '-t', $childDir, $childDir . DIRECTORY_SEPARATOR . 'router.php']));
+        /* Polled with a connect timeout of 50 ms: the server listens about 0.1 s after it starts, and each poll before
+           that would otherwise wait 0.5 s */
         $end = microtime(true) + 15;
         while (child_exit($server) === null && microtime(true) < $end) {
-            if (strpos((string)http_get($port, '/?op=ping', 10), 'pong') !== false) {
+            if (strpos((string)http_get($port, '/?op=ping', 10, 0.05), 'pong') !== false) {
                 return $server;
             }
             usleep(20000);
@@ -2528,6 +2551,19 @@ if ($childDll === null) {
     check('the first argument is the path of the DLL under test', false, ['argument' => $childDll, 'PHP_BINARY' => PHP_BINARY]);
 } else {
     $childDll = realpath($childDll);
+
+    /* php_ucache.vcxproj links without debug information and compiles without /FC, so the DLL holds no path of the
+       machine that built it: neither that of a PDB file (a CodeView record) nor that of the sources (zend_bailout()
+       passes __FILE__). And it measures times with GetTickCount64(): GetTickCount() wraps every 49.7 days, which no
+       test run can wait for, so its import is what is checked */
+    $dllBytes = (string)file_get_contents($childDll);
+    $paths = [];
+    preg_match_all('/[A-Za-z]:\\\\[\x20-\x7e]{3,}|[\x20-\x7e]*\.pdb(?![\x20-\x7e])/i', $dllBytes, $paths);
+    check('the DLL holds no path of the build machine (no PDB file, no folder of the sources)', $paths[0] === [], $paths[0]);
+    check('the DLL imports GetTickCount64() and not GetTickCount(), whose count wraps every 49.7 days',
+          strpos($dllBytes, "GetTickCount64\0") !== false && strpos($dllBytes, "GetTickCount\0") === false);
+    unset($dllBytes, $paths);
+
     $childDir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'ucache-test-' . getmypid() . '-' . bin2hex(random_bytes(4));
     $poolBase = 'ucachetest' . bin2hex(random_bytes(4));
     register_shutdown_function('children_cleanup');
@@ -2980,6 +3016,62 @@ function oom_cycle_value()
     return $value;
 }
 
+/* The number of hash buckets of a cache of $total bytes, as zvcache_initialize() computes it: the largest odd prime up to
+   one per 512 bytes (16381 for 8 MB) */
+function cache_buckets($total)
+{
+    $candidate = intdiv($total, 512);
+    $candidate -= ($candidate % 2 === 0) ? 1 : 0;
+    while (true) {
+        $divisor = 3;
+        while ($divisor <= intdiv($candidate, $divisor) && $candidate % $divisor !== 0) {
+            $divisor += 2;
+        }
+        if ($divisor > intdiv($candidate, $divisor)) {
+            return $candidate;
+        }
+        $candidate -= 2;
+    }
+}
+
+/* The hash bucket of $key among $buckets, as utils_getindex() computes it: WinCache's CRC (its table takes 9 rounds per
+   entry instead of 8) of the key, A-Z taken as a-z. The checks that use it check it too, with a lookup that removes an
+   expired entry of another key of the same bucket */
+function cache_bucket($key, $buckets)
+{
+    static $table = null;
+
+    if ($table === null) {
+        $table = [];
+        for ($n = 0; $n < 256; $n++) {
+            $crc = $n;
+            for ($i = 0; $i < 9; $i++) {
+                $crc = ($crc & 1) ? (($crc >> 1) ^ 0xEDB88320) : ($crc >> 1);
+            }
+            $table[$n] = $crc;
+        }
+    }
+    $crc = 0xFFFFFFFF;
+    $length = strlen($key);
+    for ($i = 0; $i < $length; $i++) {
+        $char = ord($key[$i]);
+        $char += ($char >= 65 && $char <= 90) ? 32 : 0;
+        $crc = (($crc >> 8) & 0x00FFFFFF) ^ $table[($crc ^ $char) & 0xFF];
+    }
+    return (~$crc & 0xFFFFFFFF) % $buckets;
+}
+
+/* The first key $prefix0, $prefix1, ... whose hash bucket is in [$low, $high] */
+function key_in_buckets($prefix, $low, $high, $buckets)
+{
+    for ($i = 0; ; $i++) {
+        $bucket = cache_bucket("$prefix$i", $buckets);
+        if ($bucket >= $low && $bucket <= $high) {
+            return "$prefix$i";
+        }
+    }
+}
+
 switch ($argv[1]) {
     case 'set':
         $result = ucache_set('shared', shared_value());
@@ -3013,6 +3105,18 @@ switch ($argv[1]) {
     case 'lock':
         $start = microtime(true);
         $result = [ucache_set('lock_probe', 1), round(microtime(true) - $start, 3)];
+        break;
+
+    case 'listed':
+        /* The keys listed, expired ones included (ucache_info() removes nothing), and what it reports about the
+           scavenger: [keys, total_scavenged_count, last_scavenge_count] */
+        $info = ucache_info();
+        $keys = [];
+        foreach ($info['ucache_entries'] as $entry) {
+            $keys[] = $entry['key_name'];
+        }
+        sort($keys);
+        $result = [$keys, $info['total_scavenged_count'], $info['last_scavenge_count']];
         break;
 
     case 'lock_after_flag':
@@ -3539,20 +3643,167 @@ switch ($argv[1]) {
         break;
 
     case 'inc_alive':
-        /* Run with ucache.gc.threshold 100 (every write runs a scavenger step) and ucache.gc.ttl 2. Only ucache_inc()
-           uses 'counter' and only ucache_cas() uses 'swapped', every 0.5 s; nothing uses 'untouched'. [values of
+        /* Run with ucache.gc.threshold 100 (writes run scavenger steps, a second apart while they remove nothing) and
+           ucache.gc.ttl 2. Only ucache_inc() uses 'counter' and only ucache_cas() uses 'swapped', every 0.5 s for 3.5 s;
+           nothing uses 'untouched'. The steps come every 1 to 1.5 s, so one of them comes 2 s or more after 'untouched'
+           was stored, even if the one at about 2 s found it unused for a moment less than that. [values of
            ucache_inc(), results of ucache_cas(), counter exists, swapped exists, untouched exists] */
         ucache_set('counter', 0);
         ucache_set('swapped', 0);
         ucache_set('untouched', 1);
         $values = [];
         $swaps = [];
-        for ($i = 0; $i < 6; $i++) {
+        for ($i = 0; $i < 7; $i++) {
             usleep(500000);
             $values[] = ucache_inc('counter');
             $swaps[] = ucache_cas('swapped', $i, $i + 1);
         }
         $result = [$values, $swaps, ucache_exists('counter'), ucache_exists('swapped'), ucache_exists('untouched')];
+        break;
+
+    case 'write_gap':
+        /* Run with ucache.gc.threshold 100, ucache.gc.interval 0 and ucache.gc.step 1000000 (a step goes through the
+           whole table), in a cache with most of its memory free. A write runs a step once a second has passed since the
+           last one, or a tenth of a second after a step that removed entries. 'expiring' expires 2 s after it is stored,
+           'later' 3 s after; the lookups of 'poke' remove neither (another hash bucket). After the writes at 1.5, 2.25,
+           2.75 and 3.375 s: [the keys listed, expired ones included, last_scavenge_count, last_scavenge_seconds,
+           seconds since the start] */
+        $start = microtime(true);
+        $at = function ($seconds) use ($start) {
+            $wait = $start + $seconds - microtime(true);
+            if ($wait > 0) {
+                usleep((int)($wait * 1000000));
+            }
+        };
+        $state = function () use ($start) {
+            $info = ucache_info();
+            $keys = [];
+            foreach ($info['ucache_entries'] as $entry) {
+                $keys[] = $entry['key_name'];
+            }
+            sort($keys);
+            return [implode(',', $keys), $info['last_scavenge_count'], $info['last_scavenge_seconds'], round(microtime(true) - $start, 2)];
+        };
+        /* Less than a second after the cache was created: no step */
+        ucache_set('expiring', 1, 1);
+        ucache_set('later', 1, 2);
+        $at(1.5);
+        ucache_set('poke', 1);   /* a step, which removes nothing */
+        $result = [$state()];
+        $at(2.25);
+        ucache_set('poke', 2);   /* 0.75 s after a step that removed nothing: no step, 'expiring' (expired) stays */
+        $result[] = $state();
+        $at(2.75);
+        ucache_set('poke', 3);   /* 1.25 s after it: a step, which removes 'expiring' */
+        ucache_set('poke', 4);   /* right after a step that removed an entry: no step, so the last count stays 1 */
+        $result[] = $state();
+        $at(3.375);
+        ucache_set('poke', 5);   /* 0.625 s after a step that removed an entry: a step, which removes 'later' */
+        $result[] = $state();
+        break;
+
+    case 'write_burst':
+        /* Run with ucache.gc.threshold 100, ucache.gc.interval 0 and ucache.gc.step 1 (a step goes through one hash
+           bucket). 4000 entries that have expired, in the buckets of the default cache (16381, so about one bucket in
+           four holds some), then 1000 writes in a row: steps a second apart (a tenth of a second while they remove
+           entries) remove the entries of a bucket or two, where a step on every write would go through the first 1000
+           buckets and remove about 240. However slow the machine, the writes take far less than the 2 s that 20 steps
+           would need. [entries the scavenger removed during the writes, seconds the writes took] */
+        for ($i = 0; $i < 4000; $i++) {
+            ucache_set("burst$i", $i, 1);
+        }
+        usleep(2100000);
+        ucache_set('counter', 0);
+        $before = ucache_info(true)['total_scavenged_count'];
+        $start = microtime(true);
+        for ($i = 0; $i < 1000; $i++) {
+            ucache_inc('counter');
+        }
+        $seconds = round(microtime(true) - $start, 3);
+        $result = [ucache_info(true)['total_scavenged_count'] - $before, $seconds];
+        break;
+
+    case 'write_urgent':
+        /* Run with ucache.size 5, ucache.gc.threshold 100, ucache.gc.interval 0 and ucache.gc.step 50. Values of about
+           1 KB with ttl 1 until less than 15% of the memory is free, then, once they have expired, a write: a step, which
+           removes the expired entries of 50 buckets. Free memory is at or below a quarter of the threshold, so the next
+           write runs a step 10 ms later already (100 ms when more is free); 50 ms later, a write runs one. Then 200
+           writes in a row run a few steps at most (one every 10 ms). [entries stored, free memory % before the first
+           step, entries removed by it, by the write 50 ms later, by the 200 writes, seconds those took] */
+        $memory = ucache_meminfo();
+        for ($stored = 0; $stored < 20000 && $memory['memory_free'] >= $memory['memory_total'] * 0.15; $stored++) {
+            ucache_set("urgent$stored", str_repeat(chr(65 + $stored % 26), 1000), 1);
+            if ($stored % 50 === 49) {
+                $memory = ucache_meminfo();
+            }
+        }
+        $free = (int)(100 * ucache_meminfo()['memory_free'] / $memory['memory_total']);
+        usleep(2200000);
+        $removed = [];
+        $total = ucache_info(true)['total_scavenged_count'];
+        ucache_set('poke', 1);
+        $now = ucache_info(true)['total_scavenged_count'];
+        $removed[] = $now - $total;
+        $total = $now;
+        usleep(50000);
+        ucache_set('poke', 2);
+        $now = ucache_info(true)['total_scavenged_count'];
+        $removed[] = $now - $total;
+        $total = $now;
+        $start = microtime(true);
+        for ($i = 0; $i < 200; $i++) {
+            ucache_set('poke', $i);
+        }
+        $seconds = round(microtime(true) - $start, 3);
+        $removed[] = ucache_info(true)['total_scavenged_count'] - $total;
+        $result = [$stored, $free, $removed[0], $removed[1], $removed[2], $seconds];
+        break;
+
+    case 'write_interval0':
+        /* Run with ucache.gc.threshold 100 and ucache.gc.interval 0, with the automatic ucache.gc.step: a step on a write
+           goes through buckets / 300 hash buckets (55 of the 16381 of the default cache), at least 16. Two entries that
+           expire 2 s after they are stored, one in a bucket between 16 and that step, one far beyond, then, once they
+           have expired, a write of a key of another bucket: the first step, from bucket 0. Then a lookup of another key
+           of the bucket of the second entry, which removes it if cache_bucket() computes buckets as the extension does.
+           [the step size, step run before the expiry (null: none), keys listed after the write, last_scavenge_count,
+           keys listed after the lookup] */
+        $buckets = cache_buckets(ucache_meminfo()['memory_total']);
+        $step = max(16, intdiv($buckets + 299, 300));
+        $inside = key_in_buckets('inside', 16, $step - 1, $buckets);
+        $seen = [];
+        for ($i = 0; ; $i++) {
+            $bucket = cache_bucket("outside$i", $buckets);
+            if ($bucket >= 1000 && isset($seen[$bucket])) {
+                break;
+            }
+            $seen[$bucket] = "outside$i";
+        }
+        $outside = $seen[$bucket];
+        $twin = "outside$i";
+        $i = 0;
+        while (cache_bucket("poke$i", $buckets) < 1000 || cache_bucket("poke$i", $buckets) === $bucket) {
+            $i++;
+        }
+        $poke = "poke$i";
+        /* Less than a second after the cache was created: no step */
+        ucache_set($inside, 'i', 1);
+        ucache_set($outside, 'o', 1);
+        $before = ucache_info(true)['last_scavenge_seconds'];
+        usleep(2100000);
+        $names = [$inside => 'inside', $outside => 'outside', $poke => 'poke'];
+        $listed = function () use ($names) {
+            $keys = [];
+            foreach (ucache_info()['ucache_entries'] as $entry) {
+                $keys[] = isset($names[$entry['key_name']]) ? $names[$entry['key_name']] : $entry['key_name'];
+            }
+            sort($keys);
+            return implode(',', $keys);
+        };
+        ucache_set($poke, 1);
+        $afterWrite = $listed();
+        $count = ucache_info(true)['last_scavenge_count'];
+        ucache_exists($twin);
+        $result = [$step, $before, $afterWrite, $count, $listed()];
         break;
 
     case 'fill_expired':
@@ -3770,17 +4021,16 @@ if ($op === 'sleep_fatal') {
     $value = ucache_get('big');   /* 20 MB: the copy runs out of memory_limit (8M) */
     echo 'got ', is_array($value) ? count($value) : var_export($value, true);
 } elseif ($op === 'inc_loop') {
-    /* With ucache.gc.threshold 100, every ucache_inc() runs a scavenger step holding the cache lock. Every
-       32-byte block this loop allocates stays in use, except one that the step would allocate and free
-       there (an alloc_info), which substr() takes back. So when the 32-byte blocks run out, such an
-       allocation is the one that needs a new chunk, past memory_limit */
-    ucache_set('gc_key', 1);
+    /* Increments 'poke', which an earlier request stored, until substr() runs out of memory_limit. With
+       ucache.gc.threshold 100, ucache_inc() runs scavenger steps holding the cache lock, a second apart: the
+       first ucache_inc() runs one, the first write more than a second after the earlier requests. A step
+       allocates no request memory (its alloc_info is on the stack), so the fatal error comes in substr() */
     $count = 200000;
     $strings = array_fill(0, $count, null);
     $base = 'abcdefghijkl' . $op;
     ini_set('memory_limit', ((int)(memory_get_usage(true) / 1048576) + 4) . 'M');
     for ($i = 0; $i < $count; $i++) {
-        ucache_inc('gc_key');
+        ucache_inc('poke');
         $strings[$i] = substr($base, 0, 7);
     }
     echo 'no fatal error';
@@ -3799,14 +4049,15 @@ if ($op === 'sleep_fatal') {
     }
     sort($keys);
     echo 'listed [', implode(',', $keys), '] scavenged ', $info['total_scavenged_count'], ' ', $info['last_scavenge_count'], ' ',
-         var_export($info['last_scavenge_seconds'], true);
+         var_export($info['last_scavenge_seconds'], true), ' uptime ', $info['total_cache_uptime'];
     if (isset($_GET['disable'])) {
         ini_set('ucache.enabled', '0');
     }
 } elseif ($op === 'poke') {
-    /* A write, which runs a scavenger step while ucache.gc.threshold allows it. Its lookup removes the expired entries of
-       the hash bucket of 'poke', which is not the one of 'expiring' (of the 16381 buckets of the default cache): the step
-       is what removes 'expiring' */
+    /* A write, which runs a scavenger step while ucache.gc.threshold allows it, once a second has passed since the last
+       step (a tenth of a second after one that removed entries). Its lookup removes the expired entries of the hash
+       bucket of 'poke', which is not the one of 'expiring' (of the 16381 buckets of the default cache): the step is what
+       removes 'expiring' */
     echo 'poked ', var_export(ucache_set('poke', 1), true);
 } elseif ($op === 'seed') {
     /* 8000 entries with 4000-character keys: their list takes 32 MB */
@@ -3872,6 +4123,16 @@ CHILDSCRIPT
                'other process (exit code, [set, seconds])' => [$probeExit, $lock]]);
         child_kill($server);
     }
+
+    /* The server of the check of a loop of writes that run the scavenger (see below), started now with a holder of its
+       cache (which outlives the server on PHP 7 builds that end the process on memory_limit): its writes run a step
+       only once a second has passed since the last one, so its first requests store the entries of that check without
+       one (less than a second after the holder created the cache), and the loop comes 2.2 s or more later */
+    $eHolder = child_start('e-holder', child_php_args($poolBase . 'e', [], $holderScript));
+    $eReady = child_wait_for($eHolder, '/^READY/m', 30);
+    $eServer = server_start('e-server', $poolBase . 'e', ['ucache.gc.threshold' => '100', 'ucache.gc.interval' => '0',
+                                                          'ucache.gc.step' => '1000000', 'display_errors' => '1', 'html_errors' => '0'], $ePort);
+    $eStored = ($eServer === null) ? null : [microtime(true), http_get($ePort, '/?op=ttl_set', 10), http_get($ePort, '/?op=poke', 10)];
 
     /* A fatal error while ucache_set() copies a value in, which it does without the cache lock: the shared
        memory the copy had taken must come back (a holder keeps the cache and measures it) */
@@ -3945,29 +4206,45 @@ CHILDSCRIPT
           ['exit codes (holder, same salt, other salt)' => [$holderExit, $readerExit, $otherExit],
            'results (same salt, other salt)' => [child_result($reader), child_result($other)], 'holder output' => child_tail($holder)]);
 
-    /* A php -S process runs out of memory_limit in a loop of writes that run the scavenger holding the cache
-       lock (ucache.gc.threshold): the fatal error must not leave the lock taken */
+    /* A php -S process runs out of memory_limit in a loop of writes, which run scavenger steps holding the cache lock
+       (ucache.gc.threshold 100), a second apart: the fatal error must not leave the lock taken. The server's first
+       requests (above) stored 'expiring', which expires 2 s later, 'lasting', 'later' and 'poke'; the loop increments
+       'poke', and its first ucache_inc() runs a step, which removes 'expiring' (nothing else writes, and ucache.gc.interval
+       is 0): the list after the loop shows it */
     $pool = $poolBase . 'e';
-    $server = server_start('e-server', $pool, ['ucache.gc.threshold' => '100', 'ucache.gc.step' => '1', 'display_errors' => '1',
-                                               'html_errors' => '0'], $port);
-    if ($server === null) {
+    if ($eServer === null) {
         check('a php -S server starts', false);
     } else {
-        $reply = http_get($port, '/?op=inc_loop', 60);
-        $serverExit = server_exit($server, $reply);
-        $alive = ($serverExit === null) && strpos((string)http_get($port, '/?op=ping', 10), 'pong') !== false;
+        $wait = 2.2 - (microtime(true) - $eStored[0]);
+        if ($wait > 0) {
+            usleep((int)($wait * 1000000));
+        }
+        $reply = http_get($ePort, '/?op=inc_loop', 60);
+        $serverExit = server_exit($eServer, $reply);
+        $alive = ($serverExit === null) && strpos((string)http_get($ePort, '/?op=ping', 10), 'pong') !== false;
         $probe = child_start('e-lock', child_php_args($pool, [], $clientScript, ['lock']));
         $probeExit = child_finish($probe, 10);
         $lock = child_result($probe);
+        $lister = child_start('e-listed', child_php_args($pool, [], $clientScript, ['listed']));
+        $listerExit = child_finish($lister, 10);
+        $listed = child_result($lister);
+        $seeded = $eReady && strpos((string)$eStored[1], 'stored true') !== false && strpos((string)$eStored[2], 'poked true') !== false;
         $outOfMemory = strpos((string)$reply, 'Allowed memory size') !== false;
-        $endedOnLimit = PHP_VERSION_ID < 80000 && $serverExit === 1 && strpos(child_output($server), 'Allowed memory size') !== false;
-        check('a php -S process that runs out of memory_limit in a loop of ucache_inc() calls that run the scavenger (ucache.gc.threshold 100) does not keep the cache lock'
+        /* 'expiring' removed by a step, which only a write of the loop can have run (a step 0.1 s after it, if the loop
+           lasted that long, removed nothing) */
+        $stepRan = $listerExit === 0 && is_array($listed) && $listed[0] === ['lasting', 'later', 'lock_probe', 'poke'] && $listed[1] === 1;
+        $endedOnLimit = PHP_VERSION_ID < 80000 && $serverExit === 1 && strpos(child_output($eServer), 'Allowed memory size') !== false;
+        check('a php -S process that runs out of memory_limit in a loop of ucache_inc() calls, the first of which runs a scavenger step (ucache.gc.threshold 100), does not keep the cache lock'
               . ($endedOnLimit ? ' (this PHP 7 build ends the process on memory_limit instead, which gives the lock back too)' : ''),
-              (($alive && $outOfMemory) || $endedOnLimit) && $probeExit === 0 && is_array($lock) && $lock[0] === true && $lock[1] < 5,
-              ['reply' => substr(trim(preg_replace('/\s+/', ' ', (string)$reply)), -300), 'server exit code' => $serverExit, 'server alive' => $alive,
-               'server output' => child_tail($server), 'other process (exit code, [set, seconds])' => [$probeExit, $lock]]);
-        child_kill($server);
+              $seeded && (($alive && $outOfMemory) || $endedOnLimit) && $stepRan && $probeExit === 0 && is_array($lock) && $lock[0] === true
+              && $lock[1] < 5,
+              ['first requests stored their entries' => $seeded, 'reply' => substr(trim(preg_replace('/\s+/', ' ', (string)$reply)), -300),
+               'server exit code' => $serverExit, 'server alive' => $alive, '[keys listed after the loop, removed in all, by the last step]' => $listed,
+               'server output' => child_tail($eServer), 'other process (exit code, [set, seconds])' => [$probeExit, $lock]]);
+        child_kill($eServer);
     }
+    child_send($eHolder, 'done');
+    child_finish($eHolder, 30);
 
     /* The scavenger at the end of requests (ucache.gc.interval), one php -S server per case. Each stores an entry that
        expires after 1 second, one without a ttl and one that expires after 300 seconds, then, once the first one has
@@ -3992,20 +4269,31 @@ CHILDSCRIPT
                  'with ucache.gc.threshold 1 and most of the memory free, neither the end of a request nor a write runs the scavenger, and ucache_info() reports no step'],
         'w6' => [['ucache.gc.interval' => '1'], ['listed&disable=1', 'listed', 'listed'], [$all, $all, '[lasting,later]'], [1, 1, 1],
                  'the end of a request that switched ucache.enabled off does not run the scavenger, and the end of the next request does'],
-        'w7' => [['ucache.gc.interval' => '0', 'ucache.gc.threshold' => '100'], ['listed', 'poke', 'poke', 'listed'],
-                 [$all, null, null, '[lasting,later,poke]'], [1, 0, 1],
-                 'with ucache.gc.threshold 100, every write runs a scavenger step: the first one removes the expired entry, the second one nothing, and ucache_info() reports 1 removed in all, 0 by the last step'],
+        'w7' => [['ucache.gc.interval' => '0', 'ucache.gc.threshold' => '100'], ['listed', 'poke', 'listed'],
+                 [$all, null, '[lasting,later,poke]'], [1, 1, 1],
+                 'with ucache.gc.threshold 100, a write runs a scavenger step once a second has passed since the last one: it removes the expired entry, and ucache_info() reports 1 removed in all, 1 by the last step'],
         'w8' => [['ucache.gc.interval' => '1', 'ucache.gc.ttl' => '3600'], ['listed', 'listed'], [$all, '[lasting,later]'], [1, 1, 1],
                  'with ucache.gc.ttl 3600, the scavenger at the end of a request still removes the entries whose own ttl has passed: it removes the expired entry and keeps the ones without a ttl or whose ttl has not passed, all used less than 3600 seconds ago'],
+        'w9' => [['ucache.gc.interval' => '0', 'ucache.gc.threshold' => '-1'], ['listed', 'poke', 'listed'],
+                 [$all, null, '[expiring,lasting,later,poke]'], [0, 0, null],
+                 'with ucache.gc.threshold -1, which acts as 0, a write runs no scavenger step: the expired entry stays, and ucache_info() reports no step'],
+        'w10' => [['ucache.gc.interval' => '4294968'], ['listed', 'listed'], [$all, $all], [0, 0, null],
+                  'with ucache.gc.interval 4294968, whose milliseconds do not fit in 32 bits, the end of a request does not run the scavenger before that many seconds have passed'],
+        'w11' => [['ucache.gc.interval' => '18446744073709552'], ['listed', 'listed'], [$all, $all], [0, 0, null],
+                  'with ucache.gc.interval 18446744073709552, whose milliseconds do not fit in 64 bits, the end of a request does not run the scavenger'],
+        'w12' => [['ucache.gc.interval' => '1', 'ucache.gc.threshold' => '-1'], ['listed', 'listed'], [$all, '[lasting,later]'], [1, 1, 1],
+                  'with ucache.gc.threshold -1, which acts as 0, the end of a request runs the scavenger as without the setting'],
     ];
     $servers = [];
     foreach ($periodic as $name => $case) {
+        $startedBefore = microtime(true);
         $server = server_start("$name-server", $poolBase . $name, $case[0] + ['ucache.gc.step' => '1000000'], $port);
-        $servers[$name] = [$server, $port, ($server === null) ? null : http_get($port, '/?op=ttl_set', 10)];
+        $servers[$name] = [$server, $port, ($server === null) ? null : http_get($port, '/?op=ttl_set', 10), $startedBefore, microtime(true)];
     }
     usleep(2500000);
+    $uptimes = [];
     foreach ($periodic as $name => $case) {
-        list($server, $port, $stored) = $servers[$name];
+        list($server, $port, $stored, $startedBefore, $readyAt) = $servers[$name];
         if ($server === null) {
             check('a php -S server starts', false);
             continue;
@@ -4013,9 +4301,13 @@ CHILDSCRIPT
         $lists = [];
         $reports = [];
         foreach ($case[1] as $request) {
-            if (preg_match('/listed (\[[a-z,]*\]) scavenged (\d+) (\d+) (\d+|NULL)/', (string)http_get($port, "/?op=$request", 10), $match)) {
+            $requestedAt = microtime(true);
+            $reply = (string)http_get($port, "/?op=$request", 10);
+            if (preg_match('/listed (\[[a-z,]*\]) scavenged (\d+) (\d+) (\d+|NULL) uptime (\d+)/', $reply, $match)) {
                 $lists[] = $match[1];
                 $reports[] = [(int)$match[2], (int)$match[3], ($match[4] === 'NULL') ? null : (int)$match[4]];
+                /* The server created its cache at its startup, between $startedBefore and $readyAt */
+                $uptimes["$name $request"] = [(int)$match[5], (int)floor($requestedAt - $readyAt) - 1, (int)ceil(microtime(true) - $startedBefore) + 1];
             } else {
                 $lists[] = null;
             }
@@ -4025,8 +4317,9 @@ CHILDSCRIPT
         $reported = is_array($last) && $last[0] === $expected[0] && $last[1] === $expected[1]
                     && (($expected[2] === null) ? $last[2] === null : is_int($last[2]) && $last[2] <= $expected[2]);
         if ($name === 'w7') {
-            /* Its first list comes 2.5 s after the steps of the writes of ttl_set: a count in milliseconds would be 2500 or more */
-            $reported = $reported && is_int($reports[0][2]) && $reports[0][2] >= 2 && $reports[0][2] < 1000;
+            /* Its first list comes 2.5 s after ttl_set, whose writes run a step only if the server took a second to start: a
+               count in milliseconds would then be 2500 or more */
+            $reported = $reported && ($reports[0][2] === null || (is_int($reports[0][2]) && $reports[0][2] >= 2 && $reports[0][2] < 1000));
         }
         check($case[4], strpos((string)$stored, 'stored true') !== false && $lists === $case[2] && $reported,
               ['stored' => substr(trim(preg_replace('/\s+/', ' ', (string)$stored)), -100), 'lists' => $lists,
@@ -4034,15 +4327,32 @@ CHILDSCRIPT
                'server output' => child_tail($server)]);
         child_kill($server);
     }
+    $wrongUptimes = array_filter($uptimes, function ($uptime) { return $uptime[0] < $uptime[1] || $uptime[0] > $uptime[2]; });
+    check('total_cache_uptime of the cache of each of these servers counts the whole seconds since the server started',
+          count($uptimes) >= count($periodic) && $wrongUptimes === [],
+          ['[uptime, at least, at most] of the lists that were not right' => $wrongUptimes, 'lists with an uptime' => count($uptimes)]);
 
     /* The scavenger on writes, and a full cache, in CLI processes that run at the same time, each on a cache of its own.
-       x: with ucache.gc.threshold 100 every write runs a scavenger step, which with ucache.gc.ttl 2 removes the entries
-       not used for 2 seconds; ucache_inc() counts as a use. y, z, z0: a ucache_set() that runs out of shared memory runs
-       a full scavenger pass first (with ucache.gc.evict, if that does not leave about that percentage of the cache free,
-       it then evicts the entries not used for the longest time until it does), and tries once more; their caches of
-       5 MB are filled with values of about 50 KB */
+       With ucache.gc.threshold 100, a write runs a scavenger step once a second has passed since the last one (in any
+       process of the cache), a tenth of a second after a step that removed entries, a hundredth after one that removed
+       entries while at most a quarter of the threshold was free. x: such steps, with ucache.gc.ttl 2, remove the entries
+       not used for 2 seconds; ucache_inc() counts as a use. xw: the waits of a second and a tenth, with the times of the
+       writes. xb: a burst of writes runs a step or two, by the count of the entries removed, which a loaded machine
+       cannot make wrong. xu: the wait of a hundredth. xi: with ucache.gc.interval 0, the automatic step size. y, z, z0:
+       a ucache_set() that runs out of shared memory runs a full scavenger pass first (with ucache.gc.evict, if that does
+       not leave about that percentage of the cache free, it then evicts the entries not used for the longest time until
+       it does), and tries once more; their caches of 5 MB are filled with values of about 50 KB */
     $incAlive = child_start('x-inc-alive', child_php_args($poolBase . 'x', ['ucache.gc.threshold' => '100', 'ucache.gc.ttl' => '2',
                                                                            'ucache.gc.step' => '1000000'], $clientScript, ['inc_alive']));
+    $writeGap = child_start('xw-write-gap', child_php_args($poolBase . 'xw', ['ucache.gc.threshold' => '100', 'ucache.gc.interval' => '0',
+                                                                             'ucache.gc.step' => '1000000'], $clientScript, ['write_gap']));
+    $writeBurst = child_start('xb-write-burst', child_php_args($poolBase . 'xb', ['ucache.gc.threshold' => '100', 'ucache.gc.interval' => '0',
+                                                                                 'ucache.gc.step' => '1'], $clientScript, ['write_burst']));
+    $writeUrgent = child_start('xu-write-urgent', child_php_args($poolBase . 'xu', ['ucache.size' => '5', 'ucache.gc.threshold' => '100',
+                                                                                   'ucache.gc.interval' => '0', 'ucache.gc.step' => '50'],
+                                                                 $clientScript, ['write_urgent']));
+    $writeInterval0 = child_start('xi-write-interval0', child_php_args($poolBase . 'xi', ['ucache.gc.threshold' => '100', 'ucache.gc.interval' => '0'],
+                                                                       $clientScript, ['write_interval0']));
     $fillExpired = child_start('y-fill-expired', child_php_args($poolBase . 'y', ['ucache.size' => '5'], $clientScript, ['fill_expired']));
     $fillEvict = child_start('z-fill-evict', child_php_args($poolBase . 'z', ['ucache.size' => '5', 'ucache.gc.evict' => '25'], $clientScript,
                                                             ['fill_evict']));
@@ -4062,10 +4372,38 @@ CHILDSCRIPT
 
     $exit = child_finish($incAlive, 60);
     $result = child_result($incAlive);
-    check('(in another process) with ucache.gc.ttl 2 and a scavenger step on every write (ucache.gc.threshold 100), entries that only ucache_inc() or only ucache_cas() use, every 0.5 s for 3 s, stay (both count as a use), and an entry not used for 2 seconds is removed',
-          $exit === 0 && $result === [[1, 2, 3, 4, 5, 6], [true, true, true, true, true, true], true, true, false],
+    check('(in another process) with ucache.gc.ttl 2 and scavenger steps on writes (ucache.gc.threshold 100), entries that only ucache_inc() or only ucache_cas() use, every 0.5 s for 3.5 s, stay (both count as a use), and an entry not used for 2 seconds is removed',
+          $exit === 0 && $result === [[1, 2, 3, 4, 5, 6, 7], [true, true, true, true, true, true, true], true, true, false],
           ['exit code' => $exit, '[values of ucache_inc(), results of ucache_cas(), counter exists, swapped exists, unused entry exists]' => $result,
            'output' => child_tail($incAlive)]);
+
+    $exit = child_finish($writeGap, 60);
+    $result = child_result($writeGap);
+    $states = is_array($result) ? array_map(function ($state) { return array_slice($state, 0, 3); }, $result) : null;
+    check('(in another process) with ucache.gc.threshold 100, a write runs a scavenger step once a second has passed since the last step, or a tenth of a second after a step that removed entries: a write 0.75 s after a step that removed nothing leaves an expired entry in place, one 1.25 s after removes it, the write right after that one runs no step, and a write 0.625 s later removes the next expired entry',
+          $exit === 0 && $states === [['expiring,later,poke', 0, 0], ['expiring,later,poke', 0, 0], ['later,poke', 1, 0], ['poke', 1, 0]],
+          ['exit code' => $exit, '[keys listed, last_scavenge_count, last_scavenge_seconds, seconds since the start] after each write' => $result,
+           'output' => child_tail($writeGap)]);
+
+    $exit = child_finish($writeBurst, 60);
+    $result = child_result($writeBurst);
+    check('(in another process) with ucache.gc.threshold 100 and ucache.gc.step 1, 1000 writes in a row after 4000 entries have expired run a step or two, not one each: they remove at most 20 of the entries (a step on every write would remove about 240)',
+          $exit === 0 && is_array($result) && $result[0] <= 20,
+          ['exit code' => $exit, '[entries removed during the writes, seconds they took]' => $result, 'output' => child_tail($writeBurst)]);
+
+    $exit = child_finish($writeUrgent, 60);
+    $result = child_result($writeUrgent);
+    check('(in another process) with ucache.gc.threshold 100 and at most 25% of the memory free, a write runs a scavenger step 50 ms after a step that removed entries (a hundredth of a second, not a tenth), and 200 writes in a row still run only a few',
+          $exit === 0 && is_array($result) && $result[1] <= 25 && $result[2] > 0 && $result[3] > 0 && $result[4] < 1000,
+          ['exit code' => $exit, '[entries stored, free memory %, removed by the first step, by the write 50 ms later, by the 200 writes, seconds they took]' => $result,
+           'output' => child_tail($writeUrgent)]);
+
+    $exit = child_finish($writeInterval0, 60);
+    $result = child_result($writeInterval0);
+    check('(in another process) with ucache.gc.interval 0 and the automatic ucache.gc.step, a scavenger step on a write goes through buckets / 300 hash buckets (55 of the 16381 of 8 MB), not 16: it removes an expired entry in a bucket between 16 and 54 and keeps one in a bucket beyond, which a lookup of another key of that bucket then removes',
+          $exit === 0 && $result === [55, null, 'outside,poke', 1, 'poke'],
+          ['exit code' => $exit, '[step, last_scavenge_seconds before the expiry, keys listed after the write, last_scavenge_count, keys listed after the lookup]' => $result,
+           'output' => child_tail($writeInterval0)]);
 
     $exit = child_finish($fillExpired, 60);
     $result = child_result($fillExpired);

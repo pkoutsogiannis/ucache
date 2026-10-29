@@ -44,16 +44,18 @@ struct _zvcache_hashtable_pool_tracker
     size_t        hoff;                  /* Memory pool offset */
 };
 
+/*
+ * An entry.  Its key, with the NUL, follows the structure in the same block (ZVCACHE_KEY in
+ * ucache_zvcache.c).  Times are GetTickCount64() values, which do not wrap.
+ */
 typedef struct zvcache_value zvcache_value;
 struct zvcache_value
 {
     size_t            zvalue;            /* Offset of zval value stored */
-    size_t            keystr;            /* Offset of key string */
-    unsigned short    keylen;            /* Length of key string */
     size_t            sizeb;             /* Memory allocated for zvalue in bytes */
 
-    unsigned int      add_ticks;         /* Tick count when entry was created */
-    unsigned int      use_ticks;         /* Tick count when entry was last used */
+    ULONGLONG         add_ticks;         /* GetTickCount64() when the entry was created */
+    ULONGLONG         use_ticks;         /* GetTickCount64() when the entry was last used */
     unsigned int      ttlive;            /* Max time to live for this entry */
 
     unsigned int      hitcount;          /* Hit count for this entry */
@@ -67,21 +69,22 @@ struct zvcache_header
     unsigned int      mapcount;          /* Number of processes using this zval cache */
     unsigned int      hitcount;          /* Cache items cumulative hit count */
     unsigned int      misscount;         /* Cache items cumulative miss count */
-    unsigned int      init_ticks;        /* Tick count when the cache first got created */
+    ULONGLONG         init_ticks;        /* GetTickCount64() when the cache was created */
     unsigned int      last_owner;        /* PID of last owner for lock */
 
-    unsigned int      lscavenge;         /* Ticks when last scavenger run happened (or was skipped, see zvcache_run_scavenger) */
+    ULONGLONG         lscavenge;         /* GetTickCount64() of the last scavenger step, or of a look at the free memory that skipped one (see zvcache_run_scavenger) */
+    ULONGLONG         scwait;            /* Milliseconds after lscavenge before a write runs the next step (see zvcache_run_scavenger) */
     unsigned int      scstart;           /* Index from where scavenger should start */
     unsigned int      itemcount;         /* Number of active items in zval cache */
     unsigned int      valuecount;        /* Total values starting from last entry */
-    unsigned int      scticks;           /* Ticks when the last scavenger step ran */
+    ULONGLONG         scticks;           /* GetTickCount64() when the last scavenger step ran */
     unsigned int      sccount;           /* Entries the last scavenger step removed */
     size_t            scruns;            /* Scavenger steps run since the cache was created */
     size_t            scremoved;         /* Entries the scavenger removed since the cache was created */
     size_t            scevicted;         /* Of those, entries evicted before their time (ucache.gc.evict) */
-    unsigned int      rcticks;           /* Ticks of the last full pass for a full cache that left no room */
+    ULONGLONG         rcticks;           /* GetTickCount64() of the last full pass for a full cache that left no room */
     unsigned int      rcfutile;          /* 1: that pass removed nothing and the write still did not fit */
-    unsigned int      rcwait;            /* Milliseconds the processes skip the full pass after such a pass */
+    ULONGLONG         rcwait;            /* Milliseconds the processes skip the full pass after such a pass */
     unsigned int      rcgen;             /* Full passes run since the cache was created */
     size_t            values[1];         /* valuecount zvcache_value offsets */
 };
