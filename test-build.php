@@ -2852,6 +2852,134 @@ function best_store_time($value)
     return $best;
 }
 
+/* Garbage for the GC root buffer: an object in a cycle with itself. With $flag set, the first destructor that runs
+   records whether ucache_get() called it, creates the file $flag and sleeps 2 s */
+class UcacheChildGcGarbage
+{
+    public static $flag = null;
+    public static $count = 0;
+    public static $fromGet = null;
+    public $self;
+
+    public function __destruct()
+    {
+        if (self::$count++ === 0 && self::$flag !== null) {
+            self::$fromGet = in_array('ucache_get', array_column(debug_backtrace(), 'function'), true);
+            touch(self::$flag);
+            usleep(2000000);
+        }
+    }
+}
+
+/* Makes garbage until the GC root buffer holds $below roots fewer than its threshold, where the next root starts a GC
+   run (gc_status(), PHP 7.3+): the number of objects made */
+function fill_gc_roots($below)
+{
+    gc_collect_cycles();
+    UcacheChildGcGarbage::$count = 0;
+    for ($i = 0; $i < 1000000; $i++) {
+        $status = gc_status();
+        if ($status['roots'] >= $status['threshold'] - $below) {
+            break;
+        }
+        $garbage = new UcacheChildGcGarbage();
+        $garbage->self = $garbage;
+        unset($garbage);
+    }
+    return $i;
+}
+
+/* A value whose arrays nest $levels deep, each one holding a reference to the whole value, an array that they share and
+   the next one ('leaf' in the deepest): $value['first'] is the first one, and $value['later'] comes after it */
+function gc_cycle_value($levels)
+{
+    $value = ['first' => null, 'later' => [1, 2, 3]];
+    $shared = [1];
+    $chain = 'leaf';
+    for ($i = 0; $i < $levels; $i++) {
+        $chain = [&$value, $shared, $chain];
+    }
+    $value['first'] = $chain;
+    return $value;
+}
+
+/* Whether $value is what gc_cycle_value($levels) made */
+function gc_cycle_value_ok($value, $levels)
+{
+    if (!is_array($value) || !isset($value['later']) || $value['later'] !== [1, 2, 3]) {
+        return false;
+    }
+    $chain = $value['first'];
+    for ($i = 0; $i < $levels; $i++) {
+        if (!is_array($chain) || count($chain) !== 3 || $chain[1] !== [1] || !is_array($chain[0]) || $chain[0]['later'] !== [1, 2, 3]) {
+            return false;
+        }
+        $chain = $chain[2];
+    }
+    return $chain === 'leaf';
+}
+
+/* The same through references: each level is [an array that they share, a reference to the whole value, a reference to
+   the next level] ('leaf' in the deepest) */
+function ref_chain_value($levels)
+{
+    $value = ['first' => null, 'later' => [1, 2, 3]];
+    $shared = [1];
+    $first = [];
+    $level = &$first;
+    for ($i = 0; $i < $levels; $i++) {
+        $level[0] = $shared;
+        $level[1] = &$value;
+        $level[2] = [];
+        $level = &$level[2];
+    }
+    $level = 'leaf';
+    unset($level);
+    $value['first'] = $first;
+    return $value;
+}
+
+/* Whether $value is what ref_chain_value($levels) made */
+function ref_chain_value_ok($value, $levels)
+{
+    if (!is_array($value) || !isset($value['later']) || $value['later'] !== [1, 2, 3]) {
+        return false;
+    }
+    $level = $value['first'];
+    for ($i = 0; $i < $levels; $i++) {
+        if (!is_array($level) || count($level) !== 3 || $level[0] !== [1] || !is_array($level[1]) || $level[1]['later'] !== [1, 2, 3]) {
+            return false;
+        }
+        $level = $level[2];
+    }
+    return $level === 'leaf';
+}
+
+/* $levels arrays, each one holding an array that they share and the next one ('leaf' in the deepest) */
+function shared_levels($levels)
+{
+    $shared = [1];
+    $value = 'leaf';
+    for ($i = 0; $i < $levels; $i++) {
+        $value = [$shared, $value];
+    }
+    return $value;
+}
+
+/* A value whose list ($value['first']) holds 20000 [reference to the whole value, shared array, 1 KB string], followed
+   by $value['later']: about 21 MB once copied out */
+function oom_cycle_value()
+{
+    $value = ['first' => null, 'later' => [1, 2, 3]];
+    $shared = [1];
+    $list = [];
+    for ($i = 0; $i < 20000; $i++) {
+        $list[] = [&$value, $shared, str_repeat(chr(65 + $i % 26), 1000)];
+    }
+    $value['first'] = $list;
+    return $value;
+}
+
 switch ($argv[1]) {
     case 'set':
         $result = ucache_set('shared', shared_value());
@@ -2885,6 +3013,20 @@ switch ($argv[1]) {
     case 'lock':
         $start = microtime(true);
         $result = [ucache_set('lock_probe', 1), round(microtime(true) - $start, 3)];
+        break;
+
+    case 'lock_after_flag':
+        /* Prints "READY", waits until the file argv[2] exists (at most 30 s), then stores a value: [file seen, stored,
+           seconds] */
+        ucache_set('lock_warm_up', 1);
+        echo "READY\n";
+        $end = microtime(true) + 30;
+        while (!file_exists($argv[2]) && microtime(true) < $end) {
+            usleep(5000);
+        }
+        $start = microtime(true);
+        $set = ucache_set('lock_probe', 1);
+        $result = [file_exists($argv[2]), $set, round(microtime(true) - $start, 3)];
         break;
 
     case 'fatal':
@@ -2991,6 +3133,79 @@ switch ($argv[1]) {
             $got = [get_class($e) . ': ' . $e->getMessage(), null];
         }
         $result = [$set, $got[0], $got[1], $notices, ucache_get('fiber_deep') === $value];
+        break;
+
+    case 'fiber_get_gc_cycle':
+        /* ucache_get() inside a Fiber of gc_cycle_value(9000), more than the stack of the Fiber takes, with the GC root
+           buffer two roots below its threshold. The copy fails, and what it built refers to itself; then
+           gc_collect_cycles() must collect it with the garbage made ([stored, result, $success, warnings, it collected more
+           than the garbage made, the entry read from the main thread afterwards is intact, [garbage made, collected]]) */
+        collect_notices();
+        $set = ucache_set('fiber_gc_cycle', gc_cycle_value(9000));
+        try {
+            $fiber = new Fiber(function () {
+                $made = fill_gc_roots(2);
+                $got = ucache_get('fiber_gc_cycle', $success);
+                $collected = gc_collect_cycles();
+                return [($got === false) ? false : gettype($got), $success, $collected > $made, [$made, $collected]];
+            });
+            $fiber->start();
+            $got = $fiber->getReturn();
+        } catch (Throwable $e) {
+            $got = [get_class($e) . ': ' . $e->getMessage(), null, null, null];
+        }
+        $result = [$set, $got[0], $got[1], $notices, $got[2], gc_cycle_value_ok(ucache_get('fiber_gc_cycle'), 9000), $got[3]];
+        break;
+
+    case 'fiber_get_ref_chain':
+        /* The same with ref_chain_value(4900), whose levels link through references: a failed copy leaves a reference half
+           built at each level. Then three more failed reads, each followed by gc_collect_cycles() ([stored, result,
+           $success, warnings, memory after them less than 64 KB above, entry intact, memory growth in bytes]) */
+        collect_notices();
+        $set = ucache_set('fiber_ref_chain', ref_chain_value(4900));
+        try {
+            $fiber = new Fiber(function () {
+                fill_gc_roots(2);
+                $got = ucache_get('fiber_ref_chain', $success);
+                gc_collect_cycles();
+                $base = memory_get_usage();
+                for ($i = 0; $i < 3; $i++) {
+                    ucache_get('fiber_ref_chain');
+                    gc_collect_cycles();
+                }
+                return [($got === false) ? false : gettype($got), $success, memory_get_usage() - $base];
+            });
+            $fiber->start();
+            $got = $fiber->getReturn();
+        } catch (Throwable $e) {
+            $got = [get_class($e) . ': ' . $e->getMessage(), null, null];
+        }
+        $result = [$set, $got[0], $got[1], $notices, is_int($got[2]) && $got[2] < 65536,
+                   ref_chain_value_ok(ucache_get('fiber_ref_chain'), 4900), $got[2]];
+        break;
+
+    case 'fiber_get_gc_dtor':
+        /* ucache_get() inside a Fiber of shared_levels(9000), more than the stack of the Fiber takes, with the GC root
+           buffer one root below its threshold: the copy fails, and releasing what it built starts a GC run, whose first
+           destructor creates the file argv[2] and sleeps 2 s, while the process of 'lock_after_flag' stores a value
+           ([stored, result, $success, warnings, destructors ran during the call, the first one was called from
+           ucache_get(), the entry read from the main thread afterwards is intact]) */
+        collect_notices();
+        $value = shared_levels(9000);
+        $set = ucache_set('fiber_gc_dtor', $value);
+        try {
+            $fiber = new Fiber(function () use ($argv) {
+                fill_gc_roots(1);
+                UcacheChildGcGarbage::$flag = $argv[2];
+                $got = ucache_get('fiber_gc_dtor', $success);
+                return [($got === false) ? false : gettype($got), $success, UcacheChildGcGarbage::$count];
+            });
+            $fiber->start();
+            $got = $fiber->getReturn();
+        } catch (Throwable $e) {
+            $got = [get_class($e) . ': ' . $e->getMessage(), null, UcacheChildGcGarbage::$count];
+        }
+        $result = [$set, $got[0], $got[1], $notices, $got[2] > 0, UcacheChildGcGarbage::$fromGet, ucache_get('fiber_gc_dtor') === $value];
         break;
 
     case 'free_speed':
@@ -3224,6 +3439,21 @@ switch ($argv[1]) {
         ini_set('memory_limit', (string)(memory_get_usage(true) + 8 * 1048576));
         $result = ($argv[1] === 'getarray_oom') ? ucache_get($keys) : ucache_info();
         $result = is_array($result) ? count($result) : $result;
+        break;
+
+    case 'oom_get_gc_cycle':
+        /* ucache_get() of oom_cycle_value() with memory_limit 8 MB above the usage and, where gc_status() exists (PHP 7.3+),
+           the GC root buffer two roots below its threshold: ends with the memory_limit fatal error (prints "STORED" and the
+           result of the store first). No shutdown function: where the fatal error comes at once, what the copy holds stays
+           allocated, and PHP 7.3 to 8.0 raise the memory_limit error again inside a shutdown function */
+        echo "STORED ", json_encode(ucache_set('oom_cycle', oom_cycle_value())), "\n";
+        gc_collect_cycles();
+        gc_mem_caches();
+        if (function_exists('gc_status')) {
+            fill_gc_roots(2);
+        }
+        ini_set('memory_limit', (string)(memory_get_usage(true) + 8 * 1048576));
+        $result = ucache_get('oom_cycle');
         break;
 
     case 'big_delete':
@@ -3821,6 +4051,15 @@ CHILDSCRIPT
                                                             ['fill_mixed']));
     $contactFree = child_start('cf-contact-free', child_php_args($poolBase . 'cf', [], $clientScript, ['contact_free']));
 
+    /* The two processes of a check with Fibers (PHP 8.1+, see below), which waits 2 s, as these do: started now, checked
+       there. The one that times a store must wait for the flag before the reader creates it */
+    if (PHP_VERSION_ID >= 80100) {
+        $gcDtorProber = child_start('v3-lock', child_php_args($poolBase . 'v3', [], $clientScript, ['lock_after_flag', 'v3-destructor.flag']));
+        $gcDtorProberReady = child_wait_for($gcDtorProber, '/^READY/m', 30);
+        $gcDtor = child_start('v3-fiber-gc-dtor', child_php_args($poolBase . 'v3', ['fiber.stack_size' => '2M'], $clientScript,
+                                                                ['fiber_get_gc_dtor', 'v3-destructor.flag']));
+    }
+
     $exit = child_finish($incAlive, 60);
     $result = child_result($incAlive);
     check('(in another process) with ucache.gc.ttl 2 and a scavenger step on every write (ucache.gc.threshold 100), entries that only ucache_inc() or only ucache_cas() use, every 0.5 s for 3 s, stay (both count as a use), and an entry not used for 2 seconds is removed',
@@ -3888,13 +4127,233 @@ CHILDSCRIPT
     check('(in another process) a __sleep() that frees the array being copied in, and strings take the memory of its arrays: the array is stored as it was',
           $freedExit === 0 && $result === [true, 61, 0], ['exit code' => $freedExit, '[set, elements, wrong elements]' => $result, 'output' => child_tail($freed)]);
 
-    /* $GLOBALS, in a process of its own (the globals of this script are many, and some cannot be stored) */
+    /* $GLOBALS, in processes of their own (the globals of this script are many, and some cannot be stored). Before PHP
+       8.1, $GLOBALS is the symbol table itself, which holds the variables of the top level of the script through slots
+       that point to them (IS_INDIRECT), and which user code changes in place. novars.php has no variable at the top
+       level, so its symbol table has no such slot; derived.php has some, and stores arrays that array_merge(),
+       array_slice(), array_reverse(), array_chunk() and array_values() make of $GLOBALS, which copy those slots as they
+       are. The last step of each empties its symbol table */
+    $noVarsScript = $childDir . DIRECTORY_SEPARATOR . 'novars.php';
+    file_put_contents($noVarsScript, <<<'CHILDSCRIPT'
+<?php
+/* No variable at the top level: everything runs in functions. Prints "RESULT " and its serialize()d result in base64 */
+
+/* Its __sleep() adds a global and changes one */
+class UcacheNoVarsAdder
+{
+    public $n = 1;
+
+    public function __sleep()
+    {
+        $GLOBALS['added'] = str_repeat('a', 8);
+        $GLOBALS['text'] = 'changed';
+        return ['n'];
+    }
+}
+
+/* Its __sleep() binds a global that is not set, which adds it (a reference) */
+class UcacheNoVarsBinder
+{
+    public $n = 1;
+
+    public function __sleep()
+    {
+        global $bound;
+        return ['n'];
+    }
+}
+
+class UcacheNoVarsHolder
+{
+    public static $table;
+    public static $junk;
+}
+
+/* Its __wakeup() adds 300 globals through UcacheNoVarsHolder::$table (before PHP 8.1 the symbol table itself), which
+   reallocates the symbol table, then makes strings that take the freed memory */
+class UcacheNoVarsGrower
+{
+    public $n = 1;
+
+    public function __wakeup()
+    {
+        for ($i = 0; $i < 300; $i++) {
+            UcacheNoVarsHolder::$table["grown_$i"] = $i;
+        }
+        $junk = [];
+        for ($i = 0; $i < 3000; $i++) {
+            $junk[] = str_repeat('A', 1000 + $i % 2200);
+        }
+        UcacheNoVarsHolder::$junk = $junk;
+    }
+}
+
+/* ucache_set() of $GLOBALS (in an array if $nested) while an object of $class is a global: [stored, the text stored,
+   the added global stored, the bound global stored] */
+function novars_store($key, $class, $nested)
+{
+    $GLOBALS['text'] = 'original';
+    $GLOBALS['object'] = new $class();
+    $set = $nested ? ucache_set($key, ['g' => $GLOBALS]) : ucache_set($key, $GLOBALS);
+    unset($GLOBALS['object'], $GLOBALS['added'], $GLOBALS['bound']);
+    $got = ucache_get($key);
+    if ($nested) {
+        $got = (is_array($got) && isset($got['g'])) ? $got['g'] : null;
+    }
+    return [$set, (is_array($got) && isset($got['text'])) ? $got['text'] : null,
+            is_array($got) && array_key_exists('added', $got), is_array($got) && array_key_exists('bound', $got)];
+}
+
+function novars_main()
+{
+    $notices = [];
+    set_error_handler(function ($errno, $errstr) use (&$notices) {
+        $notices[] = $errstr;
+        return true;
+    });
+
+    $result = ['adder' => novars_store('nv_adder', 'UcacheNoVarsAdder', false),
+               'binder' => novars_store('nv_binder', 'UcacheNoVarsBinder', false),
+               'nested' => novars_store('nv_nested', 'UcacheNoVarsBinder', true)];
+
+    /* Last: before PHP 8.1 this empties the symbol table ($GLOBALS included) */
+    ucache_set('nv_key0', new UcacheNoVarsGrower());
+    for ($i = 1; $i < 40; $i++) {
+        ucache_set("nv_key$i", $i);
+    }
+    UcacheNoVarsHolder::$table = $GLOBALS;
+    foreach (array_keys(UcacheNoVarsHolder::$table) as $name) {
+        unset(UcacheNoVarsHolder::$table[$name]);
+    }
+    for ($i = 0; $i < 40; $i++) {
+        UcacheNoVarsHolder::$table["k$i"] = "nv_key$i";
+    }
+    $got = ucache_get(UcacheNoVarsHolder::$table);
+    $result['get'] = is_array($got) ? count($got) : $got;
+    $result['notices'] = $notices;
+
+    echo "RESULT ", base64_encode(serialize($result)), "\n";
+}
+
+novars_main();
+CHILDSCRIPT
+    );
+
+    $derivedScript = $childDir . DIRECTORY_SEPARATOR . 'derived.php';
+    file_put_contents($derivedScript, <<<'CHILDSCRIPT'
+<?php
+/* Three variables at the top level. Prints "RESULT " and its serialize()d result in base64 */
+
+/* Its __sleep() changes $text */
+class UcacheDerivedChanger
+{
+    public $n = 1;
+
+    public function __sleep()
+    {
+        $GLOBALS['text'] = 'changed';
+        return ['n'];
+    }
+}
+
+class UcacheDerivedHolder
+{
+    public static $table;
+}
+
+/* ucache_set() of an array made of $GLOBALS, while $text is 'old' and $changer is among the globals: [stored, $text
+   read back] */
+function derived_store($key, $value)
+{
+    $set = ucache_set($key, $value);
+    $got = ucache_get($key);
+    return [$set, (is_array($got) && isset($got['text'])) ? $got['text'] : null];
+}
+
+function derived_main()
+{
+    $notices = [];
+    set_error_handler(function ($errno, $errstr) use (&$notices) {
+        $notices[] = $errstr;
+        return true;
+    });
+
+    $result = [];
+    $GLOBALS['text'] = 'old';
+    $result['merge'] = derived_store('d_merge', array_merge($GLOBALS, ['zz' => 1]));
+    $GLOBALS['text'] = 'old';
+    $result['slice'] = derived_store('d_slice', array_slice($GLOBALS, 0));
+    $GLOBALS['text'] = 'old';
+    $result['reverse'] = derived_store('d_reverse', array_reverse($GLOBALS, true));
+    $GLOBALS['text'] = 'old';
+    $chunks = array_chunk($GLOBALS, 1000, true);
+    $result['chunk'] = derived_store('d_chunk', $chunks[0]);
+    unset($chunks);
+
+    /* A list of the values of $GLOBALS: before PHP 8.1, of its slots */
+    $result['values'] = ucache_set('d_values', array_values($GLOBALS));
+
+    /* $GLOBALS while a global holds an array made of it, as a value and with the array form (keys that failed) */
+    $GLOBALS['holder'] = array_merge($GLOBALS, ['zz' => 1]);
+    $result['holder'] = [ucache_set('d_globals', $GLOBALS), ucache_set($GLOBALS)];
+
+    /* The array form of an array made of $GLOBALS stores each variable under its name (keys that failed, then two of the
+       entries read back) */
+    unset($GLOBALS['changer'], $GLOBALS['holder']);
+    $GLOBALS['text'] = 'array form';
+    $result['array form'] = [ucache_set(array_merge($GLOBALS, ['zz' => 1])), ucache_get('text'), ucache_get('zz')];
+
+    /* Last: before PHP 8.1 this empties the symbol table but for $key, held through a slot of its own, and the array
+       forms of ucache_get() and ucache_delete() get the symbol table itself (results, then whether the entry exists) */
+    ucache_set('d_entry', 'entry value');
+    UcacheDerivedHolder::$table = $GLOBALS;
+    foreach (array_keys(UcacheDerivedHolder::$table) as $name) {
+        if ($name !== 'key') {
+            unset(UcacheDerivedHolder::$table[$name]);
+        }
+    }
+    $result['keys'] = [ucache_get(UcacheDerivedHolder::$table), ucache_delete(UcacheDerivedHolder::$table), ucache_exists('d_entry')];
+    $result['notices'] = $notices;
+
+    echo "RESULT ", base64_encode(serialize($result)), "\n";
+}
+
+$text = 'old';
+$changer = new UcacheDerivedChanger();
+$key = 'd_entry';
+derived_main();
+CHILDSCRIPT
+    );
+
     $globals = child_start('gb-globals', child_php_args($poolBase . 'gb', [], $clientScript, ['globals']));
+    $noVars = child_start('gn-globals-novars', child_php_args($poolBase . 'gn', [], $noVarsScript));
+    $derived = child_start('gd-globals-derived', child_php_args($poolBase . 'gd', [], $derivedScript));
+
     $globalsExit = child_finish($globals, 30);
     $result = child_result($globals);
     check('(in another process) ucache_set() stores $GLOBALS as a value and as an array of values, with the values of its variables and without those that are not set, also while serializing one adds globals',
           $globalsExit === 0 && $result === [true, true, [], true],
           ['exit code' => $globalsExit, '[stored, read back, keys that failed, variable stored]' => $result, 'output' => child_tail($globals)]);
+
+    /* Before PHP 8.1, the copy-in took a copy of the symbol table only once it met one of these slots, and copied the
+       table as the user code that serializing runs had left it; ucache_get() walked a key array that is the symbol
+       table while unserializing ran user code, which reallocated it */
+    $noVarsExit = child_finish($noVars, 30);
+    $result = child_result($noVars);
+    check('(in another process) from a script without variables at the top level, ucache_set() stores $GLOBALS, as a value or in an array, as it was when it was called, also while serializing an object adds, binds or changes globals; ucache_get() of a key array that is the symbol table reads every key while unserializing an object adds 300 globals',
+          $noVarsExit === 0 && $result === ['adder' => [true, 'original', false, false], 'binder' => [true, 'original', false, false],
+                                            'nested' => [true, 'original', false, false], 'get' => 40, 'notices' => []],
+          ['exit code' => $noVarsExit, '[stored, text, added stored, bound stored] ..., keys read, notices' => $result, 'output' => child_tail($noVars)]);
+
+    /* A list of the slots (array_values($GLOBALS)) used to be copied again and again until memory_limit or a stack
+       overflow ended the process */
+    $derivedExit = child_finish($derived, 30);
+    $result = child_result($derived);
+    check('(in another process) arrays that array_merge(), array_slice(), array_reverse() and array_chunk() make of $GLOBALS are stored with the values of the variables when ucache_set() is called, and so is $GLOBALS while a global holds one; array_values($GLOBALS) is refused before PHP 8.1 (a list of the slots of the symbol table), stored on 8.1+; the array forms of ucache_get() and ucache_delete() read a key array that is the symbol table',
+          $derivedExit === 0 && $result === ['merge' => [true, 'old'], 'slice' => [true, 'old'], 'reverse' => [true, 'old'], 'chunk' => [true, 'old'],
+                                             'values' => PHP_VERSION_ID >= 80100, 'holder' => [true, []], 'array form' => [[], 'array form', 1],
+                                             'keys' => [['d_entry' => 'entry value'], ['d_entry'], false], 'notices' => []],
+          ['exit code' => $derivedExit, 'result' => $result, 'output' => child_tail($derived)]);
 
     /* A block freed between two used blocks goes into the free list, which is kept in address order, without walking the
        entries after it: with WinCache's allocator, deleting every second one of 10000 entries took 0.8 seconds, and the
@@ -3925,26 +4384,64 @@ CHILDSCRIPT
        against a limit of its own on 8.1 and 8.2, which have Fibers but no stack limit. A value that the stack of the
        Fiber takes is stored and read back as anywhere else. Fibers arrived in PHP 8.1 */
     if (PHP_VERSION_ID >= 80100) {
-        $fiber = child_start('w-fiber-fits', child_php_args($poolBase . 'w', ['fiber.stack_size' => '2M'], $clientScript, ['fiber_fits']));
-        $fiberExit = child_finish($fiber, 30);
-        $result = child_result($fiber);
+        /* All at the same time, each on a cache of its own (and v3, started with the scavenger checks above) */
+        $fiberStack = ['fiber.stack_size' => '2M'];
+        $fibers = ['w' => child_start('w-fiber-fits', child_php_args($poolBase . 'w', $fiberStack, $clientScript, ['fiber_fits'])),
+                   'u' => child_start('u-fiber-set', child_php_args($poolBase . 'u', $fiberStack, $clientScript, ['fiber_set'])),
+                   'v' => child_start('v-fiber-get', child_php_args($poolBase . 'v', $fiberStack, $clientScript, ['fiber_get'])),
+                   'v2' => child_start('v2-fiber-gc-cycle', child_php_args($poolBase . 'v2', $fiberStack, $clientScript, ['fiber_get_gc_cycle'])),
+                   'v5' => child_start('v5-fiber-ref-chain', child_php_args($poolBase . 'v5', $fiberStack, $clientScript, ['fiber_get_ref_chain']))];
+
+        $fiberExit = child_finish($fibers['w'], 30);
+        $result = child_result($fibers['w']);
         check('(in another process) inside a Fiber, ucache_set() and ucache_get() of a value nested 1000 levels deep, which the stack of the Fiber takes, store it and read it back intact (PHP 8.1+)',
               $fiberExit === 0 && $result === [true, true, []],
-              ['exit code' => $fiberExit, '[set, read back intact, warnings]' => $result, 'output' => child_tail($fiber)]);
+              ['exit code' => $fiberExit, '[set, read back intact, warnings]' => $result, 'output' => child_tail($fibers['w'])]);
 
-        $fiber = child_start('u-fiber-set', child_php_args($poolBase . 'u', ['fiber.stack_size' => '2M'], $clientScript, ['fiber_set']));
-        $fiberExit = child_finish($fiber, 30);
-        $result = child_result($fiber);
+        $fiberExit = child_finish($fibers['u'], 30);
+        $result = child_result($fibers['u']);
         check('(in another process) inside a Fiber, ucache_set() of a value nested 10000 levels deep returns false without a warning instead of overflowing the C stack, and stores nothing and takes no shared memory (PHP 8.1+)',
               $fiberExit === 0 && $result === [false, [], false, 0],
-              ['exit code' => $fiberExit, '[set, warnings, stored, shared memory taken]' => $result, 'output' => child_tail($fiber)]);
+              ['exit code' => $fiberExit, '[set, warnings, stored, shared memory taken]' => $result, 'output' => child_tail($fibers['u'])]);
 
-        $fiber = child_start('v-fiber-get', child_php_args($poolBase . 'v', ['fiber.stack_size' => '2M'], $clientScript, ['fiber_get']));
-        $fiberExit = child_finish($fiber, 30);
-        $result = child_result($fiber);
+        $fiberExit = child_finish($fibers['v'], 30);
+        $result = child_result($fibers['v']);
         check('(in another process) inside a Fiber, ucache_get() of an entry nested 10000 levels deep returns false without a warning instead of overflowing the C stack, and the entry stays intact (PHP 8.1+)',
               $fiberExit === 0 && $result === [true, false, false, [], true],
-              ['exit code' => $fiberExit, '[set, get, success, warnings, entry intact]' => $result, 'output' => child_tail($fiber)]);
+              ['exit code' => $fiberExit, '[set, get, success, warnings, entry intact]' => $result, 'output' => child_tail($fibers['v'])]);
+
+        /* A copy that fails (here on the stack of the Fiber) leaves what it has built to ucache_get(), its parts not yet
+           converted turned into holes, and ucache_get() releases it once it has released the cache lock: releasing it can
+           start a GC run, which runs destructors (user code) and, run under the lock while the copy unwound, walked the
+           tables that were still being built, whose elements hold offsets into the cache, and crashed the process. A
+           value whose levels link through references leaves a reference half built at each level */
+        $fiberExit = child_finish($fibers['v2'], 60);
+        $result = child_result($fibers['v2']);
+        check('(in another process) inside a Fiber, a ucache_get() that fails on an entry nested too deeply for the stack of the Fiber, whose arrays refer back to the whole value, with the GC root buffer nearly full, returns false without crashing the process, gc_collect_cycles() then frees what it had copied, and the entry stays intact (PHP 8.1+)',
+              $fiberExit === 0 && is_array($result) && array_slice($result, 0, 6) === [true, false, false, [], true, true],
+              ['exit code' => $fiberExit, '[set, get, success, warnings, collected more than the garbage, entry intact, [garbage, collected]]' => $result,
+               'output' => child_tail($fibers['v2'])]);
+
+        $fiberExit = child_finish($fibers['v5'], 60);
+        $result = child_result($fibers['v5']);
+        check('(in another process) the same through references: inside a Fiber, a ucache_get() that fails on an entry whose levels link through references, with the GC root buffer nearly full, returns false without crashing the process, three more such reads do not leak, and the entry stays intact (PHP 8.1+)',
+              $fiberExit === 0 && is_array($result) && array_slice($result, 0, 6) === [true, false, false, [], true, true],
+              ['exit code' => $fiberExit, '[set, get, success, warnings, no leak, entry intact, memory growth]' => $result,
+               'output' => child_tail($fibers['v5'])]);
+
+        /* The GC run that releasing a failed read starts runs its destructors after the cache lock has been released: run
+           under the lock, they held up every other process of the pool (and on PHP 8.3 they ran on the exhausted stack of
+           the copy, which refused them with an Error) */
+        $fiberExit = child_finish($gcDtor, 60);
+        $proberExit = child_finish($gcDtorProber, 40);
+        $result = child_result($gcDtor);
+        $lock = child_result($gcDtorProber);
+        check('(in other processes) inside a Fiber, the destructors of the GC run that a failed ucache_get() starts when it releases what it had copied run after the cache lock is released: another process stores meanwhile without waiting for them (PHP 8.1+)',
+              $gcDtorProberReady && $fiberExit === 0 && $result === [true, false, false, [], true, true, true]
+              && $proberExit === 0 && is_array($lock) && $lock[0] === true && $lock[1] === true && $lock[2] < 1,
+              ['exit codes (reader, other process)' => [$fiberExit, $proberExit],
+               '[set, get, success, warnings, destructors ran, first one from ucache_get(), entry intact]' => $result,
+               'other process [flag seen, set, seconds]' => $lock, 'output' => [child_tail($gcDtor), child_tail($gcDtorProber)]]);
     }
 
     /* memory_limit while ucache_set() copies a value in. The CVE-patched PHP 7.2 of production ends the process with
@@ -4071,6 +4568,10 @@ CHILDSCRIPT
     $loops = ['list_oom'     => 'ucache_info() copies the key list (8000 keys of 4090 characters)',
               'info_oom'     => 'ucache_info() builds its array of entries (100000 entries)',
               'getarray_oom' => 'ucache_get() with an array of 100000 keys builds the array of values'];
+
+    /* Started now, checked after the loops (below) */
+    $oom = child_start('v4-oom-gc-cycle', child_php_args($poolBase . 'v4', ['ucache.size' => '64'], $clientScript, ['oom_get_gc_cycle']));
+
     $n = 0;
     foreach ($loops as $mode => $what) {
         $n++;
@@ -4084,6 +4585,20 @@ CHILDSCRIPT
               && ($endedOnLimit || preg_match('/^SHUTDOWN .*Allowed memory size/m', $output) === 1),
               ['exit code' => $exit, 'output' => child_tail($child)]);
     }
+
+    /* memory_limit while ucache_get() copies out a value that refers to itself, with the GC root buffer nearly full. On
+       the runtimes with delayed OOM (8.2.35, 8.3.36, 8.4.27, 8.5.12 and later) the copy stops at the limit and fails;
+       releasing what it had built under the cache lock started a GC run that walked the tables still being built (their
+       elements hold offsets into the cache), and the process crashed. ucache_get() releases it once the lock is
+       released, and PHP raises the fatal error. Elsewhere memory_limit raises the fatal error at once, during the copy,
+       and this checks only that (8.4 and 8.5 before 8.4.27 and 8.5.12 included) */
+    $oomExit = child_finish($oom, 60);
+    $output = child_output($oom);
+    $endedOnLimit = PHP_VERSION_ID < 80000 && $oomExit === 1;
+    check('memory_limit reached while ucache_get() copies out a value that refers to itself, with the GC root buffer nearly full: the memory_limit fatal error, not a crash'
+          . ($endedOnLimit ? ' (this PHP 7 build ends the process on memory_limit instead)' : ''),
+          strpos($output, 'STORED true') !== false && strpos($output, 'Allowed memory size') !== false && limit_exit_ok($oomExit),
+          ['exit code' => $oomExit, 'output' => child_tail($oom)]);
 
     /* A php -S process runs out of memory_limit while ucache_info() copies the list of keys, which it does holding the
        cache lock: the fatal error must not leave the lock taken (the 8000 keys of 4000 characters do not fit in 10M) */

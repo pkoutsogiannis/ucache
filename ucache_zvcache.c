@@ -162,8 +162,8 @@ struct zvcopy_prepared
     HashTable         refvals;           /* zend_reference address -> the value it had when the walk reached it, held */
     HashTable         objects;           /* zend_object address -> the object (IS_PTR, held by held) until it is serialized,
                                             then its serialization (persistent string), NULL if empty */
-    HashTable         flattened;         /* Symbol table address -> its copy without IS_INDIRECT slots, held (see
-                                            copyin_prepare_walk) */
+    HashTable         flattened;         /* Address of the symbol table, or of a table that holds slots of it -> its copy
+                                            without IS_INDIRECT slots, held (see copyin_prepare_walk); before PHP 8.1 only */
     zvcopy_stack      stack;             /* The C stack of the walk */
 };
 
@@ -374,7 +374,9 @@ static void copyin_object_dtor(zval * pzval)
  * - nothing that phase 2 records in its translation table can be freed and its address reused
  *   by something else that is copied later;
  * - a PHP reference is not copied on write, user code can assign it another value.  So the walk
- *   also keeps the value each reference had, and phase 2 copies that value.
+ *   also keeps the value each reference had, and phase 2 copies that value;
+ * - the symbol table ($GLOBALS before PHP 8.1) is not copied on write either: the walk takes a
+ *   copy of it, and phase 2 copies that copy (see copyin_prepare_walk).
  * The entry thus holds the value as it was when ucache_set() was called.  Only objects are taken
  * as they are when they are serialized, in the order of the walk, as serialize() does.  Each
  * object is serialized once, on its own, as a top-level serialize() of it would be (see
@@ -571,6 +573,26 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
                 break;
             }
 
+#if PHP_VERSION_ID < 80100
+            /*
+             * $GLOBALS before PHP 8.1, wherever it is in the value: the symbol table itself.  Its
+             * zval is not refcounted, so holding it protects nothing (user code changes the table
+             * in place, it is never copied on write), and its slots point to the variables of the
+             * code (IS_INDIRECT).  So the value takes a copy of it now, before any user code runs,
+             * that holds the variables themselves, as zend_array_dup() makes it (without the
+             * variables that are not set), and phase 2 copies that copy (see copyin_flattened), as
+             * PHP's serialize() takes the variables.  Always, not only when the table has an
+             * IS_INDIRECT slot: a script without variables at the top level has none.
+             */
+            if(Z_ARR_P(pzval) == &EG(symbol_table))
+            {
+                ZVAL_ARR(&value, zend_array_dup(Z_ARR_P(pzval)));
+                zend_hash_index_add_new(&pprep->flattened, ucache_addr_key(Z_ARR_P(pzval)), &value);
+                result = copyin_prepare_walk(pprep, &value, depth);
+                break;
+            }
+#endif
+
             ZEND_HASH_FOREACH_VAL(Z_ARR_P(pzval), pelem)
             {
                 /* Scalars and strings need nothing (see above) */
@@ -579,7 +601,7 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
                     continue;
                 }
 
-                /* A symbol table (see below) */
+                /* A slot of the symbol table that an array function copied (see below) */
                 if(Z_TYPE_P(pelem) == IS_INDIRECT)
                 {
                     indirect = 1;
@@ -595,13 +617,22 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
             ZEND_HASH_FOREACH_END();
 
             /*
-             * A symbol table, whose slots point to the variables of the code (IS_INDIRECT): $GLOBALS
-             * before PHP 8.1.  The value takes a copy of it that holds the variables themselves, as
-             * zend_array_dup() makes it (without the variables that are not set), and phase 2 copies
-             * that copy (see copyin_flattened), as PHP's serialize() takes the variables.
+             * Before PHP 8.1, array_merge(), array_slice(), array_reverse(), array_chunk(),
+             * array_values(), ... of $GLOBALS copy the slots of the symbol table as they are
+             * (IS_INDIRECT).  A hash table: the value takes a copy of it that holds the variables,
+             * as for the symbol table itself.  zend_array_dup() keeps the slots of a packed table
+             * (array_values($GLOBALS)), so its copy would be copied again and again, at the same
+             * depth, until memory_limit or a stack overflow ended the process: it is refused.
              */
             if(indirect && SUCCEEDED(result))
             {
+                if(HT_IS_PACKED(Z_ARR_P(pzval)))
+                {
+                    dprintimportant("copyin_prepare_walk: a list that holds slots of the symbol table cannot be stored");
+                    result = FATAL_ZVCACHE_INVALID_ZVAL;
+                    break;
+                }
+
                 ZVAL_ARR(&value, zend_array_dup(Z_ARR_P(pzval)));
                 zend_hash_index_add_new(&pprep->flattened, ucache_addr_key(Z_ARR_P(pzval)), &value);
                 result = copyin_prepare_walk(pprep, &value, depth);
@@ -788,7 +819,7 @@ Finished:
     return result;
 }
 
-/* Phase 2: the table to copy for *ptable, phase 1's copy of it if it is a symbol table (see copyin_prepare_walk) */
+/* Phase 2: the table to copy for *ptable, phase 1's copy of it if it is the symbol table or holds slots of it (see copyin_prepare_walk) */
 static zend_always_inline HashTable * copyin_flattened(zvcopy_context * pcopy, HashTable * ptable)
 {
     zval * pflat = NULL;
@@ -1105,8 +1136,8 @@ static zend_bool unserialize_pending_objects(zend_llist * ppending, unsigned cha
         pobj != NULL;
         pobj = (zvcache_pending_object *)zend_llist_get_next_ex(ppending, &pos))
     {
-        /* After a failure or an exception, leave the remaining placeholders NULL.  Without process,
-         * pobj->pzval must not be used: it can point into a table that a failed copyout released. */
+        /* After a failure or an exception, leave the remaining placeholders NULL.  Without process
+         * (the copy failed), pobj->pzval is not used: zvcache_get() releases the value whole. */
         if(ok)
         {
             ok = unserialize_object(pobj->pzval, pobj->pserialized);
@@ -1122,14 +1153,15 @@ static zend_bool unserialize_pending_objects(zend_llist * ppending, unsigned cha
 /*
  * pcached is the cached zval (value = offset into the cache); *ppcopied is the zval that
  * receives the copied out value.  Both can be the same zval: elements and reference values
- * are memcpy'd from the cache first and then converted in place.
+ * are memcpy'd from the cache first and then converted in place.  After a failure *ppcopied
+ * holds what was built, safe to destroy, or NULL: this runs under the cache lock, and releases
+ * nothing (see zvcache_get).
  */
 static int copyout_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * phtable, zend_llist * ppending, zval * pcached, zval ** ppcopied)
 {
     int                    result     = NONFATAL;
     zval *                 pnewzv     = NULL;
     zval                   cached;
-    zval                   partial;
     zend_string *          ptmp_str   = NULL;
     HashTable *            phashtable = NULL;
     unsigned char          isfirst    = 0;
@@ -1196,47 +1228,48 @@ static int copyout_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTa
                 phtable = NULL;
             }
 
-            if(FAILED(result))
+            /*
+             * A failed copy leaves what it has built in place of the cached zval, NULL if it built
+             * nothing: the elements of the table that were not converted are holes (see
+             * copyout_hashtable), so it is safe to destroy, and the callers up to zvcache_get()
+             * leave their own tables the same way.  Nothing is released here: releasing can start
+             * a GC run, which runs destructors (user code) under the cache lock and walks the
+             * tables that are still being built, whose unconverted elements hold cache offsets.
+             * zvcache_get() releases the whole value once it has released the lock.
+             */
+            if(phashtable == NULL)
             {
-                /*
-                 * Release the partially built table: its elements that were not converted are
-                 * holes (see copyout_hashtable), so it is safe to destroy.  Other parts of the
-                 * value that already point at it keep their own reference; a cycle goes to the
-                 * GC root buffer.  Nothing reads the translation table any more, and the pending
-                 * objects are not unserialized after a failure (their placeholders are not
-                 * touched).  Through a zval: zend_array_release() only exists since 8.0.
-                 */
-                if(phashtable != NULL)
-                {
-                    ZVAL_ARR(&partial, phashtable);
-                    zval_ptr_dtor(&partial);
-                    phashtable = NULL;
-                }
-
+                _ASSERT(FAILED(result));
                 ZVAL_NULL(pnewzv);
                 goto Finished;
             }
 
             ZVAL_ARR(pnewzv, phashtable);
             phashtable = NULL;
+
+            if(FAILED(result))
+            {
+                goto Finished;
+            }
             break;
 
         case IS_REFERENCE:
             result = copyout_reference(pcache, pcopy, phtable, ppending, (zend_reference *)ZVALUE(pcache->incopy, (size_t)Z_REF(cached)), &pref);
-            if(FAILED(result))
-            {
-                /* Release the partially built reference (its value is NULL), as for a table */
-                if(pref != NULL)
-                {
-                    ZVAL_REF(&partial, pref);
-                    zval_ptr_dtor(&partial);
-                    pref = NULL;
-                }
 
+            /* After a failure, what was built is left in place as for a table: its value is safe to destroy */
+            if(pref == NULL)
+            {
+                _ASSERT(FAILED(result));
                 ZVAL_NULL(pnewzv);
                 goto Finished;
             }
+
             ZVAL_REF(pnewzv, pref);
+
+            if(FAILED(result))
+            {
+                goto Finished;
+            }
             break;
 
         case IS_OBJECT:
@@ -1518,14 +1551,12 @@ static int copyout_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, H
     HT_FLAGS(pnew_table) = (HT_FLAGS(pnew_table) & UCACHE_HT_FLAGS_KEEP) | UCACHE_HT_FLAGS_ADD;
     pnew_table->pDestructor = ZVAL_PTR_DTOR;
 
-    /* Register before copying the elements, so that cycles resolve to this table */
-    zend_hash_index_update_ptr(phtable, ucache_addr_key(pcached), (void *)pnew_table);
-    *ppcopied = pnew_table;
-
-    /* Uninitalized */
+    /* Uninitalized: no data part */
     if (!HT_IS_INITIALIZED(pnew_table)) {
         pnew_table->nTableMask = HT_MIN_MASK;
         HT_SET_DATA_ADDR(pnew_table, &uninitialized_bucket);
+        zend_hash_index_update_ptr(phtable, ucache_addr_key(pcached), (void *)pnew_table);
+        *ppcopied = pnew_table;
         goto Finished;
     }
 
@@ -1544,6 +1575,9 @@ static int copyout_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, H
     ptemp = ZMALLOC(pcopy, alloc_size);
     if (!ptemp)
     {
+        /* Nothing refers to the header yet: free it, and the caller's slot becomes NULL */
+        ZFREE(pcopy, pnew_table);
+        pnew_table = NULL;
         result = pcopy->oomcode;
         goto Finished;
     }
@@ -1551,6 +1585,15 @@ static int copyout_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, H
     memcpy(ptemp, ZVALUE_HT_GET_DATA_ADDR(pcache->incopy, pcached), used_size);
     HT_SET_DATA_ADDR(pnew_table, ptemp);
     ptemp = NULL;
+
+    /*
+     * Register before copying the elements, so that cycles resolve to this table, but only now
+     * that its data part is in request memory: once the table is registered (or returned), other
+     * parts of the value can refer to it, so it must stay safe to destroy whatever fails, and
+     * every later failure turns the elements not yet converted into holes (see Abandon).
+     */
+    zend_hash_index_update_ptr(phtable, ucache_addr_key(pcached), (void *)pnew_table);
+    *ppcopied = pnew_table;
 
     /*
      * Each element is checked against memory_limit once it is copied (see
@@ -1604,11 +1647,12 @@ static int copyout_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, H
 Abandon:
 
     /*
-     * Corrupted cache entry, or memory_limit reached.  Element idx has been converted (or set
-     * to NULL by copyout_zval), the elements after it still hold cache offsets: turn them
-     * into holes so that the table stays safe to destroy.  The table is not freed here, since
-     * other values copied out by this call may already point at it; copyout_zval releases its
-     * own reference to it.
+     * Corrupted cache entry, memory_limit reached, or nested too deeply for the C stack left.
+     * Element idx has been converted, or holds what copyout_zval built before it failed, or
+     * NULL; the elements after it still hold cache offsets: turn them into holes so that the
+     * table stays safe to destroy.  The table is not freed here: copyout_zval leaves it in
+     * place of the cached zval, and zvcache_get() releases the whole value once it has released
+     * the cache lock.
      */
     for (jdx = idx + 1; jdx < pnew_table->nNumUsed; jdx++) {
         pnewzv = HT_IS_PACKED(pnew_table) ? UCACHE_HT_PACKED_ZVAL(pnew_table, jdx) : &pnew_table->arData[jdx].val;
@@ -3043,6 +3087,7 @@ int zvcache_get(zvcache_context * pcache, const char * key, zval ** pvalue)
     zend_llist       pending;
     zvcopy_context   outcopy;
     zvcopy_stack     stack;
+    zval             released;
     volatile unsigned char bailout = 0;
 
     dprintverbose("start zvcache_get");
@@ -3050,6 +3095,9 @@ int zvcache_get(zvcache_context * pcache, const char * key, zval ** pvalue)
     _ASSERT(pcache != NULL);
     _ASSERT(key    != NULL);
     _ASSERT(pvalue != NULL);
+
+    /* NULL until the copy fills it: whatever happens, *pvalue can be released below */
+    ZVAL_NULL(*pvalue);
 
     /* objects found by the copyout, unserialized after the lock is released */
     zend_llist_init(&pending, sizeof(zvcache_pending_object), NULL, 0);
@@ -3092,6 +3140,8 @@ int zvcache_get(zvcache_context * pcache, const char * key, zval ** pvalue)
      * A fatal error while copying out (memory_limit reached by a big value) longjmps out
      * of here.  Release the cache lock before propagating it: a FastCGI process survives
      * the fatal error and would keep the mutex, blocking every other process forever.
+     * What the copy had built is left to request shutdown, unreleased: no failure path made
+     * holes of its unconverted elements, which still hold cache offsets.
      */
     zend_try
     {
@@ -3130,23 +3180,31 @@ Finished:
     free_pending_entries(pcache);
 
     /*
-     * The shared memory is not touched any more: user code may run now.  After a failure the
-     * placeholders can belong to tables that copyout_zval() has already released: only the
-     * serialized strings are released then, the placeholders are not touched.
+     * The shared memory is not touched any more: user code may run now.  After a failed copy
+     * the placeholders stay NULL: only the serialized strings are released.
      */
     if(!unserialize_pending_objects(&pending, SUCCEEDED(result)) && SUCCEEDED(result))
     {
         /* An object of the value could not be unserialized: return nothing rather than a NULL in
          * its place, as unserialize() returns false (the entry stays, for processes that can) */
-        zval_ptr_dtor(*pvalue);
-        ZVAL_NULL(*pvalue);
         result = FATAL_ZVCACHE_INVALID_ZVAL;
     }
     zend_llist_destroy(&pending);
 
+    /*
+     * A value that is not returned is released here, without the cache lock: releasing can start
+     * a GC run, which runs destructors.  After a failed copy it is what the copy had built, with
+     * holes for the parts it had not converted (see copyout_zval).  *pvalue is NULL before the
+     * release starts, so that it never points into a value being destroyed, even if a destructor
+     * raises a fatal error.
+     */
     if(FAILED(result))
     {
         dprintimportant("failure %d in zvcache_get", result);
+
+        ZVAL_COPY_VALUE(&released, *pvalue);
+        ZVAL_NULL(*pvalue);
+        zval_ptr_dtor(&released);
     }
 
     dprintverbose("end zvcache_get");

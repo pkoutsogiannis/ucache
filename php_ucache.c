@@ -74,6 +74,7 @@ static zend_function_entry * ucache_registered_functions = NULL;
 static unsigned char ucache_size_read = SIZE_READ_AS_WRITTEN;
 
 static void set_success(zval * success, zend_bool value);
+static HashTable * array_form_table(zval * pzarray, zval * psnapshot);
 static void set_or_add(INTERNAL_FUNCTION_PARAMETERS, unsigned char isadd);
 static void inc_or_dec(INTERNAL_FUNCTION_PARAMETERS, unsigned char isdec);
 static int functions_register(int type);
@@ -832,6 +833,30 @@ static void set_success(zval * success, zend_bool value)
 #endif
 }
 
+/* The table that the array forms of ucache_get(), ucache_set(), ucache_add() and ucache_delete() */
+/* walk for the array *pzarray. $GLOBALS before PHP 8.1 is the symbol table itself, which nothing */
+/* holds (its zval is not refcounted): the user code that getting or storing a key can run */
+/* (__sleep(), __serialize(), __wakeup(), __unserialize(), destructors) can add a global, which */
+/* reallocates the table under the loop. So they walk a copy of it, made before any of that runs, */
+/* which takes the values of the variables (IS_INDIRECT slots) and leaves out those that are not */
+/* set, as $GLOBALS is from PHP 8.1 on; ucache_delete(), which runs no user code, walks one too, */
+/* so that the four read such an array alike. *psnapshot receives the copy: the caller */
+/* initializes it as UNDEF and releases it with zval_ptr_dtor() */
+static HashTable * array_form_table(zval * pzarray, zval * psnapshot)
+{
+    HashTable * htable = Z_ARRVAL_P(pzarray);
+
+#if PHP_VERSION_ID < 80100
+    if(htable == &EG(symbol_table))
+    {
+        ZVAL_ARR(psnapshot, zend_array_dup(htable));
+        htable = Z_ARRVAL_P(psnapshot);
+    }
+#endif
+
+    return htable;
+}
+
 /* Functions */
 
 /* Every function parses its arguments first: on PHP 8, a call that does not match the arginfo */
@@ -878,6 +903,10 @@ PHP_FUNCTION(ucache_get)
     zend_string * zkey     = NULL;
     char         digits[MAX_ARRAY_INDEX_DIGITS] = {0};
     zend_bool    isarray   = 0;
+    zval         snapshot;
+
+    /* See array_form_table; released at Finished */
+    ZVAL_UNDEF(&snapshot);
 
     if(zend_parse_parameters(ZEND_NUM_ARGS(), "z|z", &pzkey, &success) == FAILURE)
     {
@@ -935,7 +964,7 @@ PHP_FUNCTION(ucache_get)
     {
         array_init(return_value);
         isarray = 1;
-        htable = Z_ARRVAL_P(pzkey);
+        htable = array_form_table(pzkey, &snapshot);
         ZEND_HASH_FOREACH_VAL(htable, hentry)
         {
             /* An element can be a reference (a foreach by reference leaves them in the array) */
@@ -1009,6 +1038,8 @@ PHP_FUNCTION(ucache_get)
     }
 
 Finished:
+
+    zval_ptr_dtor(&snapshot);
 
     if(FAILED(result))
     {
@@ -1125,25 +1156,15 @@ static void set_or_add(INTERNAL_FUNCTION_PARAMETERS, unsigned char isadd)
     else if(Z_TYPE_P(pzkey) == IS_ARRAY)
     {
         array_init(return_value);
-        htable = Z_ARRVAL_P(pzkey);
         ZVAL_UNDEF(&snapshot);
-
-#if PHP_VERSION_ID < 80100
-        /* $GLOBALS before PHP 8.1 is the symbol table itself, which nothing holds: the user code */
-        /* that storing a value runs (__sleep(), __serialize(), destructors) can add a global, which */
-        /* reallocates the table under the loop. So the loop walks a copy of it */
-        if(htable == &EG(symbol_table))
-        {
-            ZVAL_ARR(&snapshot, zend_array_dup(htable));
-            htable = Z_ARRVAL(snapshot);
-        }
-#endif
+        htable = array_form_table(pzkey, &snapshot);
 
         /* See zvcache_peak_over_memory_limit */
         peak0 = zend_memory_peak_usage(1);
 
-        /* _IND: $GLOBALS before PHP 8.1 holds the variables through IS_INDIRECT slots, and the */
-        /* slots of the variables that are not set are left out, as from any copy of it */
+        /* _IND: before PHP 8.1, an array that array_merge(), array_slice(), ... made of $GLOBALS */
+        /* holds slots of the symbol table (IS_INDIRECT), which point to the variables: the loop */
+        /* takes their values, and leaves out the slots of the variables that are not set */
         ZEND_HASH_FOREACH_KEY_VAL_IND(htable, num_key, key, hentry)
         {
             char alloc_str = 0;
@@ -1239,6 +1260,10 @@ PHP_FUNCTION(ucache_delete)
     char *        key      = NULL;
     char          digits[MAX_ARRAY_INDEX_DIGITS] = {0};
     zend_bool     isarray  = 0;
+    zval          snapshot;
+
+    /* See array_form_table; released at Finished */
+    ZVAL_UNDEF(&snapshot);
 
     if(zend_parse_parameters(ZEND_NUM_ARGS(), "z", &pzkey) == FAILURE)
     {
@@ -1284,7 +1309,7 @@ PHP_FUNCTION(ucache_delete)
     {
         array_init(return_value);
         isarray = 1;
-        htable = Z_ARRVAL_P(pzkey);
+        htable = array_form_table(pzkey, &snapshot);
         ZEND_HASH_FOREACH_VAL(htable, hentry)
         {
             /* An element can be a reference (see ucache_get); the string, not the reference, is returned */
@@ -1335,6 +1360,8 @@ PHP_FUNCTION(ucache_delete)
     }
 
 Finished:
+
+    zval_ptr_dtor(&snapshot);
 
     if(FAILED(result))
     {

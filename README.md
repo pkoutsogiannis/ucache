@@ -390,7 +390,12 @@ Values are copied into shared memory on write and copied back on read. Scalars, 
 nested arrays and references between their elements) are stored as they are; objects are serialized on write and
 unserialized on read; resources cannot be stored. `$GLOBALS`, as a value or as the array of the array forms, is
 stored as the global variables it holds, without those that are not set, as `serialize()` takes them (before PHP 8.1
-its entries point to the variables).
+its entries point to the variables). Before PHP 8.1, `array_merge()`, `array_slice()`, `array_reverse()`,
+`array_chunk()` and the like copy those entries as they are into the arrays they make of `$GLOBALS`: such an array is
+stored the same way, with the values the variables have when `ucache_set()` is called, but a list of those entries
+(`array_values($GLOBALS)`, or `array_chunk($GLOBALS, 10)` without its keys) is refused: `ucache_set()` and
+`ucache_add()` return false without a warning, as for a resource inside the value. From PHP 8.1 on, `$GLOBALS` is a
+copy, and these are ordinary arrays.
 
 An entry holds the value as it was when `ucache_set()` was called: changes that serializing an object (`__sleep()`,
 `__serialize()`) makes to the rest of the value are not stored, and each object is stored as it is when it is
@@ -431,10 +436,12 @@ An expired entry keeps its memory until it is removed: see [The Scavenger](#the-
 
 Values are copied in without holding the cache lock, and objects are unserialized once it has been released, so
 `__sleep()`, `__serialize()`, `__wakeup()`, `__unserialize()`, `Serializable::serialize()` and
-`Serializable::unserialize()` can call the UCache functions and do not hold up the other processes. A fatal error in
-a cache function does not leave the cross-process lock held either: the other processes of the pool go on. UCache
-serializes and unserializes each object as a top-level `serialize()` or `unserialize()` would, independently of any
-`serialize()` or `unserialize()` that the caller is in the middle of.
+`Serializable::unserialize()` can call the UCache functions and do not hold up the other processes. Destructors do not
+run under the lock either: the cache functions free PHP values only once it has been released (a `ucache_get()` that
+fails frees what it had copied then), so PHP's garbage collector, which can call destructors when a value is freed,
+never runs under it. Nor does a fatal error in a cache function leave the cross-process lock held: the other processes
+of the pool go on. UCache serializes and unserializes each object as a top-level `serialize()` or `unserialize()`
+would, independently of any `serialize()` or `unserialize()` that the caller is in the middle of.
 
 ### memory_limit
 
@@ -1839,8 +1846,11 @@ Several of these change what existing code sees.
   make a read take about 8 microseconds and a miss 14, against 1.5 when they are spread.
 - A `ttl` is taken as given up to 4294967295 seconds, and as 4294967295 above. WinCache 2.0.0.8 cut it to 32 bits:
   2147483648 to 4294967295 were refused as negative ttls, 4294967296 meant no expiry and 4294967297 one second.
-- `$GLOBALS` can be stored, as a value or with the array forms (see [Values](#values)). WinCache 2.0.0.8 stored none
-  of it on PHP 7, whose `$GLOBALS` holds its variables through slots that it did not follow.
+- `$GLOBALS` can be stored, as a value or with the array forms, and so can the arrays that `array_merge()`,
+  `array_slice()` and the like make of it, except a list of its entries (see [Values](#values)). On PHP 7, `$GLOBALS`
+  holds the variables that the code at the top level of the script uses through slots, which those functions copy as
+  they are, and which WinCache 2.0.0.8 did not follow: storing `$GLOBALS`, or such an array, as a value failed when the
+  script had such variables, and the array forms failed for each of them and for `GLOBALS` itself.
 - `ucache.size` takes a number of megabytes, always in decimal (`064` is 64), or a size with a `K`, `M` or `G` suffix
   (`64M` is 64 MB). A size outside 5..930 MB is clamped with a startup warning; digits followed by other text are
   taken as megabytes, and any other value gives the default 8 MB, each with a startup warning (see
