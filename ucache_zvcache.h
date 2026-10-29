@@ -102,8 +102,6 @@ struct zvcopy_context
     size_t            allocsize;         /* Amount of memory allocated */
 
     fn_malloc         fnmalloc;          /* Function to use for malloc */
-    fn_realloc        fnrealloc;         /* Function to use for realloc */
-    fn_strdup         fnstrdup;          /* Function to use for strdup */
     fn_free           fnfree;            /* Function to use for free */
 
     /* In the private copies of incopy and outcopy that create_zvcache_data() and zvcache_get() use */
@@ -125,7 +123,6 @@ typedef struct zvcache_context zvcache_context;
 struct zvcache_context
 {
     unsigned int      id;                /* unique identifier for cache */
-    unsigned short    islocal;           /* is the cache local or shared */
     unsigned short    cachekey;          /* unique cache key used in names */
     HANDLE            hinitdone;         /* event indicating if memory is initialized */
 
@@ -145,7 +142,6 @@ typedef struct zvcache_info zvcache_info;
 struct zvcache_info
 {
     unsigned int      initage;           /* Seconds elapsed after cache init */
-    unsigned int      islocal;           /* Is the zvcache local or global */
     unsigned int      hitcount;          /* Cumulative hitcount of zvcache */
     unsigned int      misscount;         /* Cumulative misscount of zvcache */
     unsigned int      itemcount;         /* Number of items including stale ones */
@@ -172,7 +168,6 @@ extern void zvcache_destroy(zvcache_context * pcache);
 
 extern int  zvcache_initialize(
     zvcache_context * pcache,
-    unsigned short islocal,
     unsigned short cachekey,
     unsigned int cachesize
     );

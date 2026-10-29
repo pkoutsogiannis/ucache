@@ -56,8 +56,6 @@
 /* alloc_mpool_segment  - SHARED */
 
 typedef void * (*fn_malloc)(void * palloc, size_t hoffset, size_t size);
-typedef void * (*fn_realloc)(void * palloc, size_t hoffset, void * addr, size_t size);
-typedef char * (*fn_strdup)(void * palloc, size_t hoffset, const char * str);
 typedef void   (*fn_free)(void * palloc, size_t hoffset, void * addr);
 
 /* TBD? Right now I am doing a custom implementation which will probably work */
@@ -120,7 +118,6 @@ typedef struct alloc_context alloc_context;
 struct alloc_context
 {
     unsigned short         id;        /* Unique id of this alloc_context */
-    unsigned short         islocal;   /* Is this allocator local to this process */
     HANDLE                 hinitdone; /* event to indicate if memory is initialized */
     void *                 memaddr;   /* Shared memory segment which is manipulated */
     size_t                 size;      /* Size of memory segment to be allocated */
@@ -140,7 +137,7 @@ struct alloc_info
 
 extern int    alloc_create(alloc_context ** ppalloc);
 extern void   alloc_destroy(alloc_context * palloc);
-extern int    alloc_initialize(alloc_context * palloc, unsigned short islocal, char * name, unsigned short cachekey, void * staddr, size_t size, unsigned char initmemory);
+extern int    alloc_initialize(alloc_context * palloc, char * name, unsigned short cachekey, void * staddr, size_t size, unsigned char initmemory);
 extern void   alloc_terminate(alloc_context * palloc);
 extern int    alloc_create_mpool(alloc_context * palloc, size_t * phoffset);
 extern void   alloc_free_mpool(alloc_context * palloc, size_t hoffset);
@@ -154,13 +151,7 @@ extern void * alloc_emalloc(size_t size);
 extern void * alloc_pemalloc(size_t size);
 extern void * alloc_smalloc(alloc_context * palloc, size_t size);
 
-extern void * alloc_erealloc(void * addr, size_t size);
-extern void * alloc_perealloc(void * addr, size_t size);
-extern void * alloc_srealloc(alloc_context * palloc, void * addr, size_t size);
-
 extern char * alloc_estrdup(const char * str);
-extern char * alloc_pestrdup(const char * str);
-extern char * alloc_sstrdup(alloc_context * palloc, const char * str);
 
 extern void   alloc_efree(void * addr);
 extern void   alloc_pefree(void * addr);
@@ -169,12 +160,6 @@ extern void   alloc_sfree(alloc_context * palloc, void * addr);
 extern void * alloc_oemalloc(alloc_context * palloc, size_t hoffset, size_t size);
 extern void * alloc_osmalloc(alloc_context * palloc, size_t hoffset, size_t size);
 extern void * alloc_ommalloc(alloc_context * palloc, size_t hoffset, size_t size);
-extern void * alloc_oerealloc(alloc_context * palloc, size_t hoffset, void * addr, size_t size);
-extern void * alloc_osrealloc(alloc_context * palloc, size_t hoffset, void * addr, size_t size);
-extern void * alloc_omrealloc(alloc_context * palloc, size_t hoffset, void * addr, size_t size);
-extern char * alloc_oestrdup(alloc_context * palloc, size_t hoffset, const char * str);
-extern char * alloc_osstrdup(alloc_context * palloc, size_t hoffset, const char * str);
-extern char * alloc_omstrdup(alloc_context * palloc, size_t hoffset, const char * str);
 extern void   alloc_oefree(alloc_context * palloc, size_t hoffset, void * addr);
 extern void   alloc_osfree(alloc_context * palloc, size_t hoffset, void * addr);
 extern void   alloc_omfree(alloc_context * palloc, size_t hoffset, void * addr);

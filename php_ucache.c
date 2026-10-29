@@ -60,6 +60,8 @@ static char ucache_namesalt[NAMESALT_LENGTH_MAXIMUM + 1];
 static zend_function_entry * ucache_registered_functions = NULL;
 
 static void set_success(zval * success, zend_bool value);
+static void set_or_add(INTERNAL_FUNCTION_PARAMETERS, unsigned char isadd);
+static void inc_or_dec(INTERNAL_FUNCTION_PARAMETERS, unsigned char isdec);
 static int functions_register(int type);
 static void functions_unregister(void);
 
@@ -106,11 +108,8 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_set, 0, 0, 1)
     UCACHE_ARG_INFO_DEFAULT(0, ttl, "0")
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_add, 0, 0, 1)
-    ZEND_ARG_INFO(0, key)
-    UCACHE_ARG_INFO_DEFAULT(0, value, "null")
-    UCACHE_ARG_INFO_DEFAULT(0, ttl, "0")
-ZEND_END_ARG_INFO()
+/* The same parameters (see set_or_add), as PHP 8's gen_stub.php writes identical arginfo */
+#define arginfo_ucache_add arginfo_ucache_set
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_delete, 0, 0, 1)
     ZEND_ARG_INFO(0, key)
@@ -136,11 +135,8 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_inc, 0, 0, 1)
     UCACHE_ARG_INFO_DEFAULT(1, success, "null")
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_dec, 0, 0, 1)
-    ZEND_ARG_INFO(0, key)
-    UCACHE_ARG_INFO_DEFAULT(0, delta, "1")
-    UCACHE_ARG_INFO_DEFAULT(1, success, "null")
-ZEND_END_ARG_INFO()
+/* The same parameters (see inc_or_dec) */
+#define arginfo_ucache_dec arginfo_ucache_inc
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_cas, 0, 0, 3)
     ZEND_ARG_INFO(0, key)
@@ -416,8 +412,8 @@ PHP_MINIT_FUNCTION(ucache)
         goto Finished;
     }
 
-    /* islocal = 0, cachekey = 1 */
-    result = zvcache_initialize(pzcache, 0, 1, UCG(ucachesize));
+    /* cachekey = 1 */
+    result = zvcache_initialize(pzcache, 1, UCG(ucachesize));
     if(FAILED(result))
     {
         goto Finished;
@@ -764,7 +760,8 @@ Finished:
     }
 }
 
-PHP_FUNCTION(ucache_set)
+/* ucache_set() and ucache_add(), which differ only in isadd: an add fails on a key that exists */
+static void set_or_add(INTERNAL_FUNCTION_PARAMETERS, unsigned char isadd)
 {
     int           result   = NONFATAL;
     zval *        pzkey    = NULL;
@@ -851,8 +848,7 @@ PHP_FUNCTION(ucache_set)
             goto Finished;
         }
 
-        /* isadd = 0 */
-        result = zvcache_set(UCG(zvucache), Z_STRVAL_P(pzkey), pzval, ttl, 0);
+        result = zvcache_set(UCG(zvucache), Z_STRVAL_P(pzkey), pzval, ttl, isadd);
         if(FAILED(result))
         {
             goto Finished;
@@ -901,8 +897,7 @@ PHP_FUNCTION(ucache_set)
             }
             else
             {
-                /* isadd = 0 */
-                result = zvcache_set(UCG(zvucache), ZSTR_VAL(key), hentry, ttl, 0);
+                result = zvcache_set(UCG(zvucache), ZSTR_VAL(key), hentry, ttl, isadd);
             }
 
             if(FAILED(result))
@@ -947,197 +942,9 @@ Finished:
     {
         UCG(uclasterror) = result;
 
-        dprintimportant("failure %d in ucache_set", result);
+        dprintimportant("failure %d in %s", result, isadd ? "ucache_add" : "ucache_set");
 
-        RETURN_FALSE;
-    }
-}
-
-PHP_FUNCTION(ucache_add)
-{
-    int           result   = NONFATAL;
-    zval *        pzkey    = NULL;
-    zval *        pzval    = NULL;
-    unsigned int  ttl      = 0;
-    zend_long     lttl     = 0;
-    HashTable *   htable   = NULL;
-    zval *        hentry   = NULL;
-    zend_ulong    num_key;
-    zend_string * key      = NULL;
-    int           keylen   = 0;
-    char          digits[MAX_ARRAY_INDEX_DIGITS] = {0};
-    size_t        peak0    = 0;
-    unsigned char stop     = 0;
-    zval          snapshot;
-
-    /* "l" stores a full zend_long, so parse into lttl and keep ttl the entry's unsigned int */
-    if(zend_parse_parameters(ZEND_NUM_ARGS(), "z|zl", &pzkey, &pzval, &lttl) == FAILURE)
-    {
-        result = FATAL_INVALID_ARGUMENT;
-        goto Finished;
-    }
-
-    /* If the user cache is disabled, return false */
-    if(!UCG(ucenabled))
-    {
-        RETURN_FALSE;
-    }
-
-    if(UCG(zvucache) == NULL)
-    {
-        result = FATAL_UNEXPECTED_FCALL;
-        goto Finished;
-    }
-
-    /* Negative ttl and resource values are not allowed */
-    if(lttl < 0)
-    {
-        php_error_docref(NULL, E_WARNING, "ttl cannot be less than 0");
-
-        result = WARNING_ZVCACHE_ARGUMENT;
-        goto Finished;
-    }
-
-    /* A ttl beyond the entry's unsigned int is its maximum: an entry expires once its age in */
-    /* GetTickCount() milliseconds passes it, and no age passes 4294967 seconds anyway */
-    ttl = ((zend_ulong)lttl > UINT_MAX) ? UINT_MAX : (unsigned int)lttl;
-
-    if(pzval && Z_TYPE_P(pzval) == IS_RESOURCE)
-    {
-        php_error_docref(NULL, E_WARNING, "value cannot be a resource");
-
-        result = WARNING_ZVCACHE_RESCOPYIN;
-        goto Finished;
-    }
-
-    if(Z_TYPE_P(pzkey) != IS_STRING && Z_TYPE_P(pzkey) != IS_ARRAY)
-    {
-        convert_to_string(pzkey);
-
-        /* An object without __toString() (see ucache_get) */
-        if(EG(exception))
-        {
-            result = FATAL_INVALID_ARGUMENT;
-            goto Finished;
-        }
-    }
-
-    if(Z_TYPE_P(pzkey) == IS_STRING)
-    {
-        /* Blank string as key is not allowed */
-        if(Z_STRLEN_P(pzkey) == 0 || *(Z_STRVAL_P(pzkey)) == '\0')
-        {
-            php_error_docref(NULL, E_WARNING, "key cannot be blank string");
-
-            result = WARNING_ZVCACHE_ARGUMENT;
-            goto Finished;
-        }
-
-        /* When first argument is string, value is required */
-        if(pzval == NULL || Z_STRLEN_P(pzkey) > 4096)
-        {
-            result = WARNING_ZVCACHE_ARGUMENT;
-            goto Finished;
-        }
-
-        /* isadd = 1 */
-        result = zvcache_set(UCG(zvucache), Z_STRVAL_P(pzkey), pzval, ttl, 1);
-        if(FAILED(result))
-        {
-            goto Finished;
-        }
-
-        ZVAL_BOOL(return_value, 1);
-    }
-    else if(Z_TYPE_P(pzkey) == IS_ARRAY)
-    {
-        array_init(return_value);
-        htable = Z_ARRVAL_P(pzkey);
-        ZVAL_UNDEF(&snapshot);
-
-#if PHP_VERSION_ID < 80100
-        /* $GLOBALS before PHP 8.1 is the symbol table itself, which nothing holds: the user code */
-        /* that storing a value runs (__sleep(), __serialize(), destructors) can add a global, which */
-        /* reallocates the table under the loop. So the loop walks a copy of it */
-        if(htable == &EG(symbol_table))
-        {
-            ZVAL_ARR(&snapshot, zend_array_dup(htable));
-            htable = Z_ARRVAL(snapshot);
-        }
-#endif
-
-        /* See zvcache_peak_over_memory_limit */
-        peak0 = zend_memory_peak_usage(1);
-
-        /* _IND: $GLOBALS before PHP 8.1 holds the variables through IS_INDIRECT slots, and the */
-        /* slots of the variables that are not set are left out, as from any copy of it */
-        ZEND_HASH_FOREACH_KEY_VAL_IND(htable, num_key, key, hentry)
-        {
-            char alloc_str = 0;
-
-            /* We are taking care of long keys properly */
-            if(!key)
-            {
-                /* Convert num_key to string and use that instead (integer keys are signed) */
-                keylen = snprintf(digits, MAX_ARRAY_INDEX_DIGITS, ZEND_LONG_FMT, (zend_long)num_key);
-                key = zend_string_init(digits, keylen, 0);
-                alloc_str = 1;
-            }
-
-            if(ZSTR_LEN(key) > 4096 || Z_TYPE_P(hentry) == IS_RESOURCE)
-            {
-                result = WARNING_ZVCACHE_ARGUMENT;
-            }
-            else
-            {
-                /* isadd = 1 */
-                result = zvcache_set(UCG(zvucache), ZSTR_VAL(key), hentry, ttl, 1);
-            }
-
-            if(FAILED(result))
-            {
-                add_assoc_long_ex(return_value, ZSTR_VAL(key), ZSTR_LEN(key), -1);
-
-                /* memory_limit passed with delayed OOM: PHP raises the fatal error when this
-                 * call returns, store nothing more (see zvcache_peak_over_memory_limit) */
-                if(result == FATAL_OUT_OF_LMEMORY && zvcache_peak_over_memory_limit(peak0))
-                {
-                    stop = 1;
-                }
-            }
-
-            if (alloc_str == 1)
-            {
-                zend_string_release(key);
-                alloc_str = 0;
-            }
-
-            result  = NONFATAL;
-            key     = NULL;
-
-            /* Serializing an object threw (Closure, __sleep, __serialize), or memory_limit was
-             * passed (see above): stop there */
-            if(EG(exception) || stop)
-            {
-                break;
-            }
-        } ZEND_HASH_FOREACH_END();
-
-        zval_ptr_dtor(&snapshot);
-    }
-    else
-    {
-        _ASSERT(FALSE);
-    }
-
-Finished:
-
-    if(FAILED(result))
-    {
-        UCG(uclasterror) = result;
-
-        dprintimportant("failure %d in ucache_add", result);
-
+        /* Only an add gets WARNING_ZVCACHE_EXISTS */
         if(result == WARNING_ZVCACHE_EXISTS)
         {
             php_error_docref(NULL, E_WARNING, "function called with a key which already exists");
@@ -1145,6 +952,16 @@ Finished:
 
         RETURN_FALSE;
     }
+}
+
+PHP_FUNCTION(ucache_set)
+{
+    set_or_add(INTERNAL_FUNCTION_PARAM_PASSTHRU, 0);
+}
+
+PHP_FUNCTION(ucache_add)
+{
+    set_or_add(INTERNAL_FUNCTION_PARAM_PASSTHRU, 1);
 }
 
 PHP_FUNCTION(ucache_delete)
@@ -1425,7 +1242,8 @@ PHP_FUNCTION(ucache_info)
     /* Fill the array and then call zend_llist_destroy */
     array_init(return_value);
     add_assoc_long(return_value, "total_cache_uptime", zvinfo.initage);
-    add_assoc_bool(return_value, "is_local_cache", zvinfo.islocal);
+    /* Always false: the user cache is always the one shared by the processes of the pool */
+    add_assoc_bool(return_value, "is_local_cache", 0);
     add_assoc_long(return_value, "total_item_count", zvinfo.itemcount);
     add_assoc_long(return_value, "total_hit_count", zvinfo.hitcount);
     add_assoc_long(return_value, "total_miss_count", zvinfo.misscount);
@@ -1507,7 +1325,8 @@ Finished:
     return;
 }
 
-PHP_FUNCTION(ucache_inc)
+/* ucache_inc() and ucache_dec(), which differ only in isdec: a dec adds -delta */
+static void inc_or_dec(INTERNAL_FUNCTION_PARAMETERS, unsigned char isdec)
 {
     int          result  = NONFATAL;
     char *       key     = NULL;
@@ -1546,6 +1365,12 @@ PHP_FUNCTION(ucache_inc)
         }
     }
 
+    /* Wraps around like zvcache_change(), without signed overflow: -ZEND_LONG_MIN is ZEND_LONG_MIN */
+    if(isdec)
+    {
+        delta = (zend_long)(0 - (zend_ulong)delta);
+    }
+
     result = zvcache_change(UCG(zvucache), key, delta, &newval);
     if(FAILED(result))
     {
@@ -1565,7 +1390,7 @@ Finished:
     {
         UCG(uclasterror) = result;
 
-        dprintimportant("failure %d in ucache_inc", result);
+        dprintimportant("failure %d in %s", result, isdec ? "ucache_dec" : "ucache_inc");
 
         if(result == WARNING_ZVCACHE_NOTLONG)
         {
@@ -1578,78 +1403,14 @@ Finished:
     RETURN_LONG(newval);
 }
 
+PHP_FUNCTION(ucache_inc)
+{
+    inc_or_dec(INTERNAL_FUNCTION_PARAM_PASSTHRU, 0);
+}
+
 PHP_FUNCTION(ucache_dec)
 {
-    int          result  = NONFATAL;
-    char *       key     = NULL;
-    size_t       keylen  = 0;
-    zend_long    delta   = 1;
-    zend_long    newval  = 0;
-    zval *       success = NULL;
-
-    if(zend_parse_parameters(ZEND_NUM_ARGS(), "s|lz", &key, &keylen, &delta, &success) == FAILURE)
-    {
-        result = FATAL_INVALID_ARGUMENT;
-        goto Finished;
-    }
-
-    /* If the user cache is disabled, return false */
-    if(!UCG(ucenabled))
-    {
-        RETURN_FALSE;
-    }
-
-    if(UCG(zvucache) == NULL)
-    {
-        result = FATAL_UNEXPECTED_FCALL;
-        goto Finished;
-    }
-
-    if(success != NULL)
-    {
-        set_success(success, 0);
-
-        /* A typed reference that cannot hold a bool threw a TypeError */
-        if(EG(exception))
-        {
-            result = FATAL_INVALID_ARGUMENT;
-            goto Finished;
-        }
-    }
-
-    /* Convert to negative number */
-    delta = -delta;
-
-    result = zvcache_change(UCG(zvucache), key, delta, &newval);
-    if(FAILED(result))
-    {
-        goto Finished;
-    }
-
-    if(success != NULL)
-    {
-        set_success(success, 1);
-    }
-
-    _ASSERT(SUCCEEDED(result));
-
-Finished:
-
-    if(FAILED(result))
-    {
-        UCG(uclasterror) = result;
-
-        dprintimportant("failure %d in ucache_dec", result);
-
-        if(result == WARNING_ZVCACHE_NOTLONG)
-        {
-            php_error_docref(NULL, E_WARNING, "function can only be called for key whose value is long");
-        }
-
-        RETURN_FALSE;
-    }
-
-    RETURN_LONG(newval);
+    inc_or_dec(INTERNAL_FUNCTION_PARAM_PASSTHRU, 1);
 }
 
 PHP_FUNCTION(ucache_cas)

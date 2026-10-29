@@ -145,15 +145,12 @@ int lock_get_nameprefix(
         namelen += strlen(UCG(namesalt)) + 1;
     }
 
-    /* Depending on what type of lock to create, get pid and ppid */
+    /* A lock shared by the processes of the pool has the ppid in its name. The pid */
+    /* stays 0 in the name: only the process-local lock type, now removed, set it */
     switch(type)
     {
         case LOCK_TYPE_SHARED:
             ppid = UCG(fmapgdata)->ppid;
-            namelen += PID_MAX_LENGTH;
-            break;
-        case LOCK_TYPE_LOCAL:
-            pid = UCG(fmapgdata)->pid;
             namelen += PID_MAX_LENGTH;
             break;
         default:
@@ -227,7 +224,7 @@ Arguments:
     plock           pointer to lock_context to be initialized
     name            unique name for this lock
     cachekey        ?
-    type            scope of this lock (Local/Shared)
+    type            scope of this lock (LOCK_TYPE_SHARED, the only one)
     plast_owner     Optional pointer to unsigned int that will receive the PID
                     of the process which last successfully acquired the lock.
 
@@ -419,7 +416,7 @@ void lock_runtest()
 
     dprintverbose("*** STARTING LOCK TESTS ***");
 
-    /* Create two locks of different types */
+    /* Create two locks */
     result = lock_create(&plock1);
     if(FAILED(result))
     {
@@ -450,7 +447,7 @@ void lock_runtest()
     _ASSERT(plock1->hxlock    != NULL);
 
     /* Initialize second lock */
-    result = lock_initialize(plock2, "LOCK_TEST2", 1, LOCK_TYPE_LOCAL, NULL);
+    result = lock_initialize(plock2, "LOCK_TEST2", 1, LOCK_TYPE_SHARED, NULL);
     if(FAILED(result))
     {
         dprintverbose("lock_intialize for plock2 failed");

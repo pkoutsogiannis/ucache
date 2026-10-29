@@ -44,7 +44,6 @@
 
 #define LOCK_TYPE_INVALID       0     /* Invalid type */
 #define LOCK_TYPE_SHARED        1     /* Lock shared by child processes. Use PPID */
-#define LOCK_TYPE_LOCAL         2     /* Lock used by this process. Use PID in name */
 #define LOCK_TYPE_MAXIMUM       7     /* type is a 3 bit field. Max value is 7 */
 
 #define LOCK_STATE_UNLOCKED     0     /* Lock is not acquired */
@@ -58,7 +57,7 @@ typedef struct lock_context lock_context;
 struct lock_context
 {
     unsigned       id:8;              /* Unique identifier for the lock */
-    unsigned       type:3;            /* Type of lock (shared/local) */
+    unsigned       type:3;            /* Type of lock (LOCK_TYPE_SHARED) */
     unsigned       unused:3;          /* padding */
     unsigned       state:2;           /* Current state of the lock for debugging */
     unsigned       namelen:16;        /* length of name buffers */

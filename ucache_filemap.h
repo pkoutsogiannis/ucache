@@ -50,11 +50,6 @@
 #define FILEMAP_TYPE_UNUSED                     255 /* UNUSED SEGMENT MARKER */
 #define FILEMAP_TYPE_MAX                        255
 
-#define FILEMAP_MAP_INVALID                     0   /* Invalid value */
-#define FILEMAP_MAP_SRANDOM                     1   /* Map at any random address  */
-#define FILEMAP_MAP_SFIXED                      2   /* Try mapping at a particular address */
-#define FILEMAP_MAP_LRANDOM                     3   /* Create a local only filemap */
-
 #define FILEMAP_MAX_COUNT                       30
 #define FILEMAP_MIN_SIZE                        1048576    /* 1   MB */
 #define FILEMAP_MAX_SIZE                        268435456  /* 256 MB */
@@ -98,7 +93,6 @@ typedef struct filemap_context filemap_context;
 struct filemap_context
 {
     unsigned short               id;            /* unique id of this filemap context */
-    unsigned short               islocal;       /* tells if specified address couldn't be used */
     filemap_information_entry *  infoentry;     /* pointer to filemap information entry */
     HANDLE                       hshmfile;      /* file handle for file backed shared memory */
     unsigned int                 existing;      /* If value is 1, skip initialization for this */
@@ -138,7 +132,6 @@ filemap_initialize(
     filemap_context * pfilemap,
     unsigned short fmaptype,
     unsigned short cachekey,
-    unsigned short fmclass,
     unsigned int size_mb,
     unsigned char isfirst);
 

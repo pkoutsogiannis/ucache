@@ -71,10 +71,8 @@ unsigned short gallocid = 1;
 static int    allocate_memory(alloc_context * palloc, size_t size, void ** ppaddr);
 static alloc_free_header * find_next_free(alloc_context * palloc, alloc_used_header * usedh);
 static void   free_memory(alloc_context * palloc, void * paddr);
-static size_t get_memory_size(alloc_context * palloc, void * addr);
 
 static void * alloc_malloc(alloc_context * palloc, unsigned int type, size_t size);
-static void * alloc_realloc(alloc_context * palloc, unsigned int type, void * addr, size_t size);
 static char * alloc_strdup(alloc_context * palloc, unsigned int type, const char * str);
 static void   alloc_free(alloc_context * palloc, unsigned int type, void * addr);
 
@@ -473,28 +471,6 @@ Finished:
     return;
 }
 
-static size_t get_memory_size(alloc_context * palloc, void * addr)
-{
-    size_t              size  = 0;
-    alloc_used_header * usedh = NULL;
-
-    dprintverbose("start get_memory_size");
-
-    _ASSERT(palloc != NULL);
-    _ASSERT(addr   != NULL);
-
-    lock_lock(palloc->lock);
-
-    usedh = (alloc_used_header *)((char *)addr - sizeof(alloc_used_header));
-    _ASSERT(usedh->is_free == BLOCK_ISFREE_USED);
-
-    size = usedh->size;
-    lock_unlock(palloc->lock);
-
-    dprintverbose("end get_memory_size");
-    return size;
-}
-
 static void * alloc_malloc(alloc_context * palloc, unsigned int type, size_t size)
 {
     void * result = NULL;
@@ -514,43 +490,6 @@ static void * alloc_malloc(alloc_context * palloc, unsigned int type, size_t siz
             break;
         case ALLOC_TYPE_PROCESS_PERSISTENT:
             result = pemalloc(size, 1);
-            break;
-        default:
-            _ASSERT(FALSE);
-            break;
-    }
-
-    return result;
-}
-
-static void * alloc_realloc(alloc_context * palloc, unsigned int type, void * addr, size_t size)
-{
-    void * result = NULL;
-    size_t osize  = 0;
-
-    _ASSERT(addr != NULL);
-    _ASSERT(size >= 0);
-
-    switch(type)
-    {
-        case ALLOC_TYPE_SHAREDMEM:
-            if(FAILED(allocate_memory(palloc, size, &result)))
-            {
-                return NULL;
-            }
-            osize = get_memory_size(palloc, addr);
-            if(size < osize)
-            {
-                osize = size;
-            }
-            memcpy_s(result, osize, addr, osize);
-            free_memory(palloc, addr);
-            break;
-        case ALLOC_TYPE_PROCESS:
-            result = perealloc(addr, size, 0);
-            break;
-        case ALLOC_TYPE_PROCESS_PERSISTENT:
-            result = perealloc(addr, size, 1);
             break;
         default:
             _ASSERT(FALSE);
@@ -634,7 +573,6 @@ int alloc_create(alloc_context ** ppalloc)
 
     /* Initialize member variables */
     palloc->id        = gallocid++;
-    palloc->islocal   = 0;
     palloc->hinitdone = NULL;
     palloc->memaddr   = NULL;
     palloc->size      = 0;
@@ -671,10 +609,9 @@ void alloc_destroy(alloc_context * palloc)
 
 /* initmemory should be 1 for all non file backed shared memory allocators and 0 */
 /* for file backed shared memory allocators when filemap->existing is set to 1 */
-int alloc_initialize(alloc_context * palloc, unsigned short islocal, char * name, unsigned short cachekey, void * staddr, size_t size, unsigned char initmemory)
+int alloc_initialize(alloc_context * palloc, char * name, unsigned short cachekey, void * staddr, size_t size, unsigned char initmemory)
 {
     int                    result   = NONFATAL;
-    unsigned short         locktype = LOCK_TYPE_SHARED;
     alloc_segment_header * header   = NULL;
     alloc_free_header *    frestart = NULL;
     alloc_free_header *    fremid   = NULL;
@@ -700,13 +637,7 @@ int alloc_initialize(alloc_context * palloc, unsigned short islocal, char * name
         goto Finished;
     }
 
-    if(islocal)
-    {
-        locktype = LOCK_TYPE_LOCAL;
-        palloc->islocal = islocal;
-    }
-
-    result = lock_initialize(palloc->lock, name, cachekey, locktype, &header->last_owner);
+    result = lock_initialize(palloc->lock, name, cachekey, LOCK_TYPE_SHARED, &header->last_owner);
     if(FAILED(result))
     {
         goto Finished;
@@ -721,7 +652,7 @@ int alloc_initialize(alloc_context * palloc, unsigned short islocal, char * name
 
     /* If the segment is not initialized, set */
     /* header on the shared memory segment start */
-    if(islocal || isfirst)
+    if(isfirst)
     {
         /* No need to get a lock as other processes */
         /* are blocked waiting for hinitdone event */
@@ -1095,41 +1026,9 @@ void * alloc_smalloc(alloc_context * palloc, size_t size)
 }
 
 __inline
-void * alloc_erealloc(void * addr, size_t size)
-{
-    return alloc_realloc(NULL, ALLOC_TYPE_PROCESS, addr, size);
-}
-
-__inline
-void * alloc_perealloc(void * addr, size_t size)
-{
-    return alloc_realloc(NULL, ALLOC_TYPE_PROCESS_PERSISTENT, addr, size);
-}
-
-__inline
-void * alloc_srealloc(alloc_context * palloc, void * addr, size_t size)
-{
-    _ASSERT(palloc != NULL);
-    return alloc_realloc(palloc, ALLOC_TYPE_SHAREDMEM, addr, size);
-}
-
-__inline
 char * alloc_estrdup(const char * str)
 {
     return alloc_strdup(NULL, ALLOC_TYPE_PROCESS, str);
-}
-
-__inline
-char * alloc_pestrdup(const char * str)
-{
-    return alloc_strdup(NULL, ALLOC_TYPE_PROCESS_PERSISTENT, str);
-}
-
-__inline
-char * alloc_sstrdup(alloc_context * palloc, const char * str)
-{
-    _ASSERT(palloc != NULL);
-    return alloc_strdup(palloc, ALLOC_TYPE_SHAREDMEM, str);
 }
 
 __inline
@@ -1318,66 +1217,6 @@ Finished:
     return addr;
 }
 
-void * alloc_oerealloc(alloc_context * palloc, size_t hoffset, void * addr, size_t size)
-{
-    _ASSERT(palloc  == NULL);
-    _ASSERT(hoffset == 0);
-
-    return alloc_erealloc(addr, size);
-}
-
-void * alloc_osrealloc(alloc_context * palloc, size_t hoffset, void * addr, size_t size)
-{
-    _ASSERT(palloc  != NULL);
-    _ASSERT(hoffset == 0);
-
-    return alloc_srealloc(palloc, addr, size);
-}
-
-void * alloc_omrealloc(alloc_context * palloc, size_t hoffset, void * addr, size_t size)
-{
-    /* When using pool memory, we don't know the size of a */
-    /* particular block allocation.  So we can't really do a realloc */
-    _ASSERT(FALSE);
-    return NULL;
-}
-
-char * alloc_oestrdup(alloc_context * palloc, size_t hoffset, const char * str)
-{
-    _ASSERT(palloc  == NULL);
-    _ASSERT(hoffset == 0);
-
-    return alloc_estrdup(str);
-}
-
-char * alloc_osstrdup(alloc_context * palloc, size_t hoffset, const char * str)
-{
-    _ASSERT(palloc  != NULL);
-    _ASSERT(hoffset == 0);
-
-    return alloc_sstrdup(palloc, str);
-}
-
-char * alloc_omstrdup(alloc_context * palloc, size_t hoffset, const char * str)
-{
-    char * memaddr = NULL;
-    size_t strl    = 0;
-
-    _ASSERT(palloc  != NULL);
-    _ASSERT(hoffset >  0);
-    _ASSERT(str     != NULL);
-
-    strl = strlen(str) + 1;
-    memaddr = (char *)alloc_ommalloc(palloc, hoffset, strl);
-    if(memaddr == NULL)
-    {
-        return NULL;
-    }
-
-    memcpy_s(memaddr, strl, str, strl);
-    return memaddr;
-}
-
 void alloc_oefree(alloc_context * palloc, size_t hoffset, void * addr)
 {
     _ASSERT(palloc == NULL);
@@ -1406,7 +1245,6 @@ void alloc_runtest()
 {
     int             result  = NONFATAL;
     void *          memaddr = NULL;
-    unsigned char   islocal = 0;
 
     void *          mem1    = NULL;
     void *          mem2    = NULL;
@@ -1435,7 +1273,7 @@ void alloc_runtest()
         goto Finished;
     }
 
-    result = alloc_initialize(palloc, islocal, "ALLOC_TEST", 1, memaddr, 4096, 1);
+    result = alloc_initialize(palloc, "ALLOC_TEST", 1, memaddr, 4096, 1);
     if(FAILED(result))
     {
         goto Finished;

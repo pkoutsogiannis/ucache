@@ -43,7 +43,7 @@ static unsigned int getppid();
 static int create_rwlock(char * lockname, lock_context ** pplock);
 static void destroy_rwlock(lock_context * plock);
 static int create_file_mapping(char * name, char * shmfilepath, unsigned char isfirst,size_t size, HANDLE * pshmfile, unsigned int * pexisting, HANDLE * pmap);
-static void * map_viewof_file(HANDLE handle, void * baseaddr);
+static void * map_viewof_file(HANDLE handle);
 static int create_information_filemap(filemap_information ** ppinfo);
 static void destroy_information_filemap(filemap_information * pinfo);
 
@@ -396,20 +396,13 @@ Finished:
     return result;
 }
 
-static void * map_viewof_file(HANDLE handle, void * baseaddr)
+static void * map_viewof_file(HANDLE handle)
 {
     void * retaddr = NULL;
 
-    if(baseaddr != NULL)
-    {
-        dprintverbose("Mapping file map at address = %p", baseaddr);
-    }
-    else
-    {
-        dprintverbose("Mapping file map at any random address");
-    }
+    dprintverbose("Mapping file map at any random address");
 
-    retaddr = MapViewOfFileEx(handle, FILE_MAP_ALL_ACCESS, 0, 0, 0, baseaddr);
+    retaddr = MapViewOfFileEx(handle, FILE_MAP_ALL_ACCESS, 0, 0, 0, NULL);
     if(retaddr == NULL)
     {
         error_setlasterror();
@@ -421,89 +414,6 @@ static void * map_viewof_file(HANDLE handle, void * baseaddr)
 Finished:
 
     return retaddr;
-}
-
-inline size_t ALIGN_UP( size_t size, size_t page_size )
-{
-    size_t pad = size % page_size;
-
-    if (pad)
-    {
-        size += (page_size - pad);
-    }
-    return size;
-}
-
-/*++
-
-Routine Description:
-
-    Private method to find an open chunk of virtual memory, large enough to
-    accomodate an allocation of the requested size.
-
-Arguments:
-
-    size - requested allocation size.
-
-Return Value:
-
-    pointer to base address which should accomodate an allocation of the
-    requested size.
-
- --*/
-void * get_free_vm_base_address(size_t size)
-{
-    SYSTEM_INFO  SystemInfo;
-    MEMORY_BASIC_INFORMATION MemInfo;
-    unsigned char fDone = FALSE;
-    size_t cbUpSize;
-    size_t cbRet;
-    unsigned char *pBaseTemp;
-
-    GetSystemInfo( &SystemInfo );
-
-    /* Round up to a page-size aligned allocation */
-    cbUpSize = ALIGN_UP( size, SystemInfo.dwPageSize );
-
-    /* Pick the first candidate base address */
-    pBaseTemp = ((unsigned char *)SystemInfo.lpMaximumApplicationAddress - cbUpSize);
-    pBaseTemp++; /* address should now be page-size aligned */
-
-    while (!fDone)
-    {
-        cbRet = VirtualQuery( pBaseTemp, &MemInfo, sizeof(MEMORY_BASIC_INFORMATION) );
-        if (!cbRet)
-        {
-            pBaseTemp = NULL;
-            goto Finished;
-        }
-
-        if (MemInfo.State == MEM_FREE)
-        {
-            if (MemInfo.RegionSize >= cbUpSize)
-            {
-                fDone = TRUE;
-            }
-            else
-            {
-                pBaseTemp -= ALIGN_UP(cbUpSize - MemInfo.RegionSize, SystemInfo.dwPageSize);
-            }
-        }
-        else
-        {
-            pBaseTemp -= cbUpSize;
-        }
-
-        /* Did we run out of candidates? */
-        if (pBaseTemp <= (unsigned char *)SystemInfo.lpMinimumApplicationAddress)
-        {
-            pBaseTemp = NULL;
-            fDone = TRUE;
-        }
-    }
-
-Finished:
-    return pBaseTemp;
 }
 
 static int create_information_filemap(filemap_information ** ppinfo)
@@ -615,7 +525,7 @@ static int create_information_filemap(filemap_information ** ppinfo)
 
     /* We have the handle to information file mapping object */
     /* Map file mapping object in this process's virtual memory */
-    pinfo->header = (filemap_information_header *)map_viewof_file(pinfo->hinfomap, NULL);
+    pinfo->header = (filemap_information_header *)map_viewof_file(pinfo->hinfomap);
     if(pinfo->header == NULL)
     {
         result = FATAL_FILEMAP_INFOMAP;
@@ -888,7 +798,6 @@ int filemap_create(filemap_context ** ppfilemap)
     }
 
     pfilemap->id        = gfilemapid++;
-    pfilemap->islocal   = 0;
     pfilemap->infoentry = NULL;
     pfilemap->hfilemap  = NULL;
     pfilemap->hshmfile  = INVALID_HANDLE_VALUE;
@@ -924,14 +833,13 @@ void filemap_destroy(filemap_context * pfilemap)
     return;
 }
 
-int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsigned short cachekey, unsigned short fmclass, unsigned int size_mb, unsigned char isfirst)
+int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsigned short cachekey, unsigned int size_mb, unsigned char isfirst)
 {
     int           result  = NONFATAL;
     unsigned int  ffree   = 0;
     unsigned int  size    = 0;
     unsigned int  index   = 0;
     unsigned int  found   = 0;
-    void *        mapaddr = NULL;
     unsigned char flock   = 0;
     unsigned int  fcreate_file_for_sm = 1;
     char *        sm_file_path        = NULL;
@@ -964,138 +872,42 @@ int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsi
 
     _ASSERT(pinfoh != NULL);
 
-    if(fmclass != FILEMAP_MAP_LRANDOM)
+    /* Check if fmaptype is already there in the list of filemaps available */
+    lock_lock(pinfo->hlock);
+    flock = 1;
+
+    pentry = (filemap_information_entry *)((char *)pinfoh + FILEMAP_INFO_HEADER_SIZE);
+    found = 0;
+
+    for(index = 0; index < pinfoh->maxcount; index++)
     {
-        /* Check if fmaptype is already there in the list of filemaps available */
-        lock_lock(pinfo->hlock);
-        flock = 1;
-
-        pentry = (filemap_information_entry *)((char *)pinfoh + FILEMAP_INFO_HEADER_SIZE);
-        found = 0;
-
-        for(index = 0; index < pinfoh->maxcount; index++)
+        if(pentry->fmaptype == FILEMAP_TYPE_UNUSED && ffree == 0)
         {
-            if(pentry->fmaptype == FILEMAP_TYPE_UNUSED && ffree == 0)
-            {
-                ffree = index;
-            }
-
-            if(pentry->fmaptype == fmaptype && pentry->cachekey == cachekey)
-            {
-                found = 1;
-                break;
-            }
-
-            pentry = (filemap_information_entry *)((char *)pentry + FILEMAP_INFO_ENTRY_SIZE);
+            ffree = index;
         }
 
-        _ASSERT(fmclass == FILEMAP_MAP_SRANDOM || fmclass == FILEMAP_MAP_SFIXED);
-        if(found == 1)
+        if(pentry->fmaptype == fmaptype && pentry->cachekey == cachekey)
         {
-            /* Another process has already this filemap created */
-            /* Bump the mapcount and try to map at the same address */
-            /* if caller wants to create a fixed filemap */
-            if(fmclass == FILEMAP_MAP_SFIXED)
-            {
-                mapaddr = pentry->mapaddr;
-            }
-        }
-        else
-        {
-            /* If no free slots found, throw nofree error */
-            if(ffree == 0)
-            {
-                result = FATAL_FILEMAP_NOFREE;
-                goto Finished;
-            }
-
-            /* Get the pointer to first free entry in the table */
-            pentry = (filemap_information_entry *)((char *)pinfoh + FILEMAP_INFO_HEADER_SIZE);
-            pentry = (filemap_information_entry *)((char *)pentry + (ffree * FILEMAP_INFO_ENTRY_SIZE));
-
-            pentry->fmaptype = fmaptype;
-            pentry->cachekey = cachekey;
-
-            /* Create name with ppid in it */
-            ZeroMemory(pentry->name, MAX_PATH);
-
-            build_filemap_name(pentry->name, MAX_PATH, UCG(namesalt), pentry->fmaptype, cachekey, UCG(fmapgdata)->ppid);
-
-            dprintverbose("Creating a shared filemap with name %s", pentry->name);
-
-            pentry->size     = size;
-            pentry->mapcount = 0;
-            pentry->cpid     = filemap_getpid();
-            pentry->opid     = filemap_getpid();
-            pentry->mapaddr  = NULL;
-
-            if (fmclass == FILEMAP_MAP_SFIXED)
-            {
-                mapaddr = get_free_vm_base_address(size);
-            }
+            found = 1;
+            break;
         }
 
-        /* If we should have a temp file for shared memory, build its name. */
-        if (fcreate_file_for_sm)
-        {
-            sm_file_path = utils_build_temp_filename(pentry->name);
-        }
-
-        /*
-         * RevertToSelf if needed
-         */
-        result = utils_revert_if_necessary(&hOriginalToken);
-        if (FAILED(result))
-        {
-            goto Finished;
-        }
-
-        result = create_file_mapping(
-                    pentry->name,
-                    sm_file_path,
-                    isfirst,
-                    pentry->size,
-                    &pfilemap->hshmfile,
-                    &pfilemap->existing,
-                    &pfilemap->hfilemap);
-        if(FAILED(result))
-        {
-            /* OK to goto Finished. mapcount is not incremented yet */
-            goto Finished;
-        }
-
-        /* We will map to the same address. If that fails, */
-        /* we will map to address of OS choice */
-        pfilemap->mapaddr = map_viewof_file(pfilemap->hfilemap, mapaddr);
-        if(pfilemap->mapaddr == NULL)
-        {
-            if(fmclass == FILEMAP_MAP_SFIXED)
-            {
-                /* Error trying to map at a particular address is a warning to caller */
-                result = WARNING_FILEMAP_MAPVIEW;
-            }
-            else
-            {
-                /* Error mapping at a random address is fatal */
-                result = FATAL_FILEMAP_MAPVIEW;
-            }
-
-            goto Finished;
-        }
+        pentry = (filemap_information_entry *)((char *)pentry + FILEMAP_INFO_ENTRY_SIZE);
     }
-    else
-    {
-        /* Couldn't map shared memory at the specified address */
-        /* Map at a random address and indicate that its not shared */
-        /* Change name to use pid instead of PPID */
 
-        /* Allocate memory for the information entry */
-        pentry = alloc_pemalloc(sizeof(filemap_information_entry));
-        if(pentry == NULL)
+    /* Not created by another process yet: take the first free entry */
+    if(found == 0)
+    {
+        /* If no free slots found, throw nofree error */
+        if(ffree == 0)
         {
-            result = FATAL_OUT_OF_LMEMORY;
+            result = FATAL_FILEMAP_NOFREE;
             goto Finished;
         }
+
+        /* Get the pointer to first free entry in the table */
+        pentry = (filemap_information_entry *)((char *)pinfoh + FILEMAP_INFO_HEADER_SIZE);
+        pentry = (filemap_information_entry *)((char *)pentry + (ffree * FILEMAP_INFO_ENTRY_SIZE));
 
         pentry->fmaptype = fmaptype;
         pentry->cachekey = cachekey;
@@ -1103,25 +915,53 @@ int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsi
         /* Create name with ppid in it */
         ZeroMemory(pentry->name, MAX_PATH);
 
-        build_filemap_name(pentry->name, MAX_PATH, UCG(namesalt), pentry->fmaptype, cachekey, UCG(fmapgdata)->pid);
+        build_filemap_name(pentry->name, MAX_PATH, UCG(namesalt), pentry->fmaptype, cachekey, UCG(fmapgdata)->ppid);
 
-        dprintimportant("Creating a local filemap with name %s", pentry->name);
+        dprintverbose("Creating a shared filemap with name %s", pentry->name);
 
         pentry->size     = size;
         pentry->mapcount = 0;
         pentry->cpid     = filemap_getpid();
         pentry->opid     = filemap_getpid();
         pentry->mapaddr  = NULL;
+    }
 
-        /* This filemap is local only */
-        pfilemap->islocal = 1;
+    /* If we should have a temp file for shared memory, build its name. */
+    if (fcreate_file_for_sm)
+    {
+        sm_file_path = utils_build_temp_filename(pentry->name);
+    }
 
-        pfilemap->mapaddr  = alloc_pemalloc(size);
-        if (pfilemap->mapaddr == NULL)
-        {
-            result = FATAL_FILEMAP_ALLOC_LOCALFILEMAP;
-            goto Finished;
-        }
+    /*
+     * RevertToSelf if needed
+     */
+    result = utils_revert_if_necessary(&hOriginalToken);
+    if (FAILED(result))
+    {
+        goto Finished;
+    }
+
+    result = create_file_mapping(
+                pentry->name,
+                sm_file_path,
+                isfirst,
+                pentry->size,
+                &pfilemap->hshmfile,
+                &pfilemap->existing,
+                &pfilemap->hfilemap);
+    if(FAILED(result))
+    {
+        /* OK to goto Finished. mapcount is not incremented yet */
+        goto Finished;
+    }
+
+    /* At an address the system picks: the cache holds offsets, not pointers, */
+    /* so each process can map it anywhere */
+    pfilemap->mapaddr = map_viewof_file(pfilemap->hfilemap);
+    if(pfilemap->mapaddr == NULL)
+    {
+        result = FATAL_FILEMAP_MAPVIEW;
+        goto Finished;
     }
 
     pfilemap->infoentry = pentry;
@@ -1131,11 +971,7 @@ int filemap_initialize(filemap_context * pfilemap, unsigned short fmaptype, unsi
     if(found == 0)
     {
         pentry->mapaddr = pfilemap->mapaddr;
-        if(pfilemap->islocal == 0)
-        {
-            _ASSERT(pinfoh != NULL);
-            pinfoh->entry_count++;
-        }
+        pinfoh->entry_count++;
     }
 
     pentry->mapcount++;
@@ -1150,7 +986,7 @@ Finished:
         {
             /* If we alloc'd a filemap_information_entry in the shared map,
             /* we MUST clean it up while still under the lock! */
-            if (fmclass != FILEMAP_MAP_LRANDOM && found == 0 && ffree != 0)
+            if (found == 0 && ffree != 0)
             {
                 _ASSERT(pentry);
                 pentry->fmaptype = FILEMAP_TYPE_UNUSED;
@@ -1175,14 +1011,7 @@ Finished:
         /* so no need to worry about that getting messed up */
         if(pfilemap->mapaddr != NULL)
         {
-            if (pfilemap->islocal)
-            {
-                alloc_pefree(pfilemap->mapaddr);
-            }
-            else
-            {
-                UnmapViewOfFile(pfilemap->mapaddr);
-            }
+            UnmapViewOfFile(pfilemap->mapaddr);
             pfilemap->mapaddr = NULL;
         }
 
@@ -1214,48 +1043,33 @@ void filemap_terminate(filemap_context * pfilemap)
     {
         if(pfilemap->infoentry != NULL)
         {
-            if(!pfilemap->islocal)
+            lock_lock(UCG(fmapgdata)->info->hlock);
+
+            /* Decrement the mapcount */
+            pfilemap->infoentry->mapcount--;
+
+            /* If all the processes unmapped the filemap,  */
+            /* remove the entry from information list */
+            if(pfilemap->infoentry->mapcount == 0)
             {
-                lock_lock(UCG(fmapgdata)->info->hlock);
+                pfilemap->infoentry->fmaptype = FILEMAP_TYPE_UNUSED;
+                pfilemap->infoentry->cachekey = 0;
+                UCG(fmapgdata)->info->header->entry_count--;
 
-                /* Decrement the mapcount */
-                pfilemap->infoentry->mapcount--;
-
-                /* If all the processes unmapped the filemap,  */
-                /* remove the entry from information list */
-                if(pfilemap->infoentry->mapcount == 0)
+                /* Get the name of the backing file, so we can delete it
+                 * after we close the handle. */
+                if (pfilemap->hshmfile != INVALID_HANDLE_VALUE)
                 {
-                    pfilemap->infoentry->fmaptype = FILEMAP_TYPE_UNUSED;
-                    pfilemap->infoentry->cachekey = 0;
-                    UCG(fmapgdata)->info->header->entry_count--;
-
-                    /* Get the name of the backing file, so we can delete it
-                     * after we close the handle. */
-                    if (pfilemap->hshmfile != INVALID_HANDLE_VALUE)
-                    {
-                        sm_file_path = utils_build_temp_filename(pfilemap->infoentry->name);
-                    }
+                    sm_file_path = utils_build_temp_filename(pfilemap->infoentry->name);
                 }
+            }
 
-                lock_unlock(UCG(fmapgdata)->info->hlock);
-            }
-            else
-            {
-                alloc_pefree(pfilemap->infoentry);
-                pfilemap->infoentry = NULL;
-            }
+            lock_unlock(UCG(fmapgdata)->info->hlock);
         }
 
         if(pfilemap->mapaddr != NULL)
         {
-            if (pfilemap->islocal)
-            {
-                alloc_pefree(pfilemap->mapaddr);
-            }
-            else
-            {
-                UnmapViewOfFile(pfilemap->mapaddr);
-            }
+            UnmapViewOfFile(pfilemap->mapaddr);
             pfilemap->mapaddr = NULL;
         }
 
@@ -1380,7 +1194,7 @@ void filemap_runtest()
         goto Finished;
     }
 
-    result = filemap_initialize(pfilemap1, FILEMAP_TYPE_USERZVALS, 58, FILEMAP_MAP_SRANDOM, 20, TRUE);
+    result = filemap_initialize(pfilemap1, FILEMAP_TYPE_USERZVALS, 58, 20, TRUE);
     if(FAILED(result))
     {
         goto Finished;
@@ -1388,7 +1202,6 @@ void filemap_runtest()
 
     _ASSERT(pfilemap1->hfilemap != NULL);
     _ASSERT(pfilemap1->mapaddr  != NULL);
-    _ASSERT(pfilemap1->islocal  == 0);
 
     pentry = pfilemap1->infoentry;
 
@@ -1409,7 +1222,7 @@ void filemap_runtest()
         goto Finished;
     }
 
-    result = filemap_initialize(pfilemap2, FILEMAP_TYPE_USERZVALS, 59, FILEMAP_MAP_SFIXED, 10, TRUE);
+    result = filemap_initialize(pfilemap2, FILEMAP_TYPE_USERZVALS, 59, 10, TRUE);
     if(FAILED(result))
     {
         goto Finished;
@@ -1417,7 +1230,6 @@ void filemap_runtest()
 
     _ASSERT(pfilemap2->hfilemap != NULL);
     _ASSERT(pfilemap2->mapaddr  != NULL);
-    _ASSERT(pfilemap2->islocal  == 0);
 
     pentry = pfilemap2->infoentry;
 
@@ -1449,7 +1261,7 @@ void filemap_runtest()
         goto Finished;
     }
 
-    result = filemap_initialize(pfilemap1, FILEMAP_TYPE_USERZVALS, 58, FILEMAP_MAP_SFIXED, 10, TRUE);
+    result = filemap_initialize(pfilemap1, FILEMAP_TYPE_USERZVALS, 58, 10, TRUE);
     if(FAILED(result))
     {
         goto Finished;

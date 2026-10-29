@@ -95,8 +95,6 @@ C_ASSERT(SIZEOF_SIZE_T <= SIZEOF_ZEND_LONG);
 
 
 #define ZMALLOC(pcopy, size)         (pcopy->fnmalloc(pcopy->palloc, pcopy->hoffset, size))
-#define ZREALLOC(pcopy, addr, size)  (pcopy->fnrealloc(pcopy->palloc, pcopy->hoffset, addr, size))
-#define ZSTRDUP(pcopy, pstr)         (pcopy->fnstrdup(pcopy->palloc, pcopy->hoffset, pstr))
 #define ZFREE(pcopy, addr)           (pcopy->fnfree(pcopy->palloc, pcopy->hoffset, addr))
 
 #define ZOFFSET(pcopy, pbuffer)      ((pbuffer == NULL) ? 0 : (((char *)pbuffer) - (pcopy)->pbaseadr))
@@ -125,7 +123,7 @@ static int  copyout_reference(zvcache_context * pcache, zvcopy_context * pcopy, 
 /* At most this many removed entries wait to be freed after the cache lock is released (see remove_zvcache_entry) */
 #define FREELIST_MAXIMUM            32
 
-static int  find_zvcache_entry(zvcache_context * pcache, const char * key, unsigned int index, unsigned char prune, zvcache_value ** ppvalue);
+static zvcache_value * find_zvcache_entry(zvcache_context * pcache, const char * key, unsigned int index, unsigned char prune);
 static int  create_zvcache_data(zvcache_context * pcache, const char * key, zvcopy_prepared * pprep, unsigned int ttl, zvcache_value ** ppvalue);
 static void destroy_cached_zval(zvcache_context * pcache, zval * pzval);
 static void destroy_zvcache_data(zvcache_context * pcache, zvcache_value * pvalue);
@@ -906,8 +904,6 @@ static int copyin_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTab
                 poolcopy.hoffset     = offset;
                 poolcopy.allocsize   = 0;
                 poolcopy.fnmalloc    = alloc_ommalloc;
-                poolcopy.fnrealloc   = alloc_omrealloc;
-                poolcopy.fnstrdup    = alloc_omstrdup;
                 poolcopy.fnfree      = alloc_omfree;
                 poolcopy.pnewvalue   = NULL;
                 poolcopy.pnewzval    = NULL;
@@ -1837,15 +1833,14 @@ Finished:
 
 }
 
-/* Call this method atleast under a read lock */
 /*
- * Call this method under lock.  Finds the entry of key that has not expired.  With prune, the
- * expired entries it passes in the bucket, of any key, are removed on the way (their memory is
- * freed by free_pending_entries() once the lock is released); ucache_info() looks up without it.
+ * Call this method under lock.  Returns the entry of key that has not expired, NULL if there is
+ * none.  With prune, the expired entries it passes in the bucket, of any key, are removed on the
+ * way (their memory is freed by free_pending_entries() once the lock is released); ucache_info()
+ * looks up without it.
  */
-static int find_zvcache_entry(zvcache_context * pcache, const char * key, unsigned int index, unsigned char prune, zvcache_value ** ppvalue)
+static zvcache_value * find_zvcache_entry(zvcache_context * pcache, const char * key, unsigned int index, unsigned char prune)
 {
-    int              result = NONFATAL;
     zvcache_header * header = NULL;
     zvcache_value *  pvalue = NULL;
     zvcache_value *  pnext  = NULL;
@@ -1855,9 +1850,6 @@ static int find_zvcache_entry(zvcache_context * pcache, const char * key, unsign
 
     _ASSERT(pcache  != NULL);
     _ASSERT(key     != NULL);
-    _ASSERT(ppvalue != NULL);
-
-    *ppvalue  = NULL;
 
     header = pcache->zvheader;
     pvalue = ZVCACHE_VALUE(pcache->zvalloc, header->values[index]);
@@ -1882,11 +1874,9 @@ static int find_zvcache_entry(zvcache_context * pcache, const char * key, unsign
         pvalue = pnext;
     }
 
-    *ppvalue = pvalue;
-
     dprintverbose("end find_zvcache_entry");
 
-    return result;
+    return pvalue;
 }
 
 /*
@@ -2697,7 +2687,6 @@ int zvcache_create(zvcache_context ** ppcache)
     }
 
     pcache->id          = gzvcacheid++;
-    pcache->islocal     = 0;
     pcache->cachekey    = 0;
     pcache->hinitdone   = NULL;
 
@@ -2741,7 +2730,7 @@ void zvcache_destroy(zvcache_context * pcache)
     return;
 }
 
-int zvcache_initialize(zvcache_context * pcache, unsigned short islocal, unsigned short cachekey, unsigned int cachesize)
+int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsigned int cachesize)
 {
     int              result    = NONFATAL;
     size_t           segsize   = 0;
@@ -2750,8 +2739,6 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short islocal, unsigne
 
     unsigned int    zvcount    = 256;
     unsigned int    cticks     = 0;
-    unsigned short  mapclass   = FILEMAP_MAP_SRANDOM;
-    unsigned short  locktype   = LOCK_TYPE_SHARED;
     unsigned char   isfirst    = 0;
     unsigned char   islocked   = 0;
     unsigned int    initmemory = 0;
@@ -2774,16 +2761,8 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short islocal, unsigne
 
     pcache->cachekey = cachekey;
 
-    if(islocal)
-    {
-        mapclass = FILEMAP_MAP_LRANDOM;
-        locktype = LOCK_TYPE_LOCAL;
-
-        pcache->islocal = islocal;
-    }
-
     /* get object name prefix */
-    result = lock_get_nameprefix(lockname, cachekey, locktype, &prefix, &cchprefix);
+    result = lock_get_nameprefix(lockname, cachekey, LOCK_TYPE_SHARED, &prefix, &cchprefix);
     if (FAILED(result))
     {
         goto Finished;
@@ -2798,7 +2777,7 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short islocal, unsigne
 
     islocked = 1;
 
-    result = filemap_initialize(pcache->zvfilemap, FILEMAP_TYPE_USERZVALS, cachekey, mapclass, cachesize, isfirst);
+    result = filemap_initialize(pcache->zvfilemap, FILEMAP_TYPE_USERZVALS, cachekey, cachesize, isfirst);
     if(FAILED(result))
     {
         goto Finished;
@@ -2816,7 +2795,7 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short islocal, unsigne
         goto Finished;
     }
 
-    result = alloc_initialize(pcache->zvalloc, islocal, "USERZVALS_SEGMENT", cachekey, pcache->zvfilemap->mapaddr, segsize, initmemory);
+    result = alloc_initialize(pcache->zvalloc, "USERZVALS_SEGMENT", cachekey, pcache->zvfilemap->mapaddr, segsize, initmemory);
     if(FAILED(result))
     {
         goto Finished;
@@ -2841,14 +2820,14 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short islocal, unsigne
         goto Finished;
     }
 
-    result = lock_initialize(pcache->zvlock, lockname, cachekey, locktype, &header->last_owner);
+    result = lock_initialize(pcache->zvlock, lockname, cachekey, LOCK_TYPE_SHARED, &header->last_owner);
     if(FAILED(result))
     {
         goto Finished;
     }
 
     /* Initialize the zvcache_header if this is the first process */
-    if(islocal || isfirst)
+    if(isfirst)
     {
         cticks = GetTickCount();
 
@@ -2908,8 +2887,6 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short islocal, unsigne
     pcache->incopy->hoffset   = 0;
     pcache->incopy->allocsize = 0;
     pcache->incopy->fnmalloc  = alloc_osmalloc;
-    pcache->incopy->fnrealloc = alloc_osrealloc;
-    pcache->incopy->fnstrdup  = alloc_osstrdup;
     pcache->incopy->fnfree    = alloc_osfree;
 
     pcache->outcopy = (zvcopy_context *)alloc_pemalloc(sizeof(zvcopy_context));
@@ -2926,8 +2903,6 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short islocal, unsigne
     pcache->outcopy->hoffset   = 0;
     pcache->outcopy->allocsize = 0;
     pcache->outcopy->fnmalloc  = alloc_oemalloc;
-    pcache->outcopy->fnrealloc = alloc_oerealloc;
-    pcache->outcopy->fnstrdup  = alloc_oestrdup;
     pcache->outcopy->fnfree    = alloc_oefree;
 
 Finished:
@@ -2997,6 +2972,19 @@ void zvcache_terminate(zvcache_context * pcache)
         if(pcache->zvalloc != NULL && pcache->incopy != NULL)
         {
             free_pending_entries(pcache);
+        }
+
+        /* After free_pending_entries(), which frees through incopy */
+        if(pcache->incopy != NULL)
+        {
+            alloc_pefree(pcache->incopy);
+            pcache->incopy = NULL;
+        }
+
+        if(pcache->outcopy != NULL)
+        {
+            alloc_pefree(pcache->outcopy);
+            pcache->outcopy = NULL;
         }
 
         if(pcache->zvheader != NULL)
@@ -3069,11 +3057,7 @@ int zvcache_get(zvcache_context * pcache, const char * key, zval ** pvalue)
     lock_lock(pcache->zvlock);
     flock = 1;
 
-    result = find_zvcache_entry(pcache, key, index, 1, &pentry);
-    if(FAILED(result))
-    {
-        goto Finished;
-    }
+    pentry = find_zvcache_entry(pcache, key, index, 1);
 
     /* Adjust overall cache hitcount/misscount and entry hitcount */
     if(pentry == NULL)
@@ -3285,11 +3269,7 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
     lock_lock(pcache->zvlock);
     flock = 1;
 
-    result = find_zvcache_entry(pcache, key, index, 1, &pentry);
-    if(FAILED(result))
-    {
-        goto Finished;
-    }
+    pentry = find_zvcache_entry(pcache, key, index, 1);
 
     /* If key already exists, throw error for add.  A set is a use of the entry only once it has */
     /* stored the new value (a new entry); a set that fails leaves the old entry as it was */
@@ -3355,11 +3335,7 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
     zvcache_run_scavenger(pcache,0);
 
     /* Check again after scavenging */
-    result = find_zvcache_entry(pcache, key, index, 1, &pentry);
-    if(FAILED(result))
-    {
-        goto Finished;
-    }
+    pentry = find_zvcache_entry(pcache, key, index, 1);
 
     /* some other process already added this entry, destroy cache data */
     if(pentry != NULL)
@@ -3437,11 +3413,7 @@ int zvcache_delete(zvcache_context * pcache, const char * key)
     zvcache_run_scavenger(pcache,0);
 
     /* An expired entry of key is missing for the caller, and removed on the way */
-    result = find_zvcache_entry(pcache, key, index, 1, &pentry);
-    if(FAILED(result))
-    {
-        goto Finished;
-    }
+    pentry = find_zvcache_entry(pcache, key, index, 1);
 
     if(pentry == NULL)
     {
@@ -3543,11 +3515,7 @@ int zvcache_exists(zvcache_context * pcache, const char * key, unsigned char * p
     lock_lock(pcache->zvlock);
     flock = 1;
 
-    result = find_zvcache_entry(pcache, key, index, 1, &pentry);
-    if(FAILED(result))
-    {
-        goto Finished;
-    }
+    pentry = find_zvcache_entry(pcache, key, index, 1);
 
     if(pentry == NULL)
     {
@@ -3559,8 +3527,6 @@ int zvcache_exists(zvcache_context * pcache, const char * key, unsigned char * p
     }
 
     _ASSERT(SUCCEEDED(result));
-
-Finished:
 
     if(flock)
     {
@@ -3618,11 +3584,7 @@ static int list_zvcache_entries(zvcache_context * pcache, zend_bool summaryonly,
         index = utils_getindex(pkey, header->valuecount);
 
         /* ucache_info() removes nothing */
-        result = find_zvcache_entry(pcache, pkey, index, 0, &pvalue);
-        if(FAILED(result))
-        {
-            goto Finished;
-        }
+        pvalue = find_zvcache_entry(pcache, pkey, index, 0);
 
         if(pvalue != NULL)
         {
@@ -3728,7 +3690,6 @@ int zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, z
     pcinfo->hitcount  = header->hitcount;
     pcinfo->misscount = header->misscount;
     pcinfo->itemcount = header->itemcount;
-    pcinfo->islocal   = pcache->islocal;
 
     pcinfo->scavenged = (header->scruns != 0);
     pcinfo->scage     = pcinfo->scavenged ? utils_ticksdiff(cticks, header->scticks) / 1000 : 0;
@@ -3802,11 +3763,7 @@ int zvcache_change(zvcache_context * pcache, const char * key, zend_long delta, 
 
     zvcache_run_scavenger(pcache,0);
 
-    result = find_zvcache_entry(pcache, key, index, 1, &pvalue);
-    if(FAILED(result))
-    {
-        goto Finished;
-    }
+    pvalue = find_zvcache_entry(pcache, key, index, 1);
 
     if(pvalue == NULL)
     {
@@ -3870,11 +3827,7 @@ int zvcache_compswitch(zvcache_context * pcache, const char * key, zend_long old
 
     zvcache_run_scavenger(pcache,0);
 
-    result = find_zvcache_entry(pcache, key, index, 1, &pentry);
-    if(FAILED(result))
-    {
-        goto Finished;
-    }
+    pentry = find_zvcache_entry(pcache, key, index, 1);
 
     if(pentry == NULL)
     {
