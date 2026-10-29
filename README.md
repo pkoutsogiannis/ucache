@@ -261,13 +261,16 @@ This extension has no constants defined.
 The sources of UCache include a PHP script, ucache.php (WinCache's wincache.php for UCache), that can be used to
 obtain cache information and statistics: the server and cache settings, the memory use, the hit and miss counts, what
 the scavenger removed and evicted and when it last ran, the list of entries (250 per page, with links to the other
-pages) and the value stored under a key; with authentication on, it can also clear the whole cache.
+pages) and the value stored under a key; with authentication on and a password other than the default, it can also
+clear the whole cache.
 
 To use ucache.php, copy it into a root folder of a web site that runs with the extension loaded, or into any
 subfolder, preferably one that only administrators can reach. To protect the script, open it in any text editor and
-replace the values of the `USERNAME` and `PASSWORD` constants: both default to `ucache`, and the page refuses to work
-while the password is `ucache`. If any other IIS authentication is enabled on the server, then follow the
-instructions in the comments:
+replace the values of the `USERNAME` and `PASSWORD` constants: both default to `ucache`, and with its own
+authentication the page refuses to work while the password is `ucache`. If any other IIS authentication is enabled on
+the server, then follow the instructions in the comments. Nobody types the password then, but it is still the only
+secret behind the Clear All button: set `PASSWORD` to a long random value (32 hex characters, for example), and change
+`USERNAME` too, because requests that reach the page without IIS authentication can still log in with the two:
 
 **Example #1 Authentication configuration for ucache.php**
 
@@ -276,7 +279,11 @@ instructions in the comments:
 /**
  * ======================== CONFIGURATION SETTINGS ==============================
  * If you do not want to use authentication for this page, set USE_AUTHENTICATION to 0.
- * If you use authentication then replace the default password.
+ * If you use authentication then replace the default username and password.
+ * With IIS authentication (see below) nobody types them, but PASSWORD is still the
+ * only secret behind the Clear All button: make it a long random value (32 hex
+ * characters, for example), and change USERNAME too, because requests that reach
+ * this page without IIS authentication can still log in with the two.
  */
 define('USE_AUTHENTICATION', 1);
 define('USERNAME', 'ucache');
@@ -302,10 +309,19 @@ $user_allowed = array('DOMAIN\user1', 'DOMAIN\user2', 'DOMAIN\user3');
 ?>
 ```
 
-With `USE_AUTHENTICATION` set to 0 there is no authentication, and the page no longer offers to clear the cache;
-it still shows values, so anyone who can reach it can read everything in the cache. The Clear All button only works from the page itself: it sends back a token that the page keeps in
-a `SameSite=Strict` cookie, so the browser has to accept that cookie. The page also refuses to be shown inside a
-frame.
+With `USE_AUTHENTICATION` set to 0 there is no authentication (any other value turns it on), and the page no longer
+offers to clear the cache; it still shows values, so anyone who can reach it can read everything in the cache.
+
+The Clear All button only works from the page itself: it sends back a token that the page makes from `PASSWORD`, from
+a random value that it keeps in a `SameSite=Strict` cookie and from its own path, so the browser has to accept that
+cookie. Another site cannot read the token; another host of the same site, which can set the cookie, cannot make the
+token without the password; and a copy of the page elsewhere does not accept it, even with the same password. So the
+button needs a password other than `ucache` and other than an empty one, with IIS authentication too, where the page
+does not ask for the password: until it is changed, the page shows a note in place of the button. The page also
+refuses to clear the cache when the browser says, in its `Sec-Fetch-Site` or `Origin` header, that the form comes from
+another origin (another site, host or port; behind a reverse proxy, the proxy must pass on the `Host` header that the
+browser sent), it tells the browser and proxies not to keep a copy of it (`Cache-Control: no-store`), and it refuses
+to be shown inside a frame.
 
 > **Note:** Always protect the ucache.php script by using either the built-in authentication or the server's
 > authentication mechanism. Leaving this script unprotected may compromise the security of your web application and

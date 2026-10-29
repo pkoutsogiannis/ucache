@@ -39,7 +39,11 @@
 /**
  * ======================== CONFIGURATION SETTINGS ==============================
  * If you do not want to use authentication for this page, set USE_AUTHENTICATION to 0.
- * If you use authentication then replace the default password.
+ * If you use authentication then replace the default username and password.
+ * With IIS authentication (see below) nobody types them, but PASSWORD is still the
+ * only secret behind the Clear All button: make it a long random value (32 hex
+ * characters, for example), and change USERNAME too, because requests that reach
+ * this page without IIS authentication can still log in with the two.
  */
 define('USE_AUTHENTICATION', 1);
 define('USERNAME', 'ucache');
@@ -76,7 +80,9 @@ if (!function_exists(ini_get('ucache.prefix') . 'info')) {
     die('The UCache functions are not available (see the startup warning about ucache.prefix). No statistics to show.');
 }
 
-if (USE_AUTHENTICATION == 1) {
+// On unless USE_AUTHENTICATION is 0, as in every test of it below: a value such as 2 must not skip the authentication
+// and still offer Clear All
+if (USE_AUTHENTICATION) {
     if (!empty($_SERVER['AUTH_TYPE']) && !empty($_SERVER['REMOTE_USER']) && strcasecmp($_SERVER['REMOTE_USER'], 'anonymous')) {
         // IIS authenticated the user: only the users in $user_allowed get in
         $allowed = array_map('strtolower', $user_allowed);
@@ -141,16 +147,46 @@ $ucache_info = uc('info', true);
 $ucache_mem_info = uc('meminfo');
 $user_cache_available = ini_bool(ini_get('ucache.enabled')) && is_array($ucache_info) && is_array($ucache_mem_info);
 
-// The clear form must send back the token kept in this cookie. The cookie is SameSite=Strict: another site can
-// neither read the token nor make the browser send the cookie, so it cannot get a logged-in browser to clear the cache.
+// The clear form must send back a token that the page makes from PASSWORD, the random value of this cookie and the
+// path of this script. Another site can neither read the token nor make the browser send the cookie (SameSite=Strict).
+// Another host of the same site can set the cookie, as SameSite does not apply between the hosts of a site, but it
+// cannot make the token of the value it set without guessing the password, and a copy of this page elsewhere, with
+// the same password, makes other tokens. So the page does not clear the cache with the default password or none,
+// which anyone knows. With IIS authentication nobody types PASSWORD, but it is still the only secret behind Clear All:
+// it must be a long random value, and USERNAME should change too, since requests that reach the page without IIS
+// authentication can log in with the two (see the configuration settings).
 define('TOKEN_COOKIE', 'ucache_stats_token');
-$token = null;
+$can_clear = USE_AUTHENTICATION && !in_array((string)PASSWORD, ['', 'ucache'], true);
+$nonce = null;
 if (isset($_COOKIE[TOKEN_COOKIE]) && is_string($_COOKIE[TOKEN_COOKIE]) && preg_match('/^[0-9a-f]{32}$/', $_COOKIE[TOKEN_COOKIE])) {
-    $token = $_COOKIE[TOKEN_COOKIE];
+    $nonce = $_COOKIE[TOKEN_COOKIE];
 }
 
-if (USE_AUTHENTICATION && $user_cache_available && $clear_user_cache) {
-    if ($token === null || !isset($_POST['token']) || !is_string($_POST['token']) || !hash_equals($token, $_POST['token'])) {
+// The token of the clear form for the value of the cookie
+function clear_token($nonce) {
+    return hash_hmac('sha256', 'clear ' . $nonce . __FILE__, (string)PASSWORD);
+}
+
+// Whether the browser says that the clear form comes from a page of another origin (another site, host or port). The
+// token alone refuses such a form; this also refuses one with a token that leaked or was guessed. Sec-Fetch-Site (sent
+// over HTTPS and to localhost) is same-origin for the page's own form, or none for a request the user made. Origin
+// names the origin of the page that sent the form, whose host and port must be those of the Host header (so a reverse
+// proxy must pass that header on), except "null", which names none: a page under Referrer-Policy: no-referrer sends it
+// for its own forms.
+function cross_origin_post() {
+    if (isset($_SERVER['HTTP_SEC_FETCH_SITE']) && !in_array($_SERVER['HTTP_SEC_FETCH_SITE'], ['same-origin', 'none'], true)) {
+        return true;
+    }
+    if (!isset($_SERVER['HTTP_ORIGIN']) || $_SERVER['HTTP_ORIGIN'] === 'null') {
+        return false;
+    }
+    return !isset($_SERVER['HTTP_HOST']) || !preg_match('~^[a-z][a-z0-9+.-]*://([^/]+)$~i', $_SERVER['HTTP_ORIGIN'], $match)
+        || strcasecmp($match[1], $_SERVER['HTTP_HOST']) !== 0;
+}
+
+if ($can_clear && $user_cache_available && $clear_user_cache) {
+    if ($nonce === null || !isset($_POST['token']) || !is_string($_POST['token'])
+        || !hash_equals(clear_token($nonce), $_POST['token']) || cross_origin_post()) {
         http_response_code(403);
         echo 'The request to clear the user cache could not be verified. Reload the page and try again.';
         exit;
@@ -161,14 +197,17 @@ if (USE_AUTHENTICATION && $user_cache_available && $clear_user_cache) {
     exit;
 }
 
-if ($token === null) {
-    $token = bin2hex(random_bytes(16));
+if ($nonce === null) {
+    $nonce = bin2hex(random_bytes(16));
     $secure = (!empty($_SERVER['HTTPS']) && strcasecmp($_SERVER['HTTPS'], 'off')) ? '; Secure' : '';
-    header('Set-Cookie: ' . TOKEN_COOKIE . '=' . $token . '; HttpOnly; SameSite=Strict' . $secure, false);
+    header('Set-Cookie: ' . TOKEN_COOKIE . '=' . $nonce . '; HttpOnly; SameSite=Strict' . $secure, false);
 }
 // The page can clear the cache: do not let another site load it in a frame and trick a click on the button
 header('X-Frame-Options: DENY');
 header("Content-Security-Policy: frame-ancestors 'none'");
+// Nor let the browser or a proxy keep a copy: it shows cached values, and its token, with the cookie value it was
+// made for (which another host can plant), clears the cache until PASSWORD changes
+header('Cache-Control: no-store');
 
 // The entries of the page, listed with the totals so that they agree with the count above them. Only those are
 // copied: listing all the entries of a large cache would run past memory_limit.
@@ -1059,12 +1098,14 @@ if ($host === null) {
                 <section class="card" id="entries">
                     <div class="card-header">
                         <h2>Entries<?php if ($ucache_entries !== null) { ?><span class="count"><?= format_number($ucache_info['total_item_count']) ?></span><?php } ?></h2>
-                        <?php if (USE_AUTHENTICATION && $ucache_info['total_item_count'] > 0) { ?>
+                        <?php if ($can_clear && $ucache_info['total_item_count'] > 0) { ?>
                             <form method="post" action="<?= $PHP_SELF ?>?page=<?= UCACHE_DATA ?>">
                                 <input type="hidden" name="clc" value="1">
-                                <input type="hidden" name="token" value="<?= $token ?>">
+                                <input type="hidden" name="token" value="<?= clear_token($nonce) ?>">
                                 <button type="submit" class="danger">Clear All</button>
                             </form>
+                        <?php   } elseif (USE_AUTHENTICATION && $ucache_info['total_item_count'] > 0) { ?>
+                            <span class="note">To clear the cache here, set PASSWORD in this script to a long random value and change USERNAME too: with IIS authentication, PASSWORD is the only secret behind Clear All.</span>
                         <?php   } ?>
                     </div>
                     <?php if ($ucache_entries === null) { ?>

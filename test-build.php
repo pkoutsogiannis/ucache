@@ -17,7 +17,8 @@
  * - optionally, the path of the DLL under test as the first argument. The checks with several
  *   processes start other php.exe processes with that DLL, on caches of their own (one unique
  *   ucache.apppoolid per group), php -S servers among them. Without the argument they are skipped,
- *   with one "SKIP:" line.
+ *   with one "SKIP:" line. One of the servers runs copies of ucache.php, read from the folder of
+ *   test-build.php (its checks are skipped, with a "SKIP:" line, if it is not there).
  *
  * Prints one line per check ("OK: ..." or "FAIL: ...", or "SKIP: ..." for checks that cannot run) and
  * exits with 1 if any check failed.
@@ -2392,6 +2393,31 @@ function http_get($port, $path, $timeout)
     return $meta['timed_out'] ? null : (string)$reply;
 }
 
+/* The reply of a php -S server to a request with these extra header lines (a cookie, credentials) and this form body
+   (null for none), as http_get() returns it */
+function http_request($port, $method, $path, array $headers, $body, $timeout)
+{
+    $socket = @stream_socket_client("tcp://127.0.0.1:$port", $errno, $errstr, 0.5);
+    if ($socket === false) {
+        return null;
+    }
+    stream_set_timeout($socket, $timeout);
+    if ($body !== null) {
+        $headers[] = 'Content-Type: application/x-www-form-urlencoded';
+        $headers[] = 'Content-Length: ' . strlen($body);
+    }
+    $lines = '';
+    foreach ($headers as $header) {
+        $lines .= "$header\r\n";
+    }
+    @fwrite($socket, "$method $path HTTP/1.0\r\nHost: 127.0.0.1:$port\r\nConnection: close\r\n$lines\r\n" . (string)$body);
+    $reply = @stream_get_contents($socket);
+    $meta = stream_get_meta_data($socket);
+    fclose($socket);
+
+    return $meta['timed_out'] ? null : (string)$reply;
+}
+
 /* Starts php -S with the router of these checks, on a free port of 127.0.0.1; null if no server answers */
 function server_start($name, $pool, array $ini, &$port)
 {
@@ -3384,6 +3410,16 @@ CHILDSCRIPT
 <?php
 /* Router of the php -S servers of the checks with several processes */
 
+/* The copies of ucache.php (stats*.php) run as a web server runs them. With an X-Test-Iis-User header, they run as after
+   IIS authenticated that user, which the page reads from AUTH_TYPE and REMOTE_USER */
+if (preg_match('~^/stats[\w-]*\.php$~', (string)parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH))) {
+    if (isset($_SERVER['HTTP_X_TEST_IIS_USER'])) {
+        $_SERVER['AUTH_TYPE'] = 'Negotiate';
+        $_SERVER['REMOTE_USER'] = $_SERVER['HTTP_X_TEST_IIS_USER'];
+    }
+    return false;
+}
+
 /* Its __sleep() raises a fatal error (E_USER_ERROR, deprecated since PHP 8.4) */
 class UcacheRouterSleepFatal
 {
@@ -4096,6 +4132,104 @@ CHILDSCRIPT
         check("(in another process) with ucache.prefix=$prefix ($kind) PHP starts with a warning and none of the functions",
               $badExit === 0 && $warned && is_array($result) && $result['funcs'] === [] && $result['ucache_get exists'] === false,
               ['exit code' => $badExit, 'result' => $result, 'output' => child_tail($bad)]);
+    }
+
+    /* ucache.php, from copies that php -S runs as a web server would: stats.php with a password of its own, stats-copy.php
+       the same page in another file, stats-auth2.php with USE_AUTHENTICATION 2, and stats-default.php as it comes, with the
+       default password. The Clear All form sends back a token that the page makes from PASSWORD, the random value of its
+       cookie and its own path. Another host of the site can plant that cookie, with a longer path, which the browser sends
+       first (and PHP takes the first value of a name), but it can neither make the token nor use one of another copy of
+       the page, and the page also refuses its own token when the browser says that the form comes from a page of another
+       origin. With the default password, which anyone knows, the page does not clear the cache: with IIS authentication,
+       where it does not ask for the password, it says so in place of the button */
+    $statsSource = @file_get_contents(__DIR__ . DIRECTORY_SEPARATOR . 'ucache.php');
+    if ($statsSource === false) {
+        echo "SKIP: the checks of ucache.php (it is not next to test-build.php)\n";
+    } else {
+        $statsPassword = 'test-' . bin2hex(random_bytes(8));
+        $statsCopy = str_replace("define('PASSWORD', 'ucache');", "define('PASSWORD', '$statsPassword');", $statsSource, $replaced);
+        $statsAuth2 = str_replace("define('USE_AUTHENTICATION', 1);", "define('USE_AUTHENTICATION', 2);", $statsCopy, $replacedAuth);
+        foreach (['stats.php' => $statsCopy, 'stats-copy.php' => $statsCopy, 'stats-auth2.php' => $statsAuth2, 'stats-default.php' => $statsSource] as $file => $source) {
+            file_put_contents($childDir . DIRECTORY_SEPARATOR . $file, $source);
+        }
+        $server = ($replaced === 1 && $replacedAuth === 1) ? server_start('st-server', $poolBase . 'st', [], $port) : null;
+        if ($replaced !== 1 || $replacedAuth !== 1) {
+            check("test-build.php finds define('PASSWORD', 'ucache'); and define('USE_AUTHENTICATION', 1); once each in ucache.php, to make its copies",
+                  false, [$replaced, $replacedAuth]);
+        } elseif ($server === null) {
+            check('a php -S server starts', false);
+        } else {
+            $status = function ($reply) {
+                return preg_match('/^HTTP\/\S+ (\d{3})/', (string)$reply, $match) ? (int)$match[1] : null;
+            };
+            $entries = function () use ($port) {
+                return preg_match('/\r\n\r\ninfo (\d+)$/', (string)http_get($port, '/?op=info', 30), $match) ? (int)$match[1] : null;
+            };
+            /* The value of the cookie that a reply sets, and the token of its form ('' if there is none) */
+            $nonceOf = function ($reply) {
+                return preg_match('/^Set-Cookie: ucache_stats_token=([0-9a-f]{32}); HttpOnly; SameSite=Strict\r?$/mi', (string)$reply, $match) ? $match[1] : '';
+            };
+            $tokenOf = function ($reply) {
+                return preg_match('/name="token" value="([0-9a-f]{64})"/', (string)$reply, $match) ? $match[1] : '';
+            };
+            $basic = 'Authorization: Basic ' . base64_encode("ucache:$statsPassword");
+            $planted = str_repeat('5a', 16);
+            $other = str_repeat('c3', 16);
+
+            $poked = http_get($port, '/?op=poke', 30);
+            $forged = http_request($port, 'POST', '/stats.php?page=4', [$basic, "Cookie: ucache_stats_token=$planted; ucache_stats_token=$other"],
+                                   "clc=1&token=$planted", 30);
+            $page = http_request($port, 'GET', '/stats.php?page=4', [$basic], null, 30);
+            $nonce = $nonceOf($page);
+            $form = 'clc=1&token=' . $tokenOf($page);
+            $own = [$basic, "Cookie: ucache_stats_token=$nonce"];
+            $refused = [
+                'planted cookie and its value as the token' => $status($forged),
+                'own token with another cookie' => $status(http_request($port, 'POST', '/stats.php?page=4', [$basic, "Cookie: ucache_stats_token=$other"], $form, 30)),
+                'own token to another copy' => $status(http_request($port, 'POST', '/stats-copy.php?page=4', $own, $form, 30)),
+                'own token, Sec-Fetch-Site same-site' => $status(http_request($port, 'POST', '/stats.php?page=4', array_merge($own, ['Sec-Fetch-Site: same-site']), $form, 30)),
+                'own token, Origin of another host' => $status(http_request($port, 'POST', '/stats.php?page=4', array_merge($own, ['Origin: http://other.test']), $form, 30)),
+            ];
+            $afterRefused = $entries();
+            $cleared = http_request($port, 'POST', '/stats.php?page=4', array_merge($own, ['Sec-Fetch-Site: same-origin', "Origin: http://127.0.0.1:$port"]), $form, 30);
+            $afterCleared = $entries();
+            check('ucache.php refuses to clear the cache with a cookie that another host of the site planted and a token of its choice, and with its own token sent with another cookie, to another copy of the page, or from a page of another origin (Sec-Fetch-Site, Origin)',
+                  strpos((string)$poked, 'poked true') !== false && $refused === array_fill_keys(array_keys($refused), 403) && $afterRefused === 1,
+                  ['statuses' => $refused, 'entries after them' => $afterRefused, 'server output' => child_tail($server)]);
+            check('ucache.php clears the cache with the token of its own form, which is not the value of its cookie (HttpOnly, SameSite=Strict), and the page sends Cache-Control: no-store',
+                  $status($page) === 200 && $nonce !== '' && $tokenOf($page) !== '' && preg_match('/^Cache-Control: no-store\r?$/mi', (string)$page) === 1
+                  && $status($cleared) === 302 && preg_match('/^Location: \?page=4\r?$/mi', (string)$cleared) === 1 && $afterCleared === 0,
+                  ['page' => strtok((string)$page, "\r\n"), 'cookie, token' => [$nonce, $tokenOf($page)],
+                   'no-store' => preg_match('/^Cache-Control: no-store\r?$/mi', (string)$page) === 1, 'clear' => strtok((string)$cleared, "\r\n"),
+                   'entries after it' => $afterCleared, 'server output' => child_tail($server)]);
+
+            /* As after IIS authenticated a user whom the default $user_allowed lets in. The POST to the page with the
+               default password carries the best token a host that plants the cookie can make */
+            $iis = 'X-Test-Iis-User: DOMAIN\\user1';
+            $poked = http_get($port, '/?op=poke', 30);
+            $defaultPage = http_request($port, 'GET', '/stats-default.php?page=4', [$iis], null, 30);
+            $defaultPost = http_request($port, 'POST', '/stats-default.php?page=4', [$iis, "Cookie: ucache_stats_token=$planted"],
+                                        'clc=1&token=' . hash_hmac('sha256', "clear $planted" . $childDir . DIRECTORY_SEPARATOR . 'stats-default.php', 'ucache'), 30);
+            $afterDefault = $entries();
+            $auth2 = [$status(http_request($port, 'GET', '/stats-auth2.php?page=4', [], null, 30)),
+                      $tokenOf(http_request($port, 'GET', '/stats-auth2.php?page=4', [$basic], null, 30)) !== ''];
+            $iisPage = http_request($port, 'GET', '/stats.php?page=4', [$iis], null, 30);
+            $iisCleared = http_request($port, 'POST', '/stats.php?page=4', [$iis, 'Cookie: ucache_stats_token=' . $nonceOf($iisPage), 'Origin: null'],
+                                       'clc=1&token=' . $tokenOf($iisPage), 30);
+            $afterIis = $entries();
+            check('ucache.php with IIS authentication and the default password shows a note in place of Clear All, and a clear POST changes nothing; with a password of its own it offers Clear All, which clears the cache (Origin: null, which a page under Referrer-Policy: no-referrer sends, says nothing)',
+                  strpos((string)$poked, 'poked true') !== false && $status($defaultPage) === 200 && strpos((string)$defaultPage, 'id="entries"') !== false
+                  && strpos((string)$defaultPage, 'name="clc"') === false && strpos((string)$defaultPage, 'a long random value') !== false
+                  && $status($defaultPost) === 200 && $afterDefault === 1 && $tokenOf($iisPage) !== ''
+                  && strpos((string)$iisPage, 'a long random value') === false && $status($iisCleared) === 302 && $afterIis === 0,
+                  ['default password: page, form, note' => [strtok((string)$defaultPage, "\r\n"), strpos((string)$defaultPage, 'name="clc"') !== false,
+                   strpos((string)$defaultPage, 'a long random value') !== false], 'its clear POST' => strtok((string)$defaultPost, "\r\n"),
+                   'entries after it' => $afterDefault, 'own password: page, token' => [strtok((string)$iisPage, "\r\n"), $tokenOf($iisPage)],
+                   'its clear' => strtok((string)$iisCleared, "\r\n"), 'entries after it ' => $afterIis, 'server output' => child_tail($server)]);
+            check('ucache.php with USE_AUTHENTICATION 2 asks for authentication, as with 1, and then offers Clear All',
+                  $auth2 === [401, true], ['[status without credentials, Clear All with them]' => $auth2, 'server output' => child_tail($server)]);
+            child_kill($server);
+        }
     }
 
     children_cleanup();
