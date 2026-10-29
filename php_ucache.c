@@ -106,7 +106,6 @@ PHP_FUNCTION(ucache_cas);
 
 #ifdef UCACHE_TEST
 PHP_FUNCTION(ucache_lasterror);
-PHP_FUNCTION(ucache_runtests);
 #endif
 
 ZEND_DECLARE_MODULE_GLOBALS(ucache)
@@ -165,9 +164,6 @@ ZEND_END_ARG_INFO()
 #ifdef UCACHE_TEST
 ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_lasterror, 0, 0, 0)
 ZEND_END_ARG_INFO()
-
-ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_runtests, 0, 0, 0)
-ZEND_END_ARG_INFO()
 #endif
 
 /* Put all user defined functions here. The names all start with PREFIX_DEFAULT, which MINIT */
@@ -186,7 +182,6 @@ static const zend_function_entry ucache_functions[] = {
     PHP_FE(ucache_cas, arginfo_ucache_cas)
 #ifdef UCACHE_TEST
     PHP_FE(ucache_lasterror, arginfo_ucache_lasterror)
-    PHP_FE(ucache_runtests, arginfo_ucache_runtests)
 #endif
     PHP_FE_END
 };
@@ -1772,18 +1767,6 @@ PHP_FUNCTION(ucache_lasterror)
     }
 
     RETURN_LONG(UCG(uclasterror));
-}
-
-PHP_FUNCTION(ucache_runtests)
-{
-    dprintverbose("start ucache_runtests");
-
-    lock_runtest();
-    filemap_runtest();
-    alloc_runtest();
-
-    dprintverbose("end ucache_runtests");
-    return;
 }
 #endif /* UCACHE_TEST */
 

@@ -144,6 +144,4 @@ extern void   filemap_terminate(filemap_context * pfilemap);
 extern size_t filemap_getsize(filemap_context * pfilemap);
 extern unsigned int filemap_getcpid(filemap_context * pfilemap);
 
-extern void   filemap_runtest();
-
 #endif /* _UCACHE_FILEMAP_H_ */

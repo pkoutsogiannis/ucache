@@ -3908,6 +3908,336 @@ switch ($argv[1]) {
                    'total_evicted_count' => $info['total_evicted_count']];
         break;
 
+    case 'fill_raise':
+        /* Run with ucache.size 5 and ucache.gc.evict 10. Values of about 50 KB without a ttl until a quarter of the
+           memory or less is free, then a value of 1.5 MB, more than is free: nothing has expired and more than 10% is
+           free already, so the full pass must evict until more than that is free. Then at once another one, which
+           must not find the pass skipped. Counts */
+        $cold = 0;
+        $memory = ucache_meminfo();
+        while ($cold < 1000 && $memory['memory_free'] > $memory['memory_total'] / 4) {
+            ucache_set("c$cold", fill_value($cold));
+            $cold++;
+            $memory = ucache_meminfo();
+        }
+        $first = ucache_set('big1', str_repeat('b', 1500000));
+        $second = ucache_set('big2', str_repeat('c', 1500000));
+        $info = ucache_info(true);
+        $result = ['cold' => $cold, 'memory free before' => $memory['memory_free'], 'first set' => $first, 'second set' => $second,
+                   'entries' => $info['total_item_count'], 'total_evicted_count' => $info['total_evicted_count'],
+                   'total_scavenged_count' => $info['total_scavenged_count']];
+        break;
+
+    case 'too_big':
+        /* Run with ucache.size 5 and ucache.gc.evict 10. Values of about 50 KB without a ttl until less than 5% of the
+           memory is free, then values that the empty cache could not hold either: a string of 6 MB, an array of 6000
+           strings of 1000 bytes, an array that holds a string of 6 MB that a variable holds as well. Then a string of
+           5,100,000 bytes, which only the empty cache holds. Counts, and the memory before and after the three */
+        $cold = 0;
+        $memory = ucache_meminfo();
+        while ($cold < 1000 && $memory['memory_free'] >= $memory['memory_total'] / 20) {
+            ucache_set("c$cold", fill_value($cold));
+            $cold++;
+            $memory = ucache_meminfo();
+        }
+        $shared = str_repeat('s', 6000000);
+        $array = [];
+        for ($i = 0; $i < 6000; $i++) {
+            $array[] = str_repeat(chr(97 + $i % 26), 1000);
+        }
+        $before = ucache_meminfo();
+        $sets = [ucache_set('big_string', str_repeat('b', 6000000)), ucache_set('big_array', $array),
+                 ucache_set('big_shared', ['data' => $shared, 'n' => 1])];
+        $memory = ucache_meminfo();
+        $info = ucache_info(true);
+        $after = ['entries' => $info['total_item_count'], 'evicted' => $info['total_evicted_count'],
+                  'scavenged' => $info['total_scavenged_count'], 'last_scavenge_seconds' => $info['last_scavenge_seconds'],
+                  'memory_free and num_used_blks unchanged' => [$before['memory_free'], $before['num_used_blks']] === [$memory['memory_free'], $memory['num_used_blks']]];
+        $fits = ucache_set('fits_empty', str_repeat('f', 5100000));
+        $info = ucache_info(true);
+        $result = ['cold' => $cold, 'too big sets' => $sets, 'after them' => $after, 'set that only the empty cache holds' => $fits,
+                   'entries at the end' => $info['total_item_count'], 'total_evicted_count' => $info['total_evicted_count']];
+        break;
+
+    case 'too_big_keep':
+        /* Run with ucache.size 5 (ucache.gc.evict 0). Values of about 50 KB with ttl 1 until less than 5% of the memory
+           is free; once they have expired, a string of 6 MB, more than the empty cache holds, then a value of 1 MB.
+           Counts */
+        $stored = 0;
+        $memory = ucache_meminfo();
+        while ($stored < 1000 && $memory['memory_free'] >= $memory['memory_total'] / 20) {
+            ucache_set("e$stored", fill_value($stored), 1);
+            $stored++;
+            $memory = ucache_meminfo();
+        }
+        usleep(2500000);
+        $big = ucache_set('big_string', str_repeat('b', 6000000));
+        $info = ucache_info(true);
+        $after = ['entries' => $info['total_item_count'], 'last_scavenge_seconds' => $info['last_scavenge_seconds']];
+        $fits = ucache_set('after', str_repeat('a', 1048576));
+        $info = ucache_info(true);
+        $result = ['stored' => $stored, '6 MB set' => $big, 'after it' => $after, '1 MB set' => $fits,
+                   'entries at the end' => $info['total_item_count'], 'total_scavenged_count' => $info['total_scavenged_count']];
+        break;
+
+    case 'fits_counted':
+        /* Run with ucache.size 8 and ucache.gc.evict 10. Values that only an almost empty cache holds, whose parts occur
+           more than once: phase 1 must count each part once, or refuse them. Before each, the cache is filled until less
+           than 5% is free, so that the set evicts. [set and read back] of each */
+        $big = str_repeat('a', 4500000);
+        $other = [];
+        for ($i = 0; $i < 4500; $i++) {
+            $other[] = str_repeat(chr(97 + $i % 26), 999) . ($i % 10);
+        }
+        $object = new UcacheChildPoint(str_repeat('o', 3000000), 1);
+        $result = [];
+        foreach (['a string twice, a variable holding it too', 'two references to one string', 'an object three times',
+                  'a sub-array of fresh strings twice', 'the strings of another array, twice', '$GLOBALS holding a big string'] as $k => $what) {
+            ucache_clear();
+            $memory = ucache_meminfo();
+            for ($n = 0; $n < 1000 && $memory['memory_free'] >= $memory['memory_total'] / 20; $n++) {
+                ucache_set("c$n", fill_value($n));
+                $memory = ucache_meminfo();
+            }
+            switch ($k) {
+                case 0: $value = [$big, 'again' => $big]; break;
+                case 1: $s = $big; $value = [&$s, &$s]; break;
+                case 2: $value = [$object, $object, $object]; break;
+                case 3: $value = ['p' => $other, 'q' => $other]; break;
+                case 4: $value = [$other, array_values($other)]; break;
+                /* The other globals that are large go first: only $big is */
+                default: unset($s, $other, $object); $value = ['g' => $GLOBALS, 'b' => $big]; break;
+            }
+            $set = ucache_set('fits', $value);
+            $back = ucache_get('fits');
+            $result[$what] = [$set, ($k === 5) ? (is_array($back) && $back['b'] === $big) : $back == $value];
+            unset($value, $back);
+        }
+        break;
+
+    case 'refused_loop':
+        /* Run with ucache.size 8 and ucache.gc.evict 10, beside 'replace_loop'. Waits until the other process has filled
+           the cache, then stores for 2 s, again and again, an array that the empty cache could not hold, whose table alone
+           fits in the free memory (60,000 strings of 100 bytes, 100,000 from 8.2 on, whose lists are half as large). [sets,
+           sets that returned true] */
+        $count = (PHP_VERSION_ID >= 80200) ? 100000 : 60000;
+        $array = [];
+        for ($i = 0; $i < $count; $i++) {
+            $array[] = str_repeat(chr(97 + $i % 26), 95) . sprintf('%05d', $i % 100000);
+        }
+        $end = microtime(true) + 30;
+        while (!ucache_exists('filled') && microtime(true) < $end) {
+            usleep(10000);
+        }
+        $sets = 0;
+        $stored = 0;
+        $end = microtime(true) + 2;
+        while (microtime(true) < $end) {
+            $sets++;
+            $stored += ucache_set('refused', $array) ? 1 : 0;
+        }
+        $result = [$sets, $stored];
+        break;
+
+    case 'replace_loop':
+        /* Run with ucache.size 8 and ucache.gc.evict 10, beside 'refused_loop'. Fills the cache with values of about 50 KB
+           without a ttl until less than 30% is free, then replaces 100 values of 2 KB again and again for 2.5 s. [entries
+           filled, sets, sets that failed, total_evicted_count, entries at the end] */
+        $memory = ucache_meminfo();
+        for ($n = 0; $n < 1000 && $memory['memory_free'] >= $memory['memory_total'] * 0.3; $n++) {
+            ucache_set("c$n", fill_value($n));
+            $memory = ucache_meminfo();
+        }
+        ucache_set('filled', 1);
+        $sets = 0;
+        $failed = 0;
+        $end = microtime(true) + 2.5;
+        while (microtime(true) < $end) {
+            $failed += ucache_set('r' . ($sets % 100), str_repeat(chr(97 + $sets % 26), 2048)) ? 0 : 1;
+            $sets++;
+        }
+        $info = ucache_info(true);
+        $result = [$n, $sets, $failed, $info['total_evicted_count'], $info['total_item_count']];
+        break;
+
+    case 'pool_sizes':
+        /* Stored arrays in a cache of their own: [bytes and blocks per row of 14 short strings (50 rows), blocks each
+           value with shared parts takes, blocks of a list of 100 rows, every value read back] */
+        $row = function ($u) {
+            $cdn = 'https://cdn.example.com/users/' . ceil($u / 1000) . "/$u/";
+            return ['uid' => (string)$u, 'disabled' => '0', 'name' => 'Firstname Lastname', 'first_name' => 'Firstname',
+                    'last_name' => 'Lastname', 'pic_square' => $cdn . 'pic_square_5f3a9c21.jpg', 'pic' => $cdn . 'pic_5f3a9c21.jpg',
+                    'pic_big' => $cdn . 'pic_big_5f3a9c21.jpg', 'ratio_x' => '0.7500', 'ratio_y' => '1.0000', 'pic_h' => '640',
+                    'x' => '0', 'y' => '12', 'huid' => "uid=$u&h=" . substr(md5((string)$u), 0, 16)];
+        };
+        $back = true;
+        $m0 = ucache_meminfo();
+        for ($i = 0; $i < 50; $i++) {
+            ucache_set("row$i", $row(1000000 + $i));
+        }
+        $m1 = ucache_meminfo();
+        for ($i = 0; $i < 50; $i++) {
+            $back = $back && ucache_get("row$i") === $row(1000000 + $i);
+        }
+        $s = str_repeat('z', 300) . microtime(true);
+        $t = [1, 2];
+        $sub = ['x', 'y', [3, 4]];
+        $o = new UcacheChildPoint('a', [1]);
+        $columns = [];
+        foreach (['id', 'name', 'email', 'created', 'status'] as $c) {
+            $columns[] = $c . '';
+        }
+        $fetched = [];
+        foreach ($columns as $j => $c) {
+            $fetched[$c] = "value $j";
+        }
+        $shapes = ['a string thrice' => [$s, $s, 'k' => $s], 'references' => ['a' => &$s, 'b' => &$s, 'c' => &$t, 'd' => &$t],
+                   'objects' => [$o, $o, new UcacheChildPoint(1, 2)], 'a shared sub-array' => ['p' => $sub, 'q' => $sub, 'r' => [$sub]],
+                   'empty arrays' => ['a' => [], 'b' => [[]]], 'shared keys' => $fetched, 'a hash with holes' => array_slice(range(0, 63), 60, null, true),
+                   'nested' => ['n' => 1, 'f' => 1.5, 'l' => [1, [2, [3, ['deep']]]], 'o' => $o]];
+        $blocks = [];
+        foreach ($shapes as $what => $value) {
+            $before = ucache_meminfo()['num_used_blks'];
+            ucache_set("shape $what", $value);
+            $blocks[$what] = ucache_meminfo()['num_used_blks'] - $before;
+            $back = $back && ucache_get("shape $what") == $value;
+        }
+        $rows = [];
+        for ($i = 0; $i < 100; $i++) {
+            $rows[] = $row(2000000 + $i);
+        }
+        $before = ucache_meminfo()['num_used_blks'];
+        ucache_set('rows', $rows);
+        $listBlocks = ucache_meminfo()['num_used_blks'] - $before;
+        $back = $back && ucache_get('rows') === $rows;
+        $result = [($m0['memory_free'] - $m1['memory_free']) / 50, ($m1['num_used_blks'] - $m0['num_used_blks']) / 50, $blocks, $listBlocks, $back];
+        break;
+
+    case 'clear_fill':
+        /* Fills the cache with integers under keys of 40 characters until a set fails, stores 'marker', says FILLED,
+           waits for a line, times ucache_clear(), then creates the file argv[2]: [entries stored, cleared, seconds,
+           total_item_count right after] */
+        $stored = 0;
+        while ($stored < 2000000 && ucache_set(sprintf('clear-%034d', $stored), $stored)) {
+            $stored++;
+        }
+        ucache_delete(sprintf('clear-%034d', 0));
+        ucache_set('marker', 1);
+        echo "FILLED\n";
+        fgets(STDIN);
+        $start = microtime(true);
+        $cleared = ucache_clear();
+        $seconds = microtime(true) - $start;
+        touch($argv[2]);
+        $result = [$stored, $cleared, $seconds, ucache_info(true)['total_item_count']];
+        break;
+
+    case 'clear_read':
+        /* Says READY, waits for a line, picks 5 entries of 'clear_fill' in the last tenth of the hash buckets (which the
+           sweep of the clear reaches last), says READING, then reads 'marker' until the file argv[2] exists: the longest
+           read. At the first miss (the cache was cleared), it looks the 5 up in every way at once, while the sweep is
+           going on. [longest read, entries looked up, lookups, total_item_count then, clear still going on then] */
+        echo "READY\n";
+        fgets(STDIN);
+        $buckets = cache_buckets(ucache_meminfo()['memory_total']);
+        $picked = [];
+        for ($i = 1; $i < 2000000 && count($picked) < 5; $i++) {
+            $key = sprintf('clear-%034d', $i);
+            if (cache_bucket($key, $buckets) >= $buckets * 0.9) {
+                if (!ucache_exists($key)) {
+                    break;
+                }
+                $picked[] = [$key, $i];
+            }
+        }
+        echo "READING\n";
+        $longest = 0;
+        $looked = null;
+        $items = null;
+        $during = null;
+        $end = microtime(true) + 60;
+        while (!file_exists($argv[2]) && microtime(true) < $end) {
+            $t0 = microtime(true);
+            $got = ucache_get('marker');
+            $longest = max($longest, microtime(true) - $t0);
+            if ($got === false && $looked === null && count($picked) === 5) {
+                $info = ucache_info(false, $picked[4][0]);
+                $listed = ucache_info(false, null, 0, 1000);
+                $looked = [ucache_exists($picked[0][0]), ucache_inc($picked[1][0]), ucache_cas($picked[2][0], $picked[2][1], 7),
+                           ucache_add($picked[3][0], 'added'), ucache_get($picked[3][0]), count($info['ucache_entries']),
+                           array_column($listed['ucache_entries'], 'key_name')];
+                $items = ucache_info(true)['total_item_count'];
+                $during = !file_exists($argv[2]);
+            }
+        }
+        $result = [$longest, count($picked), $looked, $items, $during];
+        break;
+
+    case 'clear_write':
+        /* Says READY, waits for a line, then waits until 'marker' is gone (the cache is being cleared), and stores
+           strings of 1000 bytes until the file argv[2] exists: [longest set, sets that returned true, sets that failed] */
+        echo "READY\n";
+        fgets(STDIN);
+        $end = microtime(true) + 60;
+        while (ucache_exists('marker') && microtime(true) < $end) {
+            usleep(100);
+        }
+        $value = str_repeat('w', 1000);
+        $longest = 0;
+        $stored = 0;
+        $failed = 0;
+        $i = 0;
+        while (!file_exists($argv[2]) && microtime(true) < $end) {
+            $t0 = microtime(true);
+            $set = ucache_set('w' . ($i++ % 20000), $value);
+            $longest = max($longest, microtime(true) - $t0);
+            $stored += $set ? 1 : 0;
+            $failed += $set ? 0 : 1;
+        }
+        $result = [$longest, $stored, $failed];
+        break;
+
+    case 'alloc_speed':
+        /* 250000 small entries, every second one deleted: as many free blocks, all too small for a 1000-byte string; then
+           2000 such strings stored ([stored, free blocks, seconds of the 2000 sets, read back, the memory of the empty
+           cache back after a clear, [num_used_blks, num_free_blks] then]) */
+        $free0 = ucache_meminfo()['memory_free'];
+        $stored = 0;
+        for ($i = 0; $i < 250000; $i++) {
+            $stored += ucache_set("a$i", $i) ? 1 : 0;
+        }
+        for ($i = 0; $i < 250000; $i += 2) {
+            ucache_delete("a$i");
+        }
+        $holes = ucache_meminfo()['num_free_blks'];
+        $big = str_repeat('b', 1000);
+        $start = microtime(true);
+        for ($i = 0; $i < 2000; $i++) {
+            ucache_set("b$i", $big . $i);
+        }
+        $seconds = microtime(true) - $start;
+        $back = true;
+        for ($i = 0; $i < 2000; $i++) {
+            $back = $back && ucache_get("b$i") === $big . $i;
+        }
+        ucache_clear();
+        $memory = ucache_meminfo();
+        $result = [$stored, $holes, $seconds, $back, $memory['memory_free'] === $free0, [$memory['num_used_blks'], $memory['num_free_blks']]];
+        break;
+
+    case 'hole_fit':
+        /* Fills the cache with strings of about 50 KB until one does not fit, deletes one in the middle, then stores a
+           string of the same length under a key of the same length, which only the free block it left holds
+           ([entries stored, stored into the hole, read back]) */
+        for ($n = 0; $n < 1000 && ucache_set(sprintf('h%05d', $n), fill_value($n)); $n++) {
+        }
+        $victim = intdiv($n, 2);
+        ucache_delete(sprintf('h%05d', $victim));
+        $value = str_repeat('Z', strlen(fill_value($victim)));
+        $set = ucache_set(sprintf('x%05d', $victim), $value);
+        $result = [$n, $set, ucache_get(sprintf('x%05d', $victim)) === $value];
+        break;
+
     case 'contact_free':
         /* Expired entries, each the only one in its hash bucket (8 MB cache: 16381 buckets): what memory_free gains
            during the ucache_exists(), ucache_inc() and ucache_cas() that remove them */
@@ -4359,7 +4689,32 @@ CHILDSCRIPT
     $fillKeep = child_start('z0-fill-keep', child_php_args($poolBase . 'z0', ['ucache.size' => '5'], $clientScript, ['fill_evict']));
     $fillMixed = child_start('zm-fill-mixed', child_php_args($poolBase . 'zm', ['ucache.size' => '5', 'ucache.gc.evict' => '25'], $clientScript,
                                                             ['fill_mixed']));
+    $fillMixed10 = child_start('zn-fill-mixed', child_php_args($poolBase . 'zn', ['ucache.size' => '5', 'ucache.gc.evict' => '10'], $clientScript,
+                                                              ['fill_mixed']));
+    $fillRaise = child_start('zr-fill-raise', child_php_args($poolBase . 'zr', ['ucache.size' => '5', 'ucache.gc.evict' => '10'], $clientScript,
+                                                            ['fill_raise']));
+    $tooBigEvict = child_start('zb-too-big', child_php_args($poolBase . 'zb', ['ucache.size' => '5', 'ucache.gc.evict' => '10'], $clientScript,
+                                                           ['too_big']));
+    $tooBigKeep = child_start('zk-too-big-keep', child_php_args($poolBase . 'zk', ['ucache.size' => '5'], $clientScript, ['too_big_keep']));
+    $fitsCounted = child_start('zf-fits-counted', child_php_args($poolBase . 'zf', ['ucache.size' => '8', 'ucache.gc.evict' => '10'], $clientScript,
+                                                                ['fits_counted']));
+    $replaceLoop = child_start('zx-replace', child_php_args($poolBase . 'zx', ['ucache.size' => '8', 'ucache.gc.evict' => '10'], $clientScript,
+                                                           ['replace_loop']));
+    $refusedLoop = child_start('zx-refused', child_php_args($poolBase . 'zx', ['ucache.size' => '8', 'ucache.gc.evict' => '10'], $clientScript,
+                                                           ['refused_loop']));
+    $poolSizes = child_start('ps-pool-sizes', child_php_args($poolBase . 'ps', [], $clientScript, ['pool_sizes']));
     $contactFree = child_start('cf-contact-free', child_php_args($poolBase . 'cf', [], $clientScript, ['contact_free']));
+
+    /* The processes of the checks of ucache_clear() and of the allocator below: they fill their caches meanwhile */
+    $clFlag = 'cl-cleared.flag';
+    $crFlag = 'cr-cleared.flag';
+    $clReader = child_start('cl-read', child_php_args($poolBase . 'cl', ['ucache.size' => '64'], $clientScript, ['clear_read', $clFlag]));
+    $clWriter = child_start('cl-write', child_php_args($poolBase . 'cl', ['ucache.size' => '64'], $clientScript, ['clear_write', $clFlag]));
+    $clFiller = child_start('cl-fill', child_php_args($poolBase . 'cl', ['ucache.size' => '64'], $clientScript, ['clear_fill', $clFlag]));
+    $crReader = child_start('cr-read', child_php_args($poolBase . 'cr', ['ucache.size' => '64'], $clientScript, ['clear_read', $crFlag]));
+    $crFiller = child_start('cr-fill', child_php_args($poolBase . 'cr', ['ucache.size' => '64'], $clientScript, ['clear_fill', $crFlag]));
+    $allocSpeed = child_start('as-alloc-speed', child_php_args($poolBase . 'as', ['ucache.size' => '64'], $clientScript, ['alloc_speed']));
+    $holeFit = child_start('hf-hole-fit', child_php_args($poolBase . 'hf', [], $clientScript, ['hole_fit']));
 
     /* The two processes of a check with Fibers (PHP 8.1+, see below), which waits 2 s, as these do: started now, checked
        there. The one that times a store must wait for the flag before the reader creates it */
@@ -4449,6 +4804,144 @@ CHILDSCRIPT
           && $result['inc'][0] === false && $result['inc'][1] > 0 && $result['cas'][0] === false && $result['cas'][1] > 0
           && $result['entries left'] === 0,
           ['exit code' => $exit, '[result, memory_free gained] of each call' => $result, 'output' => child_tail($contactFree)]);
+
+    /* With ucache.gc.evict 10 the expired entries alone make room here (19.98% free after the pass, 1 MB needed): as
+       with 25, nothing is evicted */
+    $exit = child_finish($fillMixed10, 60);
+    $result = child_result($fillMixed10);
+    check('(in another process) with ucache.gc.evict 10, a ucache_set() that does not fit runs the full pass, which removes the expired entries, and that leaves enough free for it: nothing is evicted, and the value is stored',
+          $exit === 0 && is_array($result) && $result['expiring'] > 0 && $result['1 MB set'] === true && $result['cold gone'] === 0
+          && $result['total_evicted_count'] === 0 && $result['total_scavenged_count'] === $result['expiring'],
+          ['exit code' => $exit, 'counts' => $result, 'output' => child_tail($fillMixed10)]);
+
+    /* More than ucache.gc.evict percent is free, nothing has expired, and the value does not fit: the pass evicts until
+       more is free (WinCache 2.0.0.8 had no eviction) */
+    $exit = child_finish($fillRaise, 60);
+    $result = child_result($fillRaise);
+    check('(in another process) with ucache.gc.evict 10 and more than 10% free, nothing expired, a value larger than the free memory makes the full pass evict until more is free, and is stored; the next one too, at once',
+          $exit === 0 && is_array($result) && $result['first set'] === true && $result['second set'] === true
+          && $result['total_evicted_count'] >= 1 && $result['total_scavenged_count'] === $result['total_evicted_count']
+          && $result['entries'] + $result['total_evicted_count'] === $result['cold'] + 2,
+          ['exit code' => $exit, 'counts' => $result, 'output' => child_tail($fillRaise)]);
+
+    /* A value that takes more than the empty cache holds, counted from below, fails at once, before it takes any shared
+       memory: no full pass, nothing removed or evicted */
+    $exit = child_finish($tooBigEvict, 60);
+    $result = child_result($tooBigEvict);
+    check('(in another process) with ucache.gc.evict 10, values that take more than the empty cache holds (a 6 MB string, an array of 6000 strings of 1000 bytes, an array holding a 6 MB string that a variable holds too) fail at once in a full cache: nothing is evicted or removed, no full pass runs, the memory is as it was; a value that only the empty cache holds is stored, evicting every entry',
+          $exit === 0 && is_array($result) && $result['too big sets'] === [false, false, false]
+          && $result['after them'] === ['entries' => $result['cold'], 'evicted' => 0, 'scavenged' => 0, 'last_scavenge_seconds' => null,
+                                        'memory_free and num_used_blks unchanged' => true]
+          && $result['set that only the empty cache holds'] === true && $result['entries at the end'] === 1
+          && $result['total_evicted_count'] === $result['cold'],
+          ['exit code' => $exit, 'counts' => $result, 'output' => child_tail($tooBigEvict)]);
+
+    $exit = child_finish($tooBigKeep, 60);
+    $result = child_result($tooBigKeep);
+    check('(in another process) with ucache.gc.evict 0, a value larger than the empty cache runs no full pass (the expired entries stay); the next value that does not fit runs it and is stored',
+          $exit === 0 && is_array($result) && $result['6 MB set'] === false
+          && $result['after it'] === ['entries' => $result['stored'], 'last_scavenge_seconds' => null] && $result['1 MB set'] === true
+          && $result['entries at the end'] === 1 && $result['total_scavenged_count'] === $result['stored'],
+          ['exit code' => $exit, 'counts' => $result, 'output' => child_tail($tooBigKeep)]);
+
+    /* The count of what a value takes counts each part once, however often it occurs: a value that only an almost empty
+       cache holds is stored, not refused */
+    $exit = child_finish($fitsCounted, 60);
+    $result = child_result($fitsCounted);
+    check('(in another process) values whose parts occur more than once (a string twice and in a variable, two references to one string, an object three times, a sub-array twice, the strings of another array twice, $GLOBALS holding a big string), each held only by an almost empty cache, are stored and read back',
+          $exit === 0 && is_array($result) && count($result) === 6 && count(array_filter($result, function ($r) { return $r !== [true, true]; })) === 0,
+          ['exit code' => $exit, '[set, read back]' => $result, 'output' => child_tail($fitsCounted)]);
+
+    /* A value larger than the empty cache takes no shared memory, so another process's writes do not run out of memory
+       because of it and evict nothing */
+    $replaceExit = child_finish($replaceLoop, 60);
+    $refusedExit = child_finish($refusedLoop, 60);
+    $replaced = child_result($replaceLoop);
+    $refused = child_result($refusedLoop);
+    check('(in another process) while a process stores again and again an array larger than the empty cache (refused each time), another one replaces values of 2 KB in the same cache, filled to 70%, with ucache.gc.evict 10: none of its sets fails and nothing is evicted',
+          $replaceExit === 0 && $refusedExit === 0 && is_array($replaced) && is_array($refused) && $refused[0] > 0 && $refused[1] === 0
+          && $replaced[1] > 0 && $replaced[2] === 0 && $replaced[3] === 0,
+          ['exit codes (replacing, refused)' => [$replaceExit, $refusedExit], '[filled, sets, failed, evicted, entries]' => $replaced,
+           '[sets, stored]' => $refused, 'output' => [child_tail($replaceLoop), child_tail($refusedLoop)]]);
+
+    /* A stored array takes what it holds: its tables and strings go in one block of the size phase 1 counted, whatever
+       it shares (WinCache 2.0.0.8 put them in chunks of 512 bytes to 4 KB, which small tables left mostly empty) */
+    $exit = child_finish($poolSizes, 60);
+    $result = child_result($poolSizes);
+    check('(in another process) a stored row of 14 short strings takes less than 3000 bytes, and every stored array takes 4 blocks (entry, zval, tracker, one block for all its parts), whatever it shares: strings, references, objects, sub-arrays, keys; and a list of 100 rows too',
+          $exit === 0 && is_array($result) && $result[0] < 3000 && $result[1] == 4
+          && count(array_filter($result[2], function ($b) { return $b !== 4; })) === 0 && $result[3] === 4 && $result[4] === true,
+          ['exit code' => $exit, '[bytes per row, blocks per row, blocks per value, blocks of 100 rows, read back]' => $result,
+           'output' => child_tail($poolSizes)]);
+
+    /* ucache_clear() of a full cache of 64 MB clears it at once, under the cache lock, then frees the entries a batch
+       at a time, the lock released between batches: a process that reads meanwhile waits for a batch at most, and the
+       lookups of every kind miss the cleared entries that the sweep has not reached yet (those of the last buckets),
+       while an entry added meanwhile stays. WinCache 2.0.0.8 freed every entry under the lock, so the reader waited as
+       long as the clear took. Then the same with a process that stores strings of 1000 bytes meanwhile, which do not
+       fit at first: its sets that need memory help the sweep for a millisecond and fail if that is not enough, so it
+       waits a few milliseconds at most, and the clear does not take much longer than with the reader alone. The bounds
+       are relative, for a loaded machine */
+    $clearReady = child_wait_for($crFiller, '/^FILLED/m', 90) && child_wait_for($crReader, '/^READY/m', 30)
+                  && child_wait_for($clFiller, '/^FILLED/m', 90) && child_wait_for($clReader, '/^READY/m', 30) && child_wait_for($clWriter, '/^READY/m', 30);
+    child_send($crReader, 'go');
+    $crReading = $clearReady && child_wait_for($crReader, '/^READING/m', 30);
+    child_send($crFiller, 'go');
+    $crFillExit = child_finish($crFiller, 60);
+    $crReadExit = child_finish($crReader, 30);
+    $crCleared = child_result($crFiller);
+    $crRead = child_result($crReader);
+    $lookupsOk = function ($looked) {
+        return is_array($looked) && array_slice($looked, 0, 6) === [false, false, false, true, 'added', 0]
+               && count(array_filter($looked[6], function ($key) { return strpos($key, 'clear-') === 0; })) === 0;
+    };
+    check('(in another process) ucache_clear() of a full cache of 64 MB: another process that reads meanwhile waits less than a quarter of the time the clear takes, and while the entries are being freed, ucache_exists(), ucache_inc(), ucache_cas(), ucache_info() of a key and the listing miss the cleared ones, ucache_add() of one stores, and total_item_count counts only that one',
+          $crReading && $crFillExit === 0 && $crReadExit === 0 && is_array($crCleared) && is_array($crRead)
+          && $crCleared[0] > 100000 && $crCleared[1] === true && $crCleared[3] <= 1
+          && $crRead[0] < max(0.02, $crCleared[2] / 4) && $crRead[1] === 5 && $lookupsOk($crRead[2]) && $crRead[3] === 1,
+          ['exit codes (process that clears, process that reads)' => [$crFillExit, $crReadExit],
+           '[stored, cleared, seconds, entries left]' => $crCleared,
+           '[longest read, picked, [exists, inc, cas, add, get, info entries, keys listed], total_item_count, during the clear]' => $crRead,
+           'output' => [child_tail($crFiller), child_tail($crReader)]]);
+
+    child_send($clReader, 'go');
+    child_send($clWriter, 'go');
+    $clReading = $clearReady && child_wait_for($clReader, '/^READING/m', 30);
+    child_send($clFiller, 'go');
+    $clFillExit = child_finish($clFiller, 60);
+    $clReadExit = child_finish($clReader, 30);
+    $clWriteExit = child_finish($clWriter, 30);
+    $clCleared = child_result($clFiller);
+    $clRead = child_result($clReader);
+    $clWrote = child_result($clWriter);
+    check('(in another process) ucache_clear() of a full cache of 64 MB while one process reads and another stores strings of 1000 bytes: the reader waits less than a quarter of the time the clear takes, the writer less than 50 ms or a quarter of it and stores some meanwhile, and the clear takes less than twice as long as with the reader alone',
+          $clReading && $clFillExit === 0 && $clReadExit === 0 && $clWriteExit === 0 && is_array($clCleared) && is_array($clRead)
+          && is_array($clWrote) && is_array($crCleared) && $clCleared[0] > 100000 && $clCleared[1] === true
+          && $clRead[0] < max(0.02, $clCleared[2] / 4) && $lookupsOk($clRead[2])
+          && $clWrote[0] < max(0.05, $clCleared[2] / 4) && $clWrote[1] > 0 && $clCleared[2] < 2 * $crCleared[2] + 0.25,
+          ['exit codes (clears, reads, writes)' => [$clFillExit, $clReadExit, $clWriteExit], '[stored, cleared, seconds, entries left]' => $clCleared,
+           'seconds of the clear with the reader alone' => is_array($crCleared) ? $crCleared[2] : null,
+           '[longest read, picked, lookups, total_item_count, during the clear]' => $clRead, '[longest set, stored, failed]' => $clWrote,
+           'output' => [child_tail($clFiller), child_tail($clReader), child_tail($clWriter)]]);
+
+    /* Free blocks are kept in lists by size, so storing a value does not go through the free blocks that are too small
+       for it: WinCache 2.0.0.8 kept them in one list in address order and took the first one large enough. The bound
+       is wide, for a loaded machine. A clear then gives every block back: one used block (the cache header) and one
+       free block */
+    $exit = child_finish($allocSpeed, 120);
+    $result = child_result($allocSpeed);
+    check('(in another process) with 125000 free blocks too small for them, 2000 sets of a 1000-byte string take less than 0.5 seconds, and a clear gives all the memory back in one free block',
+          $exit === 0 && is_array($result) && $result[0] === 250000 && $result[1] > 100000 && $result[2] < 0.5 && $result[3] === true
+          && $result[4] === true && $result[5] === [1, 1],
+          ['exit code' => $exit, '[stored, free blocks, seconds, read back, memory back, [used, free] blocks]' => $result, 'output' => child_tail($allocSpeed)]);
+
+    /* A value is stored as long as one free block is large enough for it, also when that block is in the size class
+       of the value and nothing larger is free */
+    $exit = child_finish($holeFit, 60);
+    $result = child_result($holeFit);
+    check('(in another process) in a full cache, a string of the length of the one just deleted is stored in the free block it left',
+          $exit === 0 && is_array($result) && $result[0] > 50 && $result[1] === true && $result[2] === true,
+          ['exit code' => $exit, '[entries stored, stored into the hole, read back]' => $result, 'output' => child_tail($holeFit)]);
 
     /* Changes made by __sleep() while the value is copied in (see above), in the forms that crash PHP or
        store a broken entry when the copy reads freed memory, so in a process of their own */
@@ -4693,9 +5186,9 @@ CHILDSCRIPT
                                              'keys' => [['d_entry' => 'entry value'], ['d_entry'], false], 'notices' => []],
           ['exit code' => $derivedExit, 'result' => $result, 'output' => child_tail($derived)]);
 
-    /* A block freed between two used blocks goes into the free list, which is kept in address order, without walking the
-       entries after it: with WinCache's allocator, deleting every second one of 10000 entries took 0.8 seconds, and the
-       time grew with the square of the number of entries. The bound is wide, for a loaded machine */
+    /* A block freed between two used blocks goes into the list of its size class, without walking the entries after it:
+       with WinCache's allocator, deleting every second one of 10000 entries took 0.8 seconds, and the time grew with the
+       square of the number of entries. The bound is wide, for a loaded machine */
     $speed = child_start('fs-free-speed', child_php_args($poolBase . 'fs', ['ucache.size' => '64'], $clientScript, ['free_speed']));
     $speedExit = child_finish($speed, 120);
     $result = child_result($speed);
@@ -4964,11 +5457,10 @@ CHILDSCRIPT
         child_kill($server);
     }
 
-    /* Deleting an entry of 100000 small arrays frees about 100000 blocks of shared memory, holding the cache lock. The
-       chunks of a memory pool are freed from the last to the first, each data block before its header, so that a block
-       usually merges with a free neighbour at once: freed in the order of the list, every data block had used blocks on
-       both sides, and each free walked all the used blocks after it (15 to 25 s here), while every other process of the
-       pool waited for the lock. Another process reads meanwhile */
+    /* Deleting an entry of 100000 small arrays, holding the cache lock. Its parts lie in one block of the size counted
+       when it was stored; with WinCache's chunks of fixed sizes they took about 100000 blocks, and with WinCache's
+       allocator each free of a block between used blocks walked all the used blocks after it (15 to 25 s here), while
+       every other process of the pool waited for the lock. Another process reads meanwhile */
     $pool = $poolBase . 'n';
     $flag = 'n-deleted.flag';
     $reader = child_start('n-reader', child_php_args($pool, ['ucache.size' => '64'], $clientScript, ['stall_reader', $flag]));

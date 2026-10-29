@@ -219,7 +219,9 @@ this long, whatever their ttl. 0: the scavenger removes expired entries only. Se
 
 Defines a free memory percentage, 0 to 100 (higher values act as 100). When > 0 and `ucache_set()` or `ucache_add()`
 finds the cache full, the entries not used for the longest time are evicted until this percentage of the cache is
-free, or more if the value still does not fit. 0: no eviction. See [The Scavenger](#the-scavenger).
+free, or more if that is not enough for the value. A value that takes, counted from below, more than the empty cache
+holds fails at once and evicts nothing (see [A full cache](#a-full-cache)). 0: no eviction. See
+[The Scavenger](#the-scavenger).
 
 `ucache.prefix` *string*
 
@@ -494,6 +496,7 @@ passes in the key's hash bucket: the key's own expired entry, and possibly expir
 the bucket. So storing a key again after it expired leaves a single entry, and `ucache_delete()` of an expired key
 returns false (the key is missing) and removes the entry. This removal on contact happens whatever the `ucache.gc.*`
 settings are, and concerns expired entries only: the entries that `ucache.gc.ttl` targets are left to the scavenger.
+It also removes the entries of the bucket that a `ucache_clear()` has not freed yet.
 `ucache_info()` and `ucache_meminfo()` never remove anything: the full `ucache_info()` listing shows the expired
 entries that nothing has removed yet.
 
@@ -504,7 +507,9 @@ A scavenger step goes through a number of hash buckets, starting where the previ
 - the expired entries;
 - when `ucache.gc.ttl` > 0, also the entries not used for `ucache.gc.ttl` seconds or more, whatever their ttl (ttl 0
   included). This does not make them expire: until a step reaches such an entry, it can still be read, and reading
-  it is a use.
+  it is a use;
+- the entries that a `ucache_clear()` has not freed yet (see [Freeing memory](#freeing-memory)), as many as one of
+  its batches, without counting them.
 
 Steps run:
 
@@ -537,34 +542,67 @@ going through a table that holds many entries can take more than 5 minutes.
 ### A full cache
 
 When `ucache_set()` or `ucache_add()` runs out of shared memory for a value (in the array forms, for any of the
-keys), it does not fail at once. It takes the cache lock and runs a full pass over the whole table, without the 1 ms
+keys), it does not fail at once, unless the value takes more memory than the empty cache holds, the `memory_free` of
+`ucache_meminfo()` with no entries (8,254,728 bytes for the default 8 MB): such a call fails at once, before it takes
+any shared memory, so nothing is removed or evicted for it and the writes of the other processes do not run out of
+memory because of it. Otherwise it takes the cache lock and runs a full pass over the whole table, without the 1 ms
 limit, that removes what a step removes. If `ucache.gc.evict` is > 0 and less than `ucache.gc.evict` percent of the
-cache is then free, it evicts the entries not used for the longest time, whatever their ttl, one by one, until that
-percentage is free. Then it tries to store the value once more. With `ucache.gc.evict`, a value that still does not
-fit makes it evict again, until twice that percentage is free, then four times and so on, up to the whole cache:
+cache is then free, it evicts the entries not used for the longest time, whatever their ttl, until that percentage is
+free. It aims at twice that percentage instead, or four times and so on, while that percentage of the cache is less
+than the value takes and less than that is free, or while the pass removed nothing and that much is free already: the
+value did not fit with that much free, unless memory was freed between the failed write and the pass, which then
+evicts more than it needed to. Then it tries to store the value once more. With `ucache.gc.evict`, a value that still
+does not fit makes it evict again, until twice as much is free, then four times and so on, up to the whole cache:
 free memory in many small pieces may not hold a value that needs one large block, so such a value, in a cache full
 of small entries, can empty most of it. If the value still does not fit, the call fails: it returns false, or the
 array form lists the key among the failures. A write that finds that another process ran a full pass meanwhile only
-tries again. When a full pass removed nothing and the value still did not fit, the processes that share the cache
-skip the pass for a while, at least a second and 20 times as long as the pass took (at most a minute): their writes
-that run out of memory meanwhile fail at once (so do the following keys of an array form), and an entry that
-expires meanwhile is removed by the next pass.
+tries again. When a full pass removed nothing (with `ucache.gc.evict`, the cache had no entry left) and the value
+still did not fit, the processes that share the cache skip the pass for a while, at least a second and 20 times as
+long as the pass took (at most a minute): their writes that run out of memory meanwhile fail at once (so do the
+following keys of an array form), and an entry that expires meanwhile is removed by the next pass. While a
+`ucache_clear()` is freeing the entries of the cache (see [Freeing memory](#freeing-memory)), a write that runs out of
+memory helps it free them for about a millisecond and tries again, instead of running a full pass, up to 16 times; if
+the value still does not fit, the call fails.
+
+The memory a value takes is counted before anything is copied: its strings, arrays and references and the
+serializations of its objects, each once however often it occurs, but not the cache's own overheads (about 40 bytes
+for each block of the allocator, and an entry takes at least 2 blocks, an array 4). So a value that is larger than
+the empty cache only through these overheads still runs the pass, and can empty the cache before its call fails.
+Before PHP 8.1, an array that `array_merge()` and the like make of `$GLOBALS` (see [Values](#values)) is not counted.
 
 Eviction goes by groups of similar idle time (powers of two of seconds), the longest idle first; within a group,
-entries go in the order of the table, so the order is only roughly that of the last use. With `ucache.gc.evict=0`,
-the default, nothing is evicted: entries are removed only by their ttl, `ucache.gc.ttl`, a delete, a replace or a
-clear.
+entries go in the order of the table, so the order is only roughly that of the last use. The free memory is read
+again once the entries evicted since the last reading could have freed what was missing, or after 64 of them, so a
+pass can evict up to 63 small entries more than it needed to. With `ucache.gc.evict=0`, the default, nothing is
+evicted: entries are removed only by their ttl, `ucache.gc.ttl`, a delete, a replace or a clear.
 
 ### Freeing memory
 
 Every removal (a delete, a replace by `ucache_set()`, a removal on contact, a step) unlinks the entries under the
 cache lock and frees their memory right after the lock is released, before the call returns, so freeing a big entry
-does not hold up the other processes. That is for up to 32 entries per call; the entries a call removes beyond that
-(`ucache_clear()` of a full cache, for example) are freed at once, under the lock, and so is everything the full
-pass of a full cache removes, so that the write waiting for the memory, and the next process that runs out of it,
-see what is really free. If a process is killed while it frees, for example by an IIS FastCGI timeout, the memory of
-the entries it had not freed yet (32 at most) stays lost until every process of the pool has exited; a process
-killed in the middle of a free under the lock loses the rest of that entry.
+does not hold up the other processes. That is for up to 32 entries per call; the entries a step removes beyond that
+are freed at once, under the lock, and so is everything the full pass of a full cache removes, so that the write
+waiting for the memory, and the next process that runs out of it, see what is really free (the full pass frees them
+32 entries at a time, taking the lock of the allocator once for each batch). If a process is killed while it frees,
+for example by an IIS FastCGI timeout, the memory of the entries it had not freed yet (32 at most) stays lost until
+every process of the pool has exited; a process killed in the middle of a free under the lock loses the rest of that
+entry.
+
+`ucache_clear()` clears the cache at once, under the cache lock: from then on no process sees the entries that were in
+it (the calls miss them, the listing and `total_item_count` leave them out), and an entry stored afterwards is kept.
+Then it removes them and frees their memory in batches: each batch takes the cache lock for at most 32 entries (fewer
+if their values took 256 KB) or 4096 hash buckets, and frees its entries once the lock is released, taking the lock of
+the allocator once for the batch. So the other processes go on reading and writing meanwhile, and wait for one batch at
+most. The call returns once the batches are done. A `ucache_clear()` while another process is still freeing the
+entries of an earlier one clears the cache at once in the same way and returns: that process goes on, through the
+whole table again. Meanwhile, a write that runs out of memory helps for about a millisecond at a time (see
+[A full cache](#a-full-cache)), and so does the end of every request while `ucache.gc.interval` > 0. Measured on PHP 7.2
+with a full cache of 512 MB (2.5 million entries of about 200 bytes): the clear took 1.2 to 1.6 seconds; meanwhile a
+read in another process waited at most 0.6 ms, a small write 1 ms, and a write of 1000 bytes, which needed memory,
+at most 19 ms (28 of 11,131 such writes failed), and a second `ucache_clear()` took less than 0.1 ms. If the process
+that frees the entries is killed, the cache stays cleared, and the entries left are freed by those helpers, by the
+lookups and steps that pass them, or by the next `ucache_clear()`, which takes over once that process has done nothing
+for a second.
 
 ### What ucache_info() reports
 
@@ -588,7 +626,9 @@ neither are removals on contact, deletes, replaces and clears.
   instead of calling `ucache_clear()` from PHP when a write fails: eviction removes the entries not used for the
   longest time, `ucache_clear()` removes everything, for every process of the pool. A very low value frees little,
   so full passes come often, and each one holds the cache lock while it goes through the whole table. A
-  `total_evicted_count` that keeps growing means that the cache is too small for what is stored in it.
+  `total_evicted_count` that keeps growing means that the cache is too small for what is stored in it. A value larger
+  than the empty cache (see [A full cache](#a-full-cache)) fails whatever the settings: only a larger `ucache.size`
+  stores it.
 - `ucache.gc.threshold` makes the scavenger work harder once the cache is that full: with the default
   `ucache.gc.interval`, the steps on writes go through the table ten times faster than the steps at the end of requests,
   for about 1 ms of cache lock a second, and faster again while they find entries to remove. It only helps where entries
@@ -598,8 +638,8 @@ neither are removals on contact, deletes, replaces and clears.
   back above 50% after about 45 seconds, with steps holding the cache lock about 1% of the time (in a fuller cache,
   about 10,000 a second while at most a quarter of 50% was free). If new values fill the cache first, the full pass of a
   full cache removes all the expired entries at once, and every process of the pool waits for it: it held the cache lock
-  for about 1 second for 660,000 expired entries in 128 MB. Steps on writes cannot prevent that pass then: spread the
-  ttls of entries stored together, or give the cache room for them.
+  for about 0.18 seconds for 635,000 expired entries in 128 MB. Steps on writes cannot prevent that pass then: spread
+  the ttls of entries stored together, or give the cache room for them.
 - `ucache.gc.interval=0` turns off the steps at the end of requests: expired entries are then removed only on contact,
   by steps on writes (`ucache.gc.threshold`) and by the full pass of a full cache. It suits a cache where no entry has a
   ttl and `ucache.gc.ttl` is 0, since steps have nothing to remove there.
@@ -827,7 +867,11 @@ ucache_clear - Deletes the entire content of the user cache
 ucache_clear(): bool
 ```
 
-Clears/deletes all the values stored in the user cache, for every process that shares the cache.
+Clears/deletes all the values stored in the user cache, for every process that shares the cache. The cache is empty
+for every process at once; the memory of the entries is then freed a batch at a time while the other processes use
+the cache, and the function returns once the entries are removed (other processes that help may free their last
+batches just after), or at once if another process is still freeing the entries of an earlier `ucache_clear()` (see
+[Freeing memory](#freeing-memory)).
 
 #### Parameters
 
@@ -1530,7 +1574,7 @@ The above example will output:
 Array
 (
     [memory_total] => 8388608
-    [memory_free] => 8257224
+    [memory_free] => 8254728
     [num_used_blks] => 1
     [num_free_blks] => 1
     [memory_overhead] => 128
@@ -1783,7 +1827,9 @@ a test can wait. And it starts other PHP processes that load that DLL, each grou
 single process cannot, such as a cache shared by several processes and which processes share one (`ucache.apppoolid`,
 `APP_POOL_ID`, the parent process), the settings read at startup (`ucache.size`, `ucache.prefix`) and a cache that
 cannot be created, the release of the cache lock after a fatal error, the scavenger at the end of requests and on
-writes, and the processes that start while the last process of their pool closes the cache or after one died while it
+writes, a full cache (eviction, and values larger than the empty cache while another process writes), `ucache_clear()`
+of a full cache while other processes read and write, storing in a fragmented cache, the memory that stored arrays
+take, and the processes that start while the last process of their pool closes the cache or after one died while it
 created the cache (a Windows PowerShell script holds named objects of the cache as such processes find them; without
 `powershell.exe`, or where it runs in ConstrainedLanguage mode, these checks are skipped, with a `SKIP` line). They need
 a writable temporary folder, free local ports and Windows PowerShell, and every process they start has a timeout.
@@ -1847,7 +1893,8 @@ Several of these change what existing code sees.
 - The scavenger works differently (see [The Scavenger](#the-scavenger)). Its steps also run at the end of requests,
   sized to the cache, and apply the same expiry rule as reads (the time since the entry was stored); calls that look
   up a key remove the expired entries they pass; and a `ucache_set()` or `ucache_add()` that finds the cache full
-  first runs a full pass and, with `ucache.gc.evict`, evicts the entries not used for the longest time. WinCache
+  first runs a full pass and, with `ucache.gc.evict`, evicts the entries not used for the longest time, unless the
+  value takes more than the empty cache holds, which fails at once (see [A full cache](#a-full-cache)). WinCache
   2.0.0.8 ran a step of 16 hash buckets only inside writes (set, add, delete, inc, dec, cas), at most every 10
   seconds, so a cache that was only read was never scavenged; it removed an entry once its ttl had passed since it
   was last read or stored, up to a second before it expired or up to another ttl after; calls left expired entries in
@@ -1867,6 +1914,23 @@ Several of these change what existing code sees.
   block in shared memory to find the next free one, which took time in proportion to the number of entries: deleting
   every second one of 10,000 entries took 0.8 seconds, of 100,000 entries minutes, with every process of the pool
   waiting for the allocator meanwhile.
+- Storing a value takes the same time however fragmented the cache is: free blocks are kept in lists by size, and a
+  block is split only when the rest can hold the smallest block the cache asks for (16 bytes). With 125,000 free
+  blocks too small for them, 2000 sets of a 1000-byte string take about 0.01 second. WinCache 2.0.0.8 kept its free
+  blocks in one list in address order and took the first one large enough, so a write took time in proportion to the
+  free blocks before it; and it split a block when 4 bytes or more were left, leaving free blocks that nothing could
+  use, which every search then went past.
+- A stored array takes the memory it holds: its tables and strings are counted before they are copied and go in one
+  block of that size, each string once however often it occurs. A row of 14 short strings takes about 2.1 KB with the
+  entry, an array of 100 such rows about 100 KB. WinCache 2.0.0.8 put them in chunks of 512 bytes, 1 KB or 4 KB, by
+  the size of the part, which a small table left mostly empty.
+- `ucache_clear()` holds the cache lock only for a moment: the cache is empty for every process at once, and its
+  entries are then freed in batches of at most 32, the lock released between them, so the other processes go on
+  reading and writing (with a full cache of 512 MB, a read in another process waited at most 0.6 ms during a clear of
+  1.2 to 1.6 seconds); a `ucache_clear()` while the entries of an earlier one are being freed returns at once; and a
+  process killed during the clear leaves the cache cleared (see [Freeing memory](#freeing-memory)). WinCache 2.0.0.8
+  freed every entry under the cache lock, so every other process of the pool waited until the clear ended, and a
+  process killed during the clear left the entries it had not reached in the cache.
 - Lookups stay fast as the cache fills: the hash table has one bucket per 512 bytes of `ucache.size` (16381 for the
   default 8 MB, 262139 for 128 MB), so its chains hold 2 to 3 entries on average even in a cache full of the smallest
   entries, and the whole key is hashed. WinCache 2.0.0.8 had one bucket per 32 to 64 KB (197 for 8 MB, 3203 for
@@ -1968,10 +2032,11 @@ Several of these change what existing code sees.
 - Objects are unserialized after the cache lock has been released, and values are copied in without holding it, so
   `__sleep()`, `__serialize()`, `__wakeup()`, `__unserialize()`, `Serializable::serialize()` and
   `Serializable::unserialize()` do not run under the lock, and readers do not wait while a value is copied in.
-  WinCache 2.0.0.8 did both under the lock. The cost: with several processes writing at once, aggregate
-  `ucache_set()` throughput is lower than with WinCache 2.0.0.8 (about 2 to 2.7 times lower with 2 to 6 writers on
-  PHP 7.2), because concurrent copies take turns on the allocator's lock for each allocation. A single writer is as
-  fast.
+  WinCache 2.0.0.8 did both under the lock. The cost: with several processes writing small values at once, aggregate
+  `ucache_set()` throughput is lower than with WinCache 2.0.0.8 (about 1.4 to 1.7 times lower for `[1, 2, 3]` with 2
+  to 6 writers on PHP 7.2), because concurrent copies take turns on the allocator's lock for each allocation. The parts
+  of an array take one allocation, so for nested arrays it is higher (about 1.2 to 2 times higher with 2 to 6
+  writers). A single writer is faster.
 - The UCache functions work inside `Serializable::serialize()` and `Serializable::unserialize()`: UCache serializes
   and unserializes each object independently of the caller's `serialize()` or `unserialize()` (see
   [Serialization and the cache lock](#serialization-and-the-cache-lock)). WinCache 2.0.0.8 joined PHP's serializer
@@ -1981,8 +2046,8 @@ Several of these change what existing code sees.
 - A fatal error during a cache call (for example memory_limit while `ucache_get()` copies a big value) does not leave
   the cross-process lock held. In WinCache 2.0.0.8 it did, which blocked every other process of the pool until the
   failing one exited.
-- Deleting, replacing, clearing or expiring a large entry takes time linear in its size, and its memory is freed
-  after the cache lock has been released (see [Freeing memory](#freeing-memory)). WinCache 2.0.0.8 took time
+- Deleting, replacing, clearing or expiring a large entry frees a few blocks (the parts of its arrays lie in one
+  block), after the cache lock has been released (see [Freeing memory](#freeing-memory)). WinCache 2.0.0.8 took time
   quadratic in its size, while the cache lock was held: for an entry of 100,000 small arrays it took 14-21 s, and
   every other process waited.
 - Changes that `__sleep()` or `__serialize()` make to a value while `ucache_set()` stores it are not stored: the entry
@@ -1996,8 +2061,8 @@ Several of these change what existing code sees.
   keep the serializations until the value is copied; WinCache 2.0.0.8 serialized one object at a time. UCache counts
   them against memory_limit, so close to the limit a value with many objects may not be stored: the call then
   returns false, without an error (see [memory_limit](#memory_limit)).
-- `value_size` (`ucache_info()`) and the memory an entry uses differ slightly from WinCache 2.0.0.8: sparse hash
-  arrays keep a larger hash part, and an object that occurs more than once is stored once.
+- `value_size` (`ucache_info()`) differs slightly from WinCache 2.0.0.8: sparse hash arrays keep a larger hash part,
+  and an object that occurs more than once is stored once.
 - `ucache_info()` takes `offset` and `limit`, which list a part of the entries without copying the others, and a null
   `key` means no key (see [ucache_info](#ucache_info)). WinCache 2.0.0.8's `wincache_ucache_info()` always copied
   every entry into the array it returned, so the listing of a cache of many entries ran past memory_limit, and it

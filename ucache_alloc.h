@@ -58,8 +58,19 @@
 typedef void * (*fn_malloc)(void * palloc, size_t hoffset, size_t size);
 typedef void   (*fn_free)(void * palloc, size_t hoffset, void * addr);
 
-/* TBD? Right now I am doing a custom implementation which will probably work */
-/* best for the problem at hand. Try a quick fit memory allocator later. */
+/* Free blocks are kept in one list per size class (see alloc_class_of in ucache_alloc.c): one class */
+/* per ALLOC_ALIGNMENT bytes below ALLOC_CLASS_LINEAR_BYTES, then 8 per power of two */
+#ifdef _WIN64
+#define ALLOC_ALIGNMENT                 8
+#else  /* _WIN64 */
+#define ALLOC_ALIGNMENT                 4
+#endif /* _WIN64 */
+#define ALLOC_CLASS_LINEAR_BYTES        1024
+#define ALLOC_CLASS_LINEAR_LOG2         10
+#define ALLOC_CLASS_LINEAR_COUNT        (ALLOC_CLASS_LINEAR_BYTES / ALLOC_ALIGNMENT)
+#define ALLOC_CLASS_SPLIT_LOG2          3
+#define ALLOC_CLASS_COUNT               (ALLOC_CLASS_LINEAR_COUNT + ((32 - ALLOC_CLASS_LINEAR_LOG2) << ALLOC_CLASS_SPLIT_LOG2))
+#define ALLOC_CLASS_WORDS               ((ALLOC_CLASS_COUNT + 31) / 32)
 
 /* alloc_segment_header.initdone once a process has initialized the segment and what its caller keeps in it */
 /* ("DONE" in memory). Any other value, 0 in a new segment, means that it is still to be initialized */
@@ -75,6 +86,8 @@ struct alloc_segment_header
     size_t       total_size;  /* Total size of shared memory segment */
     size_t       free_size;   /* Bytes left to be allocated */
     size_t       cacheheader1;/* Offset to memory which contains 1st cache_header */
+    unsigned int freemap[ALLOC_CLASS_WORDS];   /* Bit c set: the list of class c is not empty */
+    size_t       freelists[ALLOC_CLASS_COUNT]; /* Offset of the first free block of each class, 0 if none */
 };
 
 /* Each free block will have following information */
@@ -84,8 +97,8 @@ struct alloc_free_header
 {
     size_t       size;        /* size of free segment including this header */
     unsigned int is_free;     /* marker which differentiate this block from used block */
-    size_t       prev_free;   /* offset to previous free block */
-    size_t       next_free;   /* offset to next free block */
+    size_t       prev_free;   /* offset to the previous free block of its class, 0 for the first */
+    size_t       next_free;   /* offset to the next free block of its class, 0 for the last */
     /* free block will have size written in the end */
 };
 
@@ -107,6 +120,7 @@ struct alloc_mpool_header
     size_t       socurr;      /* Current chunk for small allocations */
     size_t       mocurr;      /* Current chunk for medium allocations */
     size_t       locurr;      /* Current chunk for large allocations */
+    size_t       gocurr;      /* The chunk of the size the caller asked for, in the block of this header (see alloc_create_mpool), 0 if none */
 };
 
 typedef struct alloc_mpool_segment alloc_mpool_segment;
@@ -126,6 +140,8 @@ struct alloc_context
     size_t                 size;      /* Size of memory segment to be allocated */
     lock_context *         lock;      /* Lock to acquire before manipulating segment */
     alloc_segment_header * header;    /* Address of header for this alloc_context */
+    unsigned int           held;      /* Nesting of alloc_hold(): the process holds the lock between the calls (see alloc_hold) */
+    unsigned int           heldfrees; /* Blocks freed since the held lock was last taken */
 };
 
 typedef struct alloc_info alloc_info;
@@ -143,13 +159,17 @@ extern void   alloc_destroy(alloc_context * palloc);
 extern int    alloc_initialize(alloc_context * palloc, char * name, unsigned short cachekey, void * staddr, size_t size, unsigned char * pinitmemory);
 extern void   alloc_initdone(alloc_context * palloc);
 extern void   alloc_terminate(alloc_context * palloc);
-extern int    alloc_create_mpool(alloc_context * palloc, size_t * phoffset);
+extern void   alloc_hold(alloc_context * palloc);
+extern void   alloc_release(alloc_context * palloc);
+extern int    alloc_create_mpool(alloc_context * palloc, size_t * phoffset, size_t size);
+extern void   alloc_trim_mpool(alloc_context * palloc, size_t hoffset);
 extern void   alloc_free_mpool(alloc_context * palloc, size_t hoffset);
 
 extern void * alloc_get_cacheheader(alloc_context * palloc, unsigned int msize, unsigned int type);
 extern void * alloc_get_cachevalue(alloc_context * palloc, size_t offset);
 extern size_t alloc_get_valueoffset(alloc_context * palloc, void * value);
 extern void   alloc_getinfo(alloc_context * palloc, alloc_info * pinfo);
+extern size_t alloc_capacity(alloc_context * palloc);
 
 extern void * alloc_emalloc(size_t size);
 extern void * alloc_pemalloc(size_t size);
@@ -167,7 +187,5 @@ extern void * alloc_ommalloc(alloc_context * palloc, size_t hoffset, size_t size
 extern void   alloc_oefree(alloc_context * palloc, size_t hoffset, void * addr);
 extern void   alloc_osfree(alloc_context * palloc, size_t hoffset, void * addr);
 extern void   alloc_omfree(alloc_context * palloc, size_t hoffset, void * addr);
-
-extern void   alloc_runtest();
 
 #endif /* _UCACHE_ALLOC_H_ */

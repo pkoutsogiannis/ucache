@@ -59,6 +59,7 @@ struct zvcache_value
     unsigned int      ttlive;            /* Max time to live for this entry */
 
     unsigned int      hitcount;          /* Hit count for this entry */
+    unsigned int      cleargen;          /* zvcache_header.cleargen when the entry was added: another value means cleared (see zvcache_clear) */
     size_t            next_value;        /* Next value with same index */
     size_t            prev_value;        /* Previous value with same index */
 };
@@ -86,6 +87,11 @@ struct zvcache_header
     unsigned int      rcfutile;          /* 1: that pass removed nothing and the write still did not fit */
     ULONGLONG         rcwait;            /* Milliseconds the processes skip the full pass after such a pass */
     unsigned int      rcgen;             /* Full passes run since the cache was created */
+    unsigned int      cleargen;          /* ucache_clear() calls since the cache was created: the entries added before the last one are cleared */
+    unsigned int      clearitems;        /* Cleared entries still in the table (see sweep_cleared_entries) */
+    unsigned int      clearnext;         /* Next bucket that the sweep of the cleared entries goes through, valuecount when none is left */
+    unsigned int      sweeper;           /* PID of the process that sweeps them to the end (its ucache_clear()), 0 if none */
+    ULONGLONG         sweepticks;        /* GetTickCount64() when that process last went on with it */
     size_t            values[1];         /* valuecount zvcache_value offsets */
 };
 
@@ -139,6 +145,7 @@ struct zvcache_context
     alloc_context *   zvalloc;           /* alloc context for zvcache segment */
     size_t            freelist;          /* Entries unlinked under the lock, freed once it is released (chained by next_value) */
     unsigned int      freecount;         /* How many entries freelist holds */
+    size_t            maxfree;           /* The most the cache holds, its free memory when it is empty (alloc_capacity); 0 if not known */
 };
 
 typedef struct zvcache_info zvcache_info;

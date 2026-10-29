@@ -82,6 +82,4 @@ extern void lock_terminate(lock_context * plock);
 extern void lock_lock(lock_context * plock);
 extern void lock_unlock(lock_context * plock);
 
-extern void lock_runtest();
-
 #endif /* _UCACHE_LOCK_H_ */

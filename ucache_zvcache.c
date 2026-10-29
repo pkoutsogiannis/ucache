@@ -69,17 +69,24 @@ C_ASSERT(SIZEOF_SIZE_T <= SIZEOF_ZEND_LONG);
 
 /*
  * One hash bucket per this many bytes of the cache (the largest prime up to that number of buckets).
- * An entry takes 160 bytes or more (200 with a key of 40 characters and an integer value), so the
+ * An entry takes 168 bytes or more (208 with a key of 40 characters and an integer value), so the
  * chains of a cache full of small entries hold 2 to 3 entries on average, and the buckets (8 bytes
  * each) take about 1.6% of the cache.  WinCache had one bucket per 32 to 64 KB: 197 for 8 MB, whose
  * chains could hold hundreds of small entries each.
  */
 #define ZVCACHE_BUCKET_BYTES         512
 
-/* The bytes above: a zvcache_value of 56 bytes, its key and the top-level zval, each in a block of */
+/* The bytes above: a zvcache_value of 64 bytes, its key and the top-level zval, each in a block of */
 /* the allocator (x64; config.w32 also allows an x86 build, where the structure is smaller) */
 #ifdef _WIN64
-C_ASSERT(sizeof(zvcache_value) == 56);
+C_ASSERT(sizeof(zvcache_value) == 64);
+#endif
+
+/* Sizes of the blocks of the allocator, which rounds every request up to this (see allocate_memory, alloc_ommalloc) */
+#ifdef _WIN64
+# define UCACHE_BLOCK_SIZE(size)     ALIGNQWORD(size)
+#else
+# define UCACHE_BLOCK_SIZE(size)     ALIGNDWORD(size)
 #endif
 
 #ifndef UCACHE_MAX_ZVKEY_LENGTH
@@ -117,6 +124,7 @@ static int  copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned 
 static int  copyin_serialize_objects(zvcopy_prepared * pprep);
 static void copyin_free_serialized(zvcopy_prepared * pprep);
 static void copyin_release(zvcopy_prepared * pprep);
+static size_t copyin_minimum_size(zvcopy_prepared * pprep, const char * key);
 static void copyin_rollback(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * pxlate);
 static int  copyin_memory(zvcopy_context * pcopy, HashTable * phtable, void * src, size_t size, void **ppdest, zend_uchar *pallocated);
 static int  copyin_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * phtable, zval * poriginal, zval ** ppcopied);
@@ -131,6 +139,15 @@ static int  copyout_reference(zvcache_context * pcache, zvcopy_context * pcopy, 
 /* At most this many removed entries wait to be freed after the cache lock is released (see remove_zvcache_entry) */
 #define FREELIST_MAXIMUM            32
 
+/* A batch of the sweep of the cleared entries goes through at most this many buckets, and removes */
+/* entries whose values took this many bytes at most, or one entry (see sweep_cleared_entries) */
+#define CLEAR_SWEEP_BUCKETS         4096
+#define CLEAR_SWEEP_BYTES           (256 * 1024)
+
+/* A ucache_clear() takes over the sweep of an earlier one when that process has not gone on with it */
+/* for this long, killed most likely (see zvcache_clear): its batches are short */
+#define CLEAR_SWEEPER_STALE_MS      1000
+
 static zvcache_value * find_zvcache_entry(zvcache_context * pcache, const char * key, unsigned int index, unsigned char prune);
 static int  create_zvcache_data(zvcache_context * pcache, const char * key, zvcopy_prepared * pprep, unsigned int ttl, zvcache_value ** ppvalue);
 static void destroy_cached_zval(zvcache_context * pcache, zval * pzval);
@@ -139,7 +156,11 @@ static void add_zvcache_entry(zvcache_context * pcache, unsigned int index, zvca
 static void remove_zvcache_entry(zvcache_context * pcache, unsigned int index, zvcache_value * pvalue);
 static void free_pending_entries(zvcache_context * pcache);
 static zend_bool entry_expired(zvcache_value * pvalue, ULONGLONG ticks);
-static unsigned int reclaim_entries(zvcache_context * pcache, zend_long percent);
+static zend_bool entry_cleared(zvcache_header * header, zvcache_value * pvalue);
+static zend_bool clear_pending(zvcache_header * header);
+static void sweep_cleared_entries(zvcache_context * pcache, LONGLONG budget, unsigned char owner);
+static LONGLONG scavenger_elapsed_us(const LARGE_INTEGER * pstart);
+static unsigned int reclaim_entries(zvcache_context * pcache, zend_long * ppercent, size_t minimum);
 
 /* Globals */
 static unsigned short gzvcacheid = 1;
@@ -173,6 +194,12 @@ struct zvcopy_prepared
     HashTable         flattened;         /* Address of the symbol table, or of a table that holds slots of it -> its copy
                                             without IS_INDIRECT slots, held (see copyin_prepare_walk); before PHP 8.1 only */
     zvcopy_stack      stack;             /* The C stack of the walk */
+
+    /* What phase 2 will allocate in the memory pool of a top-level array (see copyin_count_string) */
+    size_t            poolsize;          /* Bytes, counted by the walk, and the serializations of the objects */
+    unsigned char     counted;           /* 1 while poolsize is what phase 2 takes, 0 once the walk met a table it cannot count */
+    HashTable         strings;           /* Address -> NULL, for each string counted that phase 2 copies once wherever it occurs */
+    const void *      seen[64];          /* The last of those strings, by bits of their address, in front of strings */
 };
 
 /* PHP's serializer state, as the code that called ucache left it (see serializer_isolate) */
@@ -405,9 +432,11 @@ static void copyin_object_dtor(zval * pzval)
  */
 static int copyin_prepare(zvcopy_prepared * pprep, zval * pzval)
 {
-    int                      result  = NONFATAL;
+    int                      result   = NONFATAL;
+    zval *                   pentry   = NULL;
     zvcache_serializer_state saved;
-    volatile unsigned char   bailout = 0;
+    volatile unsigned char   walkfail = 0;
+    volatile unsigned char   bailout  = 0;
 
     dprintverbose("start copyin_prepare");
 
@@ -420,9 +449,44 @@ static int copyin_prepare(zvcopy_prepared * pprep, zval * pzval)
     zend_hash_init(&pprep->refvals, 8, NULL, ZVAL_PTR_DTOR, 0);
     zend_hash_init(&pprep->objects, 8, NULL, copyin_object_dtor, 0);
     zend_hash_init(&pprep->flattened, 0, NULL, ZVAL_PTR_DTOR, 0);
+    zend_hash_init(&pprep->strings, 8, NULL, NULL, 1);
+    memset((void *)pprep->seen, 0, sizeof(pprep->seen));
+    pprep->poolsize = 0;
+    pprep->counted  = 1;
 
+    /*
+     * The table of the strings counted is persistent memory, as the translation table of phase 2 is:
+     * it can hold as many strings as the value, which memory_limit would refuse where the copy needs
+     * no request memory (see copyin_count_string).  Only the walk uses it, so it goes at once, also
+     * when a fatal error interrupts the walk (memory_limit reached by the held table).
+     */
     ucache_stack_start(&pprep->stack);
-    result = copyin_prepare_walk(pprep, &pprep->value, 0);
+    if(Z_TYPE(pprep->value) == IS_ARRAY)
+    {
+        zend_try
+        {
+            result = copyin_prepare_walk(pprep, &pprep->value, 0);
+        }
+        zend_catch
+        {
+            walkfail = 1;
+        }
+        zend_end_try();
+    }
+    else
+    {
+        /* No string is counted outside arrays: the table stays empty, and has no memory to free */
+        result = copyin_prepare_walk(pprep, &pprep->value, 0);
+    }
+
+    zend_hash_destroy(&pprep->strings);
+    zend_hash_init(&pprep->strings, 0, NULL, NULL, 1);
+
+    if(walkfail)
+    {
+        zend_bailout();
+    }
+
     if(FAILED(result))
     {
         goto Finished;
@@ -452,6 +516,19 @@ static int copyin_prepare(zvcopy_prepared * pprep, zval * pzval)
     {
         copyin_free_serialized(pprep);
         zend_bailout();
+    }
+
+    /* The objects of an array go into its pool, each once (see copyin_zval) */
+    if(SUCCEEDED(result) && Z_TYPE(pprep->value) == IS_ARRAY)
+    {
+        ZEND_HASH_FOREACH_VAL(&pprep->objects, pentry)
+        {
+            if(Z_TYPE_P(pentry) == IS_STRING && Z_STRLEN_P(pentry) != 0)
+            {
+                pprep->poolsize += UCACHE_BLOCK_SIZE(_ZSTR_STRUCT_SIZE(Z_STRLEN_P(pentry)));
+            }
+        }
+        ZEND_HASH_FOREACH_END();
     }
 
 Finished:
@@ -525,8 +602,77 @@ static int copyin_serialize_objects(zvcopy_prepared * pprep)
 }
 
 /*
+ * The data part that copyin_hashtable() allocates for an initialized table, and the hash mask of the
+ * copy: the hash part and the used elements, with the hash part of a sparse hash table made smaller
+ * (see ucache_compat.h).  The walk of phase 1 counts it with the same function.
+ */
+static size_t copyin_data_size(HashTable * ptable, uint32_t * pmask)
+{
+    uint32_t hash_size = 0;
+
+    if(HT_IS_PACKED(ptable))
+    {
+        *pmask = ptable->nTableMask;
+        return UCACHE_HT_PACKED_USED_SIZE(ptable);
+    }
+
+    if(UCACHE_HT_SHOULD_COMPACT(ptable))
+    {
+        hash_size = UCACHE_HT_HASH_SLOTS(ptable);
+        while((hash_size >> 2) > ptable->nNumUsed)
+        {
+            hash_size >>= 1;
+        }
+
+        *pmask = (uint32_t)(-(int32_t)hash_size);
+        return HT_HASH_SIZE(*pmask) + ((size_t)ptable->nNumUsed * sizeof(Bucket));
+    }
+
+    *pmask = ptable->nTableMask;
+    return HT_USED_SIZE(ptable);
+}
+
+/*
+ * The walk of phase 1 counts what phase 2 will allocate in the memory pool of a top-level array
+ * (pprep->poolsize), so that the pool takes one block of that size (see alloc_create_mpool) instead of
+ * chunks of fixed sizes, which small tables left mostly empty: each table once (held has each one
+ * once), its data part, a tracker for each place of an array, each reference once, and the strings,
+ * here.  Phase 2 copies a string with one reference once for its place, which it has only one of, and
+ * any other one (interned, or held by more than one place) once, wherever it occurs (see
+ * copyin_string): such strings are counted once, by their address, in a table of persistent memory
+ * (see copyin_prepare).  A cache of the last ones, by bits of their address, saves looking up the
+ * keys that every row of a table repeats.  The count stays right while user code serializes the
+ * objects: what holds a string in the value is held, so a string keeps its places, and only the
+ * number of references from outside the value can change.  zvcache_set() also refuses a value that
+ * the empty cache could not hold by this count (copyin_minimum_size).
+ */
+static zend_always_inline void copyin_count_string(zvcopy_prepared * pprep, zend_string * pstr)
+{
+    size_t slot = 0;
+
+    if(!ZSTR_IS_INTERNED(pstr) && GC_REFCOUNT(pstr) == 1)
+    {
+        pprep->poolsize += UCACHE_BLOCK_SIZE(_ZSTR_STRUCT_SIZE(ZSTR_LEN(pstr)));
+        return;
+    }
+
+    slot = (size_t)(ucache_addr_key(pstr) >> 3) % (sizeof(pprep->seen) / sizeof(pprep->seen[0]));
+    if(pprep->seen[slot] == (const void *)pstr)
+    {
+        return;
+    }
+
+    pprep->seen[slot] = (const void *)pstr;
+    if(zend_hash_index_add_empty_element(&pprep->strings, ucache_addr_key(pstr)) != NULL)
+    {
+        pprep->poolsize += UCACHE_BLOCK_SIZE(_ZSTR_STRUCT_SIZE(ZSTR_LEN(pstr)));
+    }
+}
+
+/*
  * The walk of phase 1 (see copyin_prepare): holds every array, reference and object of the value
- * and records the objects to serialize.  Runs no user code.
+ * and records the objects to serialize.  Runs no user code.  It also counts what phase 2 will take
+ * (see copyin_count_string).
  *
  * depth is the number of arrays and references that contain *pzval.  A value nested more than
  * UCACHE_MAX_NESTING levels deep, each array and each reference being a level (a top-level array
@@ -544,6 +690,11 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
     zval             value;
     zend_reference * pref     = NULL;
     unsigned char    indirect = 0;
+    unsigned char    packed   = 0;
+    HashTable *      ptable   = NULL;
+    Bucket *         pbucket  = NULL;
+    uint32_t         idx      = 0;
+    uint32_t         mask     = 0;
 
     switch(Z_TYPE_P(pzval))
     {
@@ -601,11 +752,43 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
             }
 #endif
 
-            ZEND_HASH_FOREACH_VAL(Z_ARR_P(pzval), pelem)
+            /* What phase 2 allocates for the table itself (see copyin_hashtable) */
+            ptable = Z_ARR_P(pzval);
+            packed = HT_IS_PACKED(ptable) ? 1 : 0;
+
+            pprep->poolsize += UCACHE_BLOCK_SIZE(sizeof(zend_array));
+            if(HT_IS_INITIALIZED(ptable))
             {
-                /* Scalars and strings need nothing (see above) */
+                pprep->poolsize += UCACHE_BLOCK_SIZE(copyin_data_size(ptable, &mask));
+            }
+
+            for(idx = 0; idx < ptable->nNumUsed; idx++)
+            {
+                if(packed)
+                {
+                    pelem = UCACHE_HT_PACKED_ZVAL(ptable, idx);
+                }
+                else
+                {
+                    pbucket = ptable->arData + idx;
+                    pelem   = &pbucket->val;
+
+                    /* Its key, which phase 2 copies with the element */
+                    if(Z_TYPE_P(pelem) != IS_UNDEF && pbucket->key != NULL)
+                    {
+                        copyin_count_string(pprep, pbucket->key);
+                    }
+                }
+
+                /* The strings of the value are counted (see copyin_count_string); a string lives as */
+                /* long as the held array that contains it */
                 if(Z_TYPE_P(pelem) < IS_ARRAY)
                 {
+                    if(Z_TYPE_P(pelem) == IS_STRING)
+                    {
+                        copyin_count_string(pprep, Z_STR_P(pelem));
+                    }
+
                     continue;
                 }
 
@@ -616,13 +799,18 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
                     break;
                 }
 
+                /* Phase 2 gives each place of an array a tracker of its own (see copyin_zval) */
+                if(Z_TYPE_P(pelem) == IS_ARRAY)
+                {
+                    pprep->poolsize += UCACHE_BLOCK_SIZE(sizeof(zvcache_hashtable_pool_tracker));
+                }
+
                 result = copyin_prepare_walk(pprep, pelem, depth + 1);
                 if(FAILED(result))
                 {
                     break;
                 }
             }
-            ZEND_HASH_FOREACH_END();
 
             /*
              * Before PHP 8.1, array_merge(), array_slice(), array_reverse(), array_chunk(),
@@ -631,9 +819,13 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
              * as for the symbol table itself.  zend_array_dup() keeps the slots of a packed table
              * (array_values($GLOBALS)), so its copy would be copied again and again, at the same
              * depth, until memory_limit or a stack overflow ended the process: it is refused.
+             * The elements before the slot were counted, and so are those of the copy: the count
+             * is no longer exact, and the pool gets chunks as the copy needs them.
              */
             if(indirect && SUCCEEDED(result))
             {
+                pprep->counted = 0;
+
                 if(HT_IS_PACKED(Z_ARR_P(pzval)))
                 {
                     dprintimportant("copyin_prepare_walk: a list that holds slots of the symbol table cannot be stored");
@@ -672,6 +864,17 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
             {
                 result = FATAL_OUT_OF_LMEMORY;
                 break;
+            }
+
+            /* What phase 2 allocates for it (see copyin_reference): the reference, once, and its value */
+            pprep->poolsize += UCACHE_BLOCK_SIZE(sizeof(zend_reference));
+            if(Z_TYPE(value) == IS_STRING)
+            {
+                copyin_count_string(pprep, Z_STR(value));
+            }
+            else if(Z_TYPE(value) == IS_ARRAY)
+            {
+                pprep->poolsize += UCACHE_BLOCK_SIZE(sizeof(zvcache_hashtable_pool_tracker));
             }
 
             /* value is a plain copy of the table's zval, which holds the reference to it */
@@ -735,9 +938,54 @@ static void copyin_release(zvcopy_prepared * pprep)
     zend_hash_destroy(&pprep->flattened);
     zend_hash_destroy(&pprep->refvals);
     zend_hash_destroy(&pprep->held);
+    zend_hash_destroy(&pprep->strings);
 
     zval_ptr_dtor(&pprep->value);
     ZVAL_UNDEF(&pprep->value);
+}
+
+/*
+ * Phase 1 is done (see copyin_prepare): the shared memory that phase 2 will allocate for the value,
+ * without the allocator's overheads, so a lower bound of what the entry takes; 0 if the walk could not
+ * count it (see copyin_count_string).  The entry and its key, the top-level zval, and a string, the
+ * serialization of an object, or the tracker of an array and what its pool holds.
+ */
+static size_t copyin_minimum_size(zvcopy_prepared * pprep, const char * key)
+{
+    size_t size        = UCACHE_BLOCK_SIZE(sizeof(zvcache_value) + strlen(key) + 1) + UCACHE_BLOCK_SIZE(sizeof(zval));
+    zval * pserialized = NULL;
+
+    _ASSERT(pprep != NULL);
+    _ASSERT(key   != NULL);
+
+    switch(Z_TYPE(pprep->value))
+    {
+        case IS_STRING:
+            size += UCACHE_BLOCK_SIZE(_ZSTR_STRUCT_SIZE(Z_STRLEN(pprep->value)));
+            break;
+
+        case IS_ARRAY:
+            if(!pprep->counted)
+            {
+                return 0;
+            }
+
+            size += UCACHE_BLOCK_SIZE(sizeof(zvcache_hashtable_pool_tracker)) + pprep->poolsize;
+            break;
+
+        case IS_OBJECT:
+            pserialized = zend_hash_index_find(&pprep->objects, ucache_addr_key(Z_OBJ(pprep->value)));
+            if(pserialized != NULL && Z_TYPE_P(pserialized) == IS_STRING && Z_STRLEN_P(pserialized) != 0)
+            {
+                size += UCACHE_BLOCK_SIZE(_ZSTR_STRUCT_SIZE(Z_STRLEN_P(pserialized)));
+            }
+            break;
+
+        default:
+            break;
+    }
+
+    return size;
 }
 
 /*
@@ -924,7 +1172,8 @@ static int copyin_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTab
                 /* Top-level array: record its tracker and pool for copyin_rollback() */
                 pcopy->ptracker = table_tracker;
 
-                result = alloc_create_mpool(pcache->zvalloc, &offset);
+                /* A pool of the size the walk of phase 1 counted, in one block (see copyin_count_string) */
+                result = alloc_create_mpool(pcache->zvalloc, &offset, pcopy->pprepared->counted ? pcopy->pprepared->poolsize : 0);
                 if(FAILED(result))
                 {
                     /* Its FATAL_OUT_OF_MEMORY is the code of request memory: say the cache is full, */
@@ -951,6 +1200,12 @@ static int copyin_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTab
 
                 result = copyin_hashtable(pcache, &poolcopy, phtable, copyin_flattened(pcopy, Z_ARR_P(poriginal)), &phashtable);
                 pcopy->allocsize += poolcopy.allocsize;
+
+                /* Nothing is allocated from the pool any more: what its chunks did not use goes back */
+                if(SUCCEEDED(result))
+                {
+                    alloc_trim_mpool(pcache->zvalloc, offset);
+                }
             }
             else
             {
@@ -1326,7 +1581,7 @@ static int copyin_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, Ha
     int             result     = NONFATAL;
     uint32_t        idx;
     uint32_t        nIndex;
-    uint32_t        hash_size;
+    uint32_t        mask       = 0;
     Bucket *        p          = NULL;
     zend_string *   pzstr      = NULL;
     zend_uchar      allocated  = 0;
@@ -1382,10 +1637,13 @@ static int copyin_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, Ha
         goto Finished;
     }
 
+    /* The size of the data part, as the walk of phase 1 counted it (see copyin_count_string) */
+    temp_size = copyin_data_size(poriginal, &mask);
+
     if (HT_IS_PACKED(pnew_table))
     {
         /* Packed: hash part (2 slots) + nNumUsed elements (zvals since 8.2, Buckets before) */
-        result = copyin_memory(pcopy, NULL, HT_GET_DATA_ADDR(poriginal), UCACHE_HT_PACKED_USED_SIZE(poriginal), &ptemp, &allocated);
+        result = copyin_memory(pcopy, NULL, HT_GET_DATA_ADDR(poriginal), temp_size, &ptemp, &allocated);
         if (FAILED(result))
         {
             goto Finished;
@@ -1409,12 +1667,7 @@ static int copyin_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, Ha
         if (UCACHE_HT_SHOULD_COMPACT(poriginal))
         {
             /* Sparsely populated: shrink the hash part while copying in (see ucache_compat.h) */
-            hash_size = UCACHE_HT_HASH_SLOTS(poriginal);
-            while ((hash_size >> 2) > poriginal->nNumUsed) {
-                hash_size >>= 1;
-            }
-            pnew_table->nTableMask = (uint32_t)(-(int32_t)hash_size);
-            temp_size = HT_HASH_SIZE(pnew_table->nTableMask) + ((size_t)poriginal->nNumUsed * sizeof(Bucket));
+            pnew_table->nTableMask = mask;
             ptemp = ZMALLOC(pcopy, temp_size);
             if (!ptemp)
             {
@@ -1441,7 +1694,7 @@ static int copyin_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, Ha
         else
         {
             /* Appropriately sized: copy the hash part and the used Buckets */
-            result = copyin_memory(pcopy, NULL, HT_GET_DATA_ADDR(poriginal), HT_USED_SIZE(poriginal), &ptemp, &allocated);
+            result = copyin_memory(pcopy, NULL, HT_GET_DATA_ADDR(poriginal), temp_size, &ptemp, &allocated);
             if (FAILED(result))
             {
                 goto Finished;
@@ -1886,10 +2139,10 @@ Finished:
 }
 
 /*
- * Call this method under lock.  Returns the entry of key that has not expired, NULL if there is
- * none.  With prune, the expired entries it passes in the bucket, of any key, are removed on the
- * way (their memory is freed by free_pending_entries() once the lock is released); ucache_info()
- * looks up without it.
+ * Call this method under lock.  Returns the entry of key that has not expired and was not cleared,
+ * NULL if there is none.  With prune, the expired and cleared entries it passes in the bucket, of
+ * any key, are removed on the way (their memory is freed by free_pending_entries() once the lock is
+ * released); ucache_info() looks up without it.
  */
 static zvcache_value * find_zvcache_entry(zvcache_context * pcache, const char * key, unsigned int index, unsigned char prune)
 {
@@ -1911,7 +2164,7 @@ static zvcache_value * find_zvcache_entry(zvcache_context * pcache, const char *
         pnext = ZVCACHE_VALUE(pcache->zvalloc, pvalue->next_value);
 
         /* ttl is counted from the time the entry was stored; ttlive 0 means it never expires */
-        if(entry_expired(pvalue, ticks))
+        if(entry_cleared(header, pvalue) || entry_expired(pvalue, ticks))
         {
             if(prune)
             {
@@ -2202,6 +2455,8 @@ static void add_zvcache_entry(zvcache_context * pcache, unsigned int index, zvca
         pvalue->prev_value = 0;
     }
 
+    /* Set here, under the lock: an entry built during a ucache_clear() and added after it stays */
+    pvalue->cleargen = header->cleargen;
     header->itemcount++;
 
     dprintverbose("end add_zvcache_entry");
@@ -2215,8 +2470,9 @@ static void add_zvcache_entry(zvcache_context * pcache, unsigned int index, zvca
  * is released, so that freeing a big entry does not hold up the other processes.  A process killed
  * in between (an IIS FastCGI timeout) leaves the memory of the queued entries lost until every
  * process of the pool has exited, so the list holds at most FREELIST_MAXIMUM entries: beyond that
- * (ucache_clear(), a step that removes many entries), the entry is freed at once, under the lock,
- * where a kill loses at most the entry being freed.
+ * (a step or a full pass that removes many entries), the entry is freed at once, under the lock,
+ * where a kill loses at most the entry being freed.  The sweep of a ucache_clear() stops a batch
+ * before that (see sweep_cleared_entries).
  */
 static void remove_zvcache_entry(zvcache_context * pcache, unsigned int index, zvcache_value * pvalue)
 {
@@ -2232,8 +2488,19 @@ static void remove_zvcache_entry(zvcache_context * pcache, unsigned int index, z
     apalloc = pcache->zvalloc;
     header  = pcache->zvheader;
 
-    /* Decrement itemcount and remove entry from hashtable */
-    header->itemcount--;
+    /* Decrement itemcount, or clearitems for a cleared entry, and remove entry from hashtable. Not */
+    /* below 0: a process killed in the middle of zvcache_clear() can leave the counts off */
+    if(!entry_cleared(header, pvalue))
+    {
+        if(header->itemcount != 0)
+        {
+            header->itemcount--;
+        }
+    }
+    else if(header->clearitems != 0)
+    {
+        header->clearitems--;
+    }
 
     if(pvalue->prev_value == 0)
     {
@@ -2298,6 +2565,140 @@ static void free_pending_entries(zvcache_context * pcache)
 static zend_bool entry_expired(zvcache_value * pvalue, ULONGLONG ticks)
 {
     return (pvalue->ttlive > 0 && utils_ticksdiff(ticks, pvalue->add_ticks) / 1000 > pvalue->ttlive) ? 1 : 0;
+}
+
+/* Call under the cache lock: whether ucache_clear() was called since the entry was added (see zvcache_clear) */
+static zend_bool entry_cleared(zvcache_header * header, zvcache_value * pvalue)
+{
+    return (pvalue->cleargen != header->cleargen) ? 1 : 0;
+}
+
+/* Whether a ucache_clear() left entries for sweep_cleared_entries(): read without the lock as a hint, and under it */
+static zend_bool clear_pending(zvcache_header * header)
+{
+    return (header->clearitems != 0 && header->clearnext < header->valuecount) ? 1 : 0;
+}
+
+/*
+ * Removes the entries that ucache_clear() left in the table (see zvcache_clear), a batch at a time: a
+ * batch takes the cache lock, goes on from clearnext through CLEAR_SWEEP_BUCKETS buckets at most, and
+ * removes FREELIST_MAXIMUM cleared entries at most, or entries whose values took CLEAR_SWEEP_BYTES (at
+ * least one entry), whose freeing then takes about as long as the rest of the batch; then it releases
+ * the lock and frees them, holding the allocator's lock for the batch (alloc_hold) instead of taking it
+ * for each block.  So the other processes wait one batch at most, for the cache lock as for the
+ * allocator's.  Each batch goes on where the last one stopped, in any process.
+ *
+ * owner: the process that sweeps to the end, the one whose ucache_clear() started the sweep
+ * (zvcache_header.sweeper); it stops if another one took the sweep over.  The others (a write that
+ * needs memory, the end of a request) sweep for budget microseconds at most: the batch stops early
+ * when its time passes the budget too.  budget 0: no limit.
+ */
+static void sweep_cleared_entries(zvcache_context * pcache, LONGLONG budget, unsigned char owner)
+{
+    zvcache_header * header  = pcache->zvheader;
+    alloc_context *  palloc  = pcache->zvalloc;
+    zvcache_value *  pvalue  = NULL;
+    zvcache_value *  ptemp   = NULL;
+    unsigned int     index   = 0;
+    unsigned int     last    = 0;
+    unsigned int     pid     = GetCurrentProcessId();
+    unsigned int     scanned = 0;
+    size_t           bytes   = 0;
+    unsigned char    full    = 0;
+    LARGE_INTEGER    started;
+
+    dprintverbose("start sweep_cleared_entries");
+
+    QueryPerformanceCounter(&started);
+
+    while(clear_pending(header) && (budget == 0 || scavenger_elapsed_us(&started) < budget))
+    {
+        lock_lock(pcache->zvlock);
+
+        if(owner)
+        {
+            /* Taken over by a ucache_clear() that found this process silent for too long */
+            if(header->sweeper != pid)
+            {
+                lock_unlock(pcache->zvlock);
+                break;
+            }
+
+            header->sweepticks = GetTickCount64();
+        }
+
+        index   = header->clearnext;
+        last    = MIN(index + CLEAR_SWEEP_BUCKETS, header->valuecount);
+        bytes   = 0;
+        full    = 0;
+        scanned = 0;
+
+        while(index < last && header->clearitems != 0 && !full)
+        {
+            pvalue = ZVCACHE_VALUE(palloc, header->values[index]);
+            while(pvalue != NULL)
+            {
+                ptemp  = pvalue;
+                pvalue = ZVCACHE_VALUE(palloc, pvalue->next_value);
+
+                if(!entry_cleared(header, ptemp))
+                {
+                    continue;
+                }
+
+                /* The batch is full: the next one goes through this bucket again */
+                if(pcache->freecount == FREELIST_MAXIMUM || bytes >= CLEAR_SWEEP_BYTES)
+                {
+                    full = 1;
+                    break;
+                }
+
+                bytes += ptemp->sizeb;
+                remove_zvcache_entry(pcache, index, ptemp);
+            }
+
+            if(full)
+            {
+                break;
+            }
+
+            index++;
+
+            /* A sweep with a budget stops the batch once its time has passed */
+            if(budget != 0 && (++scanned % 256) == 0 && scavenger_elapsed_us(&started) >= budget)
+            {
+                break;
+            }
+        }
+
+        /* At the end of the table, every entry cleared since the last ucache_clear() is gone: a count left */
+        /* (a process killed while it cleared) would only make the next sweeps go through the table for nothing */
+        if(index >= header->valuecount)
+        {
+            header->clearitems = 0;
+        }
+
+        header->clearnext = (header->clearitems == 0) ? header->valuecount : index;
+
+        /* The sweep is over, whoever ended it: the next ucache_clear() sweeps */
+        if(header->clearnext >= header->valuecount)
+        {
+            header->sweeper = 0;
+        }
+
+        lock_unlock(pcache->zvlock);
+
+        /* The allocator's lock once for the batch, not for each block: with several processes sweeping, */
+        /* taking it for each block made them queue for it at every free (see alloc_hold) */
+        if(pcache->freelist != 0)
+        {
+            alloc_hold(palloc);
+            free_pending_entries(pcache);
+            alloc_release(palloc);
+        }
+    }
+
+    dprintverbose("end sweep_cleared_entries");
 }
 
 /* Public functions */
@@ -2404,6 +2805,9 @@ static ULONGLONG scavenger_interval_ms(void)
 #define RECLAIM_FUTILE_MS           1000
 #define RECLAIM_TRIES_MAXIMUM       16
 
+/* A full pass that evicts reads the free memory again after this many evictions at most (see reclaim_entries) */
+#define RECLAIM_EVICT_BATCH         64
+
 /* Buckets a step examines: ucache.gc.step, or with 0 or less the automatic size */
 static unsigned int scavenger_step(zvcache_header * pheader)
 {
@@ -2471,17 +2875,40 @@ static unsigned int eviction_group(unsigned int idle)
 }
 
 /*
- * Call this method under lock.  A write ran out of shared memory: remove what a scavenger step
- * would remove, over the whole table and without its time limit, then, with percent > 0, evict the
- * entries unused for the longest time, one by one, until percent percent of the cache is free
- * (zvcache_set() raises it while the value still does not fit: free memory in many small pieces may
- * not hold it).  Unlike everywhere else, the memory is freed here, under the lock: the write that waits
- * for it, and the next process that runs out, must see what is really free (an estimate of what
- * entries take, or frees still pending in another process, would make processes evict again and
- * again).  A full cache is rare, so the time under the lock does not matter there.  Counts as a
- * scavenger step in ucache_info().  Returns the number of entries removed.
+ * Frees the entries that remove_zvcache_entry() queued, under one hold of the allocator's lock (see
+ * alloc_hold) instead of taking it for each block.  The caller holds the cache lock (reclaim_entries):
+ * the lock of the allocator is taken after it, as everywhere, and is free while the pass goes through
+ * the table, for the copies into the cache that other processes make meanwhile.
  */
-static unsigned int reclaim_entries(zvcache_context * pcache, zend_long percent)
+static void reclaim_free(zvcache_context * pcache)
+{
+    if(pcache->freelist != 0)
+    {
+        alloc_hold(pcache->zvalloc);
+        free_pending_entries(pcache);
+        alloc_release(pcache->zvalloc);
+    }
+}
+
+/*
+ * Call this method under lock.  A write ran out of shared memory: remove what a scavenger step
+ * would remove, over the whole table and without its time limit, then, with *ppercent > 0, evict the
+ * entries unused for the longest time until *ppercent percent of the cache is free (make_room()
+ * raises it while the value still does not fit: free memory in many small pieces may not hold it).
+ * *ppercent is doubled first, up to 100, while that much would leave less free than the value takes
+ * (minimum, see copyin_minimum_size) and less than that is free after the expiry, or while it is
+ * free already and the expiry removed nothing (the value did not fit with that much free, unless
+ * memory was freed in between), and is left at the percentage used.  Unlike everywhere else, the
+ * memory is freed here, under the lock: the write that waits for it, and the next process that runs
+ * out, must see what is really free (an estimate of what entries take, or frees still pending in
+ * another process, would make processes evict again and again).  The entries are freed a batch of
+ * FREELIST_MAXIMUM at a time, each batch under one hold of the allocator's lock (see reclaim_free),
+ * and the free memory is read once the entries evicted since the last reading could have freed what
+ * was missing, by what their values took, or every RECLAIM_EVICT_BATCH evictions, rather than after
+ * each one.  Entries left by a ucache_clear() are removed too, uncounted.  Counts as a scavenger step
+ * in ucache_info().  Returns the number of entries removed.
+ */
+static unsigned int reclaim_entries(zvcache_context * pcache, zend_long * ppercent, size_t minimum)
 {
     zvcache_header * pheader = pcache->zvheader;
     alloc_context *  palloc  = pcache->zvalloc;
@@ -2489,12 +2916,16 @@ static unsigned int reclaim_entries(zvcache_context * pcache, zend_long percent)
     zvcache_value *  ptemp   = NULL;
     ULONGLONG        ticks   = GetTickCount64();
     zend_long        idlettl = UCG(ucgc_ttl);
+    zend_long        percent = *ppercent;
     unsigned int     index   = 0;
     unsigned int     count   = 0;
     unsigned int     evicted = 0;
     unsigned int     group   = 0;
+    unsigned int     batch   = 0;
     unsigned char    enough  = 0;
     size_t           target  = 0;
+    size_t           missing = 0;
+    size_t           freeing = 0;
     unsigned int     counts[EVICTION_GROUPS];
     alloc_info       info;
 
@@ -2508,24 +2939,48 @@ static unsigned int reclaim_entries(zvcache_context * pcache, zend_long percent)
             ptemp  = pvalue;
             pvalue = ZVCACHE_VALUE(palloc, pvalue->next_value);
 
-            if(scavenger_removes(ptemp, ticks, idlettl))
+            /* Left by a ucache_clear(): make_room() does not run the pass while it sweeps them, so */
+            /* these are left only by a process killed in the middle of it */
+            if(entry_cleared(pheader, ptemp))
+            {
+                remove_zvcache_entry(pcache, index, ptemp);
+            }
+            else if(scavenger_removes(ptemp, ticks, idlettl))
             {
                 count++;
                 remove_zvcache_entry(pcache, index, ptemp);
             }
+            else
+            {
+                continue;
+            }
+
+            if(pcache->freecount == FREELIST_MAXIMUM)
+            {
+                reclaim_free(pcache);
+            }
         }
     }
 
-    free_pending_entries(pcache);
+    reclaim_free(pcache);
 
     if(percent > 0)
     {
         /* On the stack: see zvcache_run_scavenger() */
         alloc_getinfo(palloc, &info);
-        target = info.total_size / 100 * (size_t)MIN(percent, 100);
+        percent = MIN(percent, 100);
+        target  = info.total_size / 100 * (size_t)percent;
+
+        while(percent < 100 && ((target < minimum && info.free_size < minimum) || (count == 0 && info.free_size >= target)))
+        {
+            percent = MIN(percent * 2, 100);
+            target  = info.total_size / 100 * (size_t)percent;
+        }
 
         if(info.free_size < target)
         {
+            missing = target - info.free_size;
+
             /* How many entries each idle group holds, to go over the table once per group that has some */
             memset(counts, 0, sizeof(counts));
             for(index = 0; index < pheader->valuecount; index++)
@@ -2537,7 +2992,7 @@ static unsigned int reclaim_entries(zvcache_context * pcache, zend_long percent)
                 }
             }
 
-            /* The groups unused the longest first, each entry freed at once, until enough is free */
+            /* The groups unused the longest first, until enough is free */
             for(group = EVICTION_GROUPS; group > 0 && !enough; )
             {
                 group--;
@@ -2561,20 +3016,38 @@ static unsigned int reclaim_entries(zvcache_context * pcache, zend_long percent)
 
                         evicted++;
                         count++;
+                        freeing += ptemp->sizeb + sizeof(zvcache_value);
                         remove_zvcache_entry(pcache, index, ptemp);
-                        free_pending_entries(pcache);
 
-                        alloc_getinfo(palloc, &info);
-                        if(info.free_size >= target)
+                        /* What the entries took is less than what freeing them gives back (block */
+                        /* headers, the end of blocks): read the free memory once it could be enough */
+                        if(freeing >= missing || ++batch == RECLAIM_EVICT_BATCH)
                         {
-                            enough = 1;
-                            break;
+                            reclaim_free(pcache);
+                            alloc_getinfo(palloc, &info);
+                            if(info.free_size >= target)
+                            {
+                                enough = 1;
+                                break;
+                            }
+
+                            missing = target - info.free_size;
+                            freeing = 0;
+                            batch   = 0;
+                        }
+                        else if(pcache->freecount == FREELIST_MAXIMUM)
+                        {
+                            reclaim_free(pcache);
                         }
                     }
                 }
             }
         }
     }
+
+    reclaim_free(pcache);
+
+    *ppercent = percent;
 
     /* A step for the waits of zvcache_run_scavenger(), after which a write finds only what expires */
     /* or goes unused later: the pass went over the whole table */
@@ -2586,7 +3059,7 @@ static unsigned int reclaim_entries(zvcache_context * pcache, zend_long percent)
     pheader->scremoved += count;
     pheader->scevicted += evicted;
 
-    dprintimportant("reclaim_entries: removed %u entries, %u of them evicted", count, evicted);
+    dprintimportant("reclaim_entries: removed %u entries, %u of them evicted (%d%% free)", count, evicted, (int)percent);
     dprintverbose("end reclaim_entries");
 
     return count;
@@ -2629,6 +3102,7 @@ int zvcache_run_scavenger(zvcache_context * pcache, unsigned int force)
     ULONGLONG     wait      = 0;
     unsigned int  step      = 0;
     unsigned char urgent    = 0;
+    size_t        cleared   = 0;
     zend_long     ttl       = UCG(ucgc_ttl);
     zend_long     limit     = MIN(MAX(UCG(ucgc_threshold), 0), 100);
 
@@ -2718,7 +3192,18 @@ int zvcache_run_scavenger(zvcache_context * pcache, unsigned int force)
             ptemp = pvalue;
             pvalue = ZVCACHE_VALUE(palloc, pvalue->next_value);
 
-            if(scavenger_removes(ptemp, ticks, ttl))
+            /* Left by a ucache_clear(): removed, not counted, as many as the batches of its sweep */
+            /* take, so that the step frees none of them under the lock (the sweep does the rest) */
+            if(entry_cleared(pheader, ptemp))
+            {
+                if(pcache->freecount < FREELIST_MAXIMUM && cleared < CLEAR_SWEEP_BYTES)
+                {
+                    cleared += ptemp->sizeb;
+                    remove_zvcache_entry(pcache, sindex, ptemp);
+                }
+                ptemp = NULL;
+            }
+            else if(scavenger_removes(ptemp, ticks, ttl))
             {
                 count++;
                 remove_zvcache_entry(pcache, sindex, ptemp);
@@ -2750,11 +3235,19 @@ Finished:
  * that many seconds have passed since the last scavenger run, in any of the processes that share
  * the cache, runs one step.  The time of the last run is read without the lock first, so that the
  * requests that end in between do not take it; zvcache_run_scavenger() checks it again under the
- * lock, since another process may have run the scavenger meanwhile.
+ * lock, since another process may have run the scavenger meanwhile.  While a ucache_clear() has
+ * left entries to remove (read without the lock first too), every request that ends also sweeps
+ * them for about SCAVENGER_STEP_BUDGET_US: that helps the process that sweeps them, and finishes the
+ * sweep of a process that was killed in the middle of it.
  */
 void zvcache_scavenge_periodic(zvcache_context * pcache)
 {
     _ASSERT(pcache != NULL);
+
+    if(clear_pending(pcache->zvheader))
+    {
+        sweep_cleared_entries(pcache, SCAVENGER_STEP_BUDGET_US, 0);
+    }
 
     if(utils_ticksdiff(GetTickCount64(), pcache->zvheader->lscavenge) < scavenger_interval_ms())
     {
@@ -2799,6 +3292,7 @@ int zvcache_create(zvcache_context ** ppcache)
     pcache->zvalloc     = NULL;
     pcache->freelist    = 0;
     pcache->freecount   = 0;
+    pcache->maxfree     = 0;
 
     *ppcache = pcache;
 
@@ -2920,6 +3414,9 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
 
     header = pcache->zvheader;
 
+    /* The most the cache holds never changes while its segment lives (see zvcache_set) */
+    pcache->maxfree = alloc_capacity(pcache->zvalloc);
+
     /* Create reader writer locks for the zvcache */
     result = lock_create(&pcache->zvlock);
     if(FAILED(result))
@@ -2958,6 +3455,11 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
         header->rcfutile     = 0;
         header->rcwait       = 0;
         header->rcgen        = 0;
+        header->cleargen     = 0;
+        header->clearitems   = 0;
+        header->clearnext    = zvcount;
+        header->sweeper      = 0;
+        header->sweepticks   = 0;
 
         memset((void *)header->values, 0, sizeof(size_t) * zvcount);
 
@@ -3270,27 +3772,33 @@ Finished:
 }
 
 /*
- * zvcache_set(): phase 2 ran out of shared memory, the cache is full.  Each round takes the cache
- * lock, runs a full pass (reclaim_entries) and runs phase 2 again, until the value fits.  Without
- * ucache.gc.evict, one round removes what the scavenger would, and that is all.  With it, the first
- * round evicts until ucache.gc.evict percent of the cache is free, and each next one until twice as
- * much, up to the whole cache: free memory in many small pieces may not hold the value.  If another
+ * zvcache_set(): phase 2 ran out of shared memory, the cache is full (a value larger than the empty
+ * cache was refused before phase 2, see zvcache_set).  Each round takes the cache lock, runs a full
+ * pass (reclaim_entries) and runs phase 2 again, until the value fits.  Without ucache.gc.evict, one
+ * round removes what the scavenger would, and that is all.  With it, the first round evicts until
+ * ucache.gc.evict percent of the cache is free, and each next one until twice as much, up to the
+ * whole cache: free memory in many small pieces may not hold the value.  A round skips the
+ * percentages that would leave less free than the value takes (minimum), and, when its pass found
+ * nothing expired, those that are free already: the value failed with that much free (unless memory
+ * was freed between the failure and the pass, which then evicts more than needed).  If another
  * process ran a full pass since phase 2 began (rcgen), a round only runs phase 2 again.  A pass that
- * removed nothing, with the value still not fitting, makes every process skip the pass for a while
- * (rcfutile, rcticks, rcwait: hints, read and written without the lock), 20 times as long as the
- * pass took and at least RECLAIM_FUTILE_MS, so that such passes keep the cache lock for a small
- * share of the time at most.  Phase 2 can run again: a failure gave back what it had taken, and the
- * value and its serialized objects are still held by pprep.
+ * removed nothing (with ucache.gc.evict, the cache had no entry left), with the value still not
+ * fitting, makes every process skip the pass for a while (rcfutile, rcticks, rcwait: hints, read and
+ * written without the lock), 20 times as long as the pass took and at least RECLAIM_FUTILE_MS, so
+ * that such passes keep the cache lock for a small share of the time at most.  While a ucache_clear()
+ * leaves entries to free, a round sweeps them for SCAVENGER_STEP_BUDGET_US instead of running a pass
+ * (see sweep_cleared_entries), and counts as one of the RECLAIM_TRIES_MAXIMUM tries: a write that
+ * still does not fit fails as in a full cache.  Phase 2 can run again: a failure gave back what it
+ * had taken, and the value and its serialized objects are still held by pprep.
  */
 static int make_room(zvcache_context * pcache, const char * key, zvcopy_prepared * pprep, unsigned int ttl,
-                     unsigned int gen, zvcache_value ** ppnewval)
+                     unsigned int gen, size_t minimum, zvcache_value ** ppnewval)
 {
     zvcache_header * header  = pcache->zvheader;
     zend_long        evict   = MIN(MAX(UCG(ucgc_evict), 0), 100);
-    zend_long        percent = 0;
+    zend_long        percent = evict;
     int              result  = FATAL_OUT_OF_SMEMORY;
     unsigned int     removed = 0;
-    unsigned int     rounds  = 0;
     unsigned int     tries   = 0;
     unsigned char    ran     = 0;
     LONGLONG         spent   = 0;
@@ -3298,34 +3806,40 @@ static int make_room(zvcache_context * pcache, const char * key, zvcopy_prepared
 
     while(result == FATAL_OUT_OF_SMEMORY && tries++ < RECLAIM_TRIES_MAXIMUM)
     {
-        if(header->rcfutile && utils_ticksdiff(GetTickCount64(), header->rcticks) < header->rcwait)
+        if(clear_pending(header))
         {
-            break;
-        }
-
-        lock_lock(pcache->zvlock);
-
-        if(header->rcgen != gen)
-        {
+            /* The entries that a ucache_clear() left: they free memory, a little at a time */
+            sweep_cleared_entries(pcache, SCAVENGER_STEP_BUDGET_US, 0);
             ran = 0;
         }
         else
         {
-            rounds++;
-            percent = (evict > 0) ? MIN(evict << MIN(rounds - 1, 7), 100) : 0;
+            if(header->rcfutile && utils_ticksdiff(GetTickCount64(), header->rcticks) < header->rcwait)
+            {
+                break;
+            }
 
-            QueryPerformanceCounter(&started);
-            removed = reclaim_entries(pcache, percent);
-            spent   = scavenger_elapsed_us(&started) / 1000;
+            lock_lock(pcache->zvlock);
 
-            header->rcgen++;
-            ran = 1;
+            if(header->rcgen != gen)
+            {
+                ran = 0;
+            }
+            else
+            {
+                QueryPerformanceCounter(&started);
+                removed = reclaim_entries(pcache, &percent, minimum);
+                spent   = scavenger_elapsed_us(&started) / 1000;
+
+                header->rcgen++;
+                ran = 1;
+            }
+
+            gen = header->rcgen;
+            lock_unlock(pcache->zvlock);
+
+            free_pending_entries(pcache);
         }
-
-        gen = header->rcgen;
-        lock_unlock(pcache->zvlock);
-
-        free_pending_entries(pcache);
 
         result = create_zvcache_data(pcache, key, pprep, ttl, ppnewval);
         if(result != FATAL_OUT_OF_SMEMORY)
@@ -3342,15 +3856,16 @@ static int make_room(zvcache_context * pcache, const char * key, zvcopy_prepared
             break;
         }
 
-        if(ran && percent >= 100)
+        if(ran && (evict == 0 || percent >= 100))
         {
-            /* Nothing more can be evicted: the value does not fit in the cache */
+            /* Nothing more can be removed: the value does not fit in the cache */
             break;
         }
 
-        if(ran && evict == 0)
+        if(ran)
         {
-            break;
+            /* The next round evicts until twice as much is free */
+            percent = MIN(percent * 2, 100);
         }
     }
 
@@ -3364,6 +3879,7 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
     unsigned char   flock    = 0;
     unsigned char   prepared = 0;
     size_t          peak0    = 0;
+    size_t          minimum  = 0;
     unsigned int    gen      = 0;
     zvcache_value * pentry   = NULL;
     zvcache_value * pnewval  = NULL;
@@ -3427,13 +3943,27 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
         goto Finished;
     }
 
+    /*
+     * A value that takes more than the empty cache holds, by the count of phase 1 (a lower bound),
+     * fails here, as a full cache does, before phase 2 takes any shared memory: phase 2 would take
+     * all the free memory before it failed, the writes of the other processes would fail meanwhile
+     * and their full passes evict entries for nothing, and make_room() would evict every entry.
+     */
+    minimum = copyin_minimum_size(&prep, key);
+    if(pcache->maxfree != 0 && minimum > pcache->maxfree)
+    {
+        dprintimportant("zvcache_set: the value takes at least %Iu bytes, the empty cache holds %Iu", minimum, pcache->maxfree);
+        result = FATAL_OUT_OF_SMEMORY;
+        goto Finished;
+    }
+
     /* Phase 2: if entry wasn't found or set was called, create new data */
     gen    = pcache->zvheader->rcgen;
     result = create_zvcache_data(pcache, key, &prep, ttl, &pnewval);
     if(result == FATAL_OUT_OF_SMEMORY)
     {
         /* The cache is full */
-        result = make_room(pcache, key, &prep, ttl, gen, &pnewval);
+        result = make_room(pcache, key, &prep, ttl, gen, minimum, &pnewval);
     }
     if(FAILED(result))
     {
@@ -3563,51 +4093,58 @@ Finished:
     return result;
 }
 
+/*
+ * Every entry in the cache becomes a cleared entry at once, under the lock: the lookups, the listing
+ * and the counts skip it from then on (entry_cleared), and an entry added afterwards is not one.  Then
+ * the cleared entries are removed and their memory freed a batch at a time, the lock released between
+ * batches (sweep_cleared_entries), so that the other processes are not held up while a large cache is
+ * freed.  One process sweeps to the end: this one, unless the process of an earlier ucache_clear()
+ * still does (it went on less than CLEAR_SWEEPER_STALE_MS ago), which then goes through the table
+ * again from its start, and this call returns at once.  The others help in short steps (a write that
+ * needs memory, the end of a request).  If the process that sweeps is killed (an IIS FastCGI timeout),
+ * the cache stays cleared, and the entries left are removed by those steps, by the lookups and the
+ * scavenger steps that pass them, or by the next ucache_clear(), which takes the sweep over.
+ */
 int zvcache_clear(zvcache_context * pcache)
 {
     int              result = NONFATAL;
-    unsigned int     index  = 0;
     zvcache_header * header = NULL;
-    alloc_context *  palloc = NULL;
-    zvcache_value *  pvalue = NULL;
-    zvcache_value *  ptemp  = NULL;
+    ULONGLONG        ticks  = 0;
+    unsigned int     pid    = GetCurrentProcessId();
+    unsigned char    owner  = 0;
 
     dprintverbose("start zvcache_clear %p", pcache);
 
     _ASSERT(pcache != NULL);
 
+    header = pcache->zvheader;
+
     lock_lock(pcache->zvlock);
 
-    /* No point running the scavenger on call to clear */
+    /* In this order: a process killed in between leaves the entries cleared, and at worst counts off */
+    header->cleargen++;
+    header->clearitems += header->itemcount;
+    header->itemcount   = 0;
+    header->clearnext   = 0;
 
-    header = pcache->zvheader;
-    palloc = pcache->zvalloc;
+    /* A full cache that left no room is no longer full */
+    header->rcfutile    = 0;
 
-    for(index = 0; index < header->valuecount; index++)
+    /* This process sweeps, unless another one goes on with the sweep of an earlier clear */
+    ticks = GetTickCount64();
+    if(clear_pending(header) && (header->sweeper == 0 || header->sweeper == pid || utils_ticksdiff(ticks, header->sweepticks) >= CLEAR_SWEEPER_STALE_MS))
     {
-        if(header->values[index] == 0)
-        {
-            continue;
-        }
-
-        pvalue = ZVCACHE_VALUE(palloc, header->values[index]);
-
-        while(pvalue != NULL)
-        {
-            ptemp = ZVCACHE_VALUE(palloc, pvalue->next_value);
-            remove_zvcache_entry(pcache, index, pvalue);
-            pvalue = ptemp;
-        }
-
-        ptemp = NULL;
+        header->sweeper    = pid;
+        header->sweepticks = ticks;
+        owner = 1;
     }
-
-    _ASSERT(SUCCEEDED(result));
 
     lock_unlock(pcache->zvlock);
 
-    /* The other processes see the empty cache already; the memory comes back now */
-    free_pending_entries(pcache);
+    if(owner)
+    {
+        sweep_cleared_entries(pcache, 0, 1);
+    }
 
     dprintverbose("end zvcache_clear");
 
@@ -3740,7 +4277,8 @@ static int list_zvcache_entries(zvcache_context * pcache, zend_bool summaryonly,
             pvalue = ZVCACHE_VALUE(palloc, header->values[index]);
             while(pvalue != NULL)
             {
-                if(position++ < offset)
+                /* Cleared entries are not listed, nor counted for offset */
+                if(entry_cleared(header, pvalue) || position++ < offset)
                 {
                     pvalue = ZVCACHE_VALUE(palloc, pvalue->next_value);
                     continue;
