@@ -1621,19 +1621,21 @@ the download or the unpacking fails, the zip and the partly unpacked folder are 
 pack that windows.php.net does not have (HTTP 404), another `curl` error, or a damaged zip.
 
 It then rewrites `php_ucache.props` with the pack's include and lib paths and import library, and builds
-`bin\Release\php<major><minor>\php_ucache.dll` (`php72`, `php73`, `php74`, `php80`, `php81`, `php82`, `php83`, `php84`
-or `php85`, so the builds of different versions do not overwrite each other) with the version's toolset and the
-newest Windows SDK it finds (in `%ProgramFiles(x86)%\Windows Kits\10`, or else in the folder of the registry value
-`KitsRoot10`), without PDB files; the `obj` folder is deleted. If the build fails and vswhere finds no Visual Studio
-with that toolset, `build.bat` names the component to install. Do not retarget the project to another toolset, as
-MSBuild's error MSB8020 suggests: on PHP 7.4 and later, the DLL would not load.
+`bin\Release\<version>\php<major><minor>\php_ucache.dll`, where `<version>` is the name of the current git branch (the
+branches are named after the versions, `1.0.0.2` for example), or else the version in `precomp.h`, and
+`php<major><minor>` is `php72`, `php73`, `php74`, `php80`, `php81`, `php82`, `php83`, `php84` or `php85`, so that the
+builds of different versions do not overwrite each other, with the version's toolset and the newest Windows SDK it finds
+(in `%ProgramFiles(x86)%\Windows Kits\10`, or else in the folder of the registry value `KitsRoot10`), without PDB files;
+the `obj` folder is deleted. If the build fails and vswhere finds no Visual Studio with that toolset, `build.bat` names
+the component to install. Do not retarget the project to another toolset, as MSBuild's error MSB8020 suggests: on PHP
+7.4 and later, the DLL would not load.
 
-The DLL is tested before anything is installed (see [Verifying the build](#verifying-the-build)). With `install`,
-the DLL is copied into `%PHP_DIR%\ext` only if both test runs passed, and the version's folder is then deleted
-(`bin\Release` and `bin` too, once they are empty; the other versions' builds stay). When `PHP_DIR` has no
-`php.exe`, the test is skipped, and `install` fails without installing anything. The exit code is 1 on any failure,
-a failed or crashed test included, and 0 otherwise. `MSBUILD` at the top of `build.bat` is the path of MSBuild.exe.
-The paths (`PHP_DIR`, `PHP_DEVEL_ROOT`, the folder of the sources) may contain spaces and parentheses.
+The DLL is tested before anything is installed (see [Verifying the build](#verifying-the-build)). With `install`, the
+DLL is copied into `%PHP_DIR%\ext` only if both test runs passed, and the version's folder is then deleted
+(`bin\Release\<version>`, `bin\Release` and `bin` too, once they are empty; the other builds stay). When `PHP_DIR` has
+no `php.exe`, the test is skipped, and `install` fails without installing anything. The exit code is 1 on any failure, a
+failed or crashed test included, and 0 otherwise. `MSBUILD` at the top of `build.bat` is the path of MSBuild.exe. The
+paths (`PHP_DIR`, `PHP_DEVEL_ROOT`, the folder of the sources) may contain spaces and parentheses.
 
 Without `build.bat`, point `php_ucache.props` at the devel pack, or pass the pack on the command line with
 `"/p:PhpSdkRoot=<pack>\include" "/p:PhpLibName=<pack>\lib\php8.lib"` (`php7.lib` for 7.2 to 7.4), which take

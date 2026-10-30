@@ -14,8 +14,10 @@ REM   build.bat 8.4                - Build and test for PHP 8.4
 REM   build.bat 7.2                - Build and test for PHP 7.2
 REM   build.bat 8.4 install        - Build and test for PHP 8.4, then install
 REM
-REM Builds bin\Release\phpXX\php_ucache.dll (php72, php73, php74, php80, php81, php82, php83, php84 or php85),
-REM each version in a folder of its own, the same way as mutx: MSBuild runs php_ucache.vcxproj
+REM Builds bin\Release\<version>\phpXX\php_ucache.dll, where <version> is the name of the current git branch (the
+REM branches are named after the versions: 1.0.0.0, 1.0.0.1, ...), or else the version in precomp.h (a detached
+REM HEAD, a branch of another name, or no git), and phpXX is php72, php73, php74, php80, php81, php82, php83, php84
+REM or php85: each build in a folder of its own. The same way as mutx: MSBuild runs php_ucache.vcxproj
 REM against the official devel pack of the PHP version (its headers and php7.lib or php8.lib),
 REM so no PHP SDK, phpize or configure. Unlike mutx there is no ts/nts parameter: ucache only
 REM supports non-thread-safe (NTS) PHP (see config.w32). The DLL is then tested with the PHP in
@@ -110,6 +112,24 @@ IF NOT EXIST %MSBUILD% (
 
 cd /d "%~dp0"
 
+REM The version that names the output folder: the current git branch if its name is a version, else the version
+REM that precomp.h defines. A branch whose version differs from precomp.h's only gets a warning, so that a new
+REM version's branch builds before its version is set
+SET "GIT_BRANCH="
+SET "UCACHE_VERSION="
+FOR /F "delims=" %%B IN ('git rev-parse --abbrev-ref HEAD 2^>nul') DO SET "GIT_BRANCH=%%B"
+IF DEFINED GIT_BRANCH echo %GIT_BRANCH%| findstr /R /X "[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*" >nul && SET "UCACHE_VERSION=%GIT_BRANCH%"
+SET "SOURCE_VERSION="
+FOR /F "tokens=3" %%V IN ('findstr /B /C:"#define PHP_UCACHE_VERSION " precomp.h') DO SET "SOURCE_VERSION=%%~V"
+IF NOT DEFINED UCACHE_VERSION SET "UCACHE_VERSION=%SOURCE_VERSION%"
+IF DEFINED UCACHE_VERSION goto ucache_version_ok
+echo ERROR: no version: the current git branch is not named after one, and precomp.h defines none
+pause
+exit /b 1
+:ucache_version_ok
+IF NOT "%UCACHE_VERSION%"=="%SOURCE_VERSION%" echo WARNING: the branch is %UCACHE_VERSION%, but precomp.h says %SOURCE_VERSION%
+SET "OUT_DIR=bin\%CONFIG%\%UCACHE_VERSION%\%PHP_FOLDER%"
+
 REM The official NTS devel pack of this PHP version from windows.php.net: the headers and import library of the
 REM released binaries, so the DLL carries their build ID (e.g. API20240924,NTS,VS17) and loads in them. Downloaded
 REM once into PHP_DEVEL_ROOT (default D:\Dev\php-devel), one folder per pack; the zip is deleted once unpacked.
@@ -168,6 +188,7 @@ echo.
 echo ====================================================
 echo Building ucache PHP Extension
 echo Configuration: %CONFIG%
+echo ucache version: %UCACHE_VERSION%
 echo Thread Safety: nts
 echo PHP Version: %PHP_VER% (%PHP_VERSION%)
 echo VC Version: %VC_VERSION%
@@ -180,8 +201,8 @@ echo ====================================================
 echo.
 
 REM Build the project with the toolset of the PHP version (the global property overrides the vcxproj's v143),
-REM into the version's folder (OutDir is relative to the project, and must end with a backslash), without PDB files
-%MSBUILD% php_ucache.vcxproj /p:Configuration=%CONFIG% /p:Platform=x64 /p:PlatformToolset=%TOOLSET% /p:WindowsTargetPlatformVersion=%WINSDK_VERSION% /p:OutDir=bin\%CONFIG%\%PHP_FOLDER%\ /p:DebugSymbols=false /p:DebugType=None /p:GenerateDebugInformation=false /v:minimal /m
+REM into the build's folder (OutDir is relative to the project, and must end with a backslash), without PDB files
+%MSBUILD% php_ucache.vcxproj /p:Configuration=%CONFIG% /p:Platform=x64 /p:PlatformToolset=%TOOLSET% /p:WindowsTargetPlatformVersion=%WINSDK_VERSION% /p:OutDir=%OUT_DIR%\ /p:DebugSymbols=false /p:DebugType=None /p:GenerateDebugInformation=false /v:minimal /m
 
 REM Not "IF ERRORLEVEL 1": that is false for the negative exit codes of a crashed process
 IF NOT "%ERRORLEVEL%"=="0" (
@@ -207,14 +228,15 @@ echo ====================================================
 echo BUILD SUCCESSFUL!
 echo ====================================================
 echo Configuration: %CONFIG%
+echo ucache version: %UCACHE_VERSION%
 echo PHP Version: %PHP_VER% (%PHP_VERSION%)
-echo Output: bin\%CONFIG%\%PHP_FOLDER%\php_ucache.dll
+echo Output: %OUT_DIR%\php_ucache.dll
 echo.
 
 REM Test the built DLL before anything is installed. -n ignores php.ini, and the CLI only creates the user cache
 REM with ucache.enablecli=1. The full path of the DLL as argument lets test-build.php start other PHP processes
 REM that load it and share the cache. Without php.exe there is no test, and so no install either.
-SET "DLL=%CD%\bin\%CONFIG%\%PHP_FOLDER%\php_ucache.dll"
+SET "DLL=%CD%\%OUT_DIR%\php_ucache.dll"
 IF EXIST "%PHP_DIR%\php.exe" goto run_tests
 IF "%INSTALL%"=="1" goto cannot_test
 echo PHP not found at "%PHP_DIR%" - skipping test
@@ -261,8 +283,8 @@ IF NOT "%TEST_EXIT%"=="0" goto test_failed
 echo.
 IF NOT "%INSTALL%"=="1" exit /b 0
 
-REM Install to PHP ext folder now that the tests have passed. The version's folder is deleted after the copy, and
-REM bin\Release and bin once they are empty; the builds of the other versions stay
+REM Install to PHP ext folder now that the tests have passed. The build's folder is deleted after the copy, and
+REM bin\Release\<version>, bin\Release and bin once they are empty; the other builds stay
 IF EXIST "%PHP_DIR%\ext\" goto install_dll
 echo ERROR: PHP ext directory not found: "%PHP_DIR%\ext"
 pause
@@ -271,7 +293,8 @@ exit /b 1
 echo Installing to "%PHP_DIR%\ext\php_ucache.dll"...
 copy /Y "%DLL%" "%PHP_DIR%\ext\php_ucache.dll" >nul
 IF NOT "%ERRORLEVEL%"=="0" goto install_failed
-rd /S /Q "bin\%CONFIG%\%PHP_FOLDER%" >nul 2>&1
+rd /S /Q "%OUT_DIR%" >nul 2>&1
+rd "bin\%CONFIG%\%UCACHE_VERSION%" >nul 2>&1
 rd "bin\%CONFIG%" >nul 2>&1
 rd "bin" >nul 2>&1
 echo Successfully installed to "%PHP_DIR%\ext\php_ucache.dll"
@@ -301,7 +324,8 @@ echo   version:         PHP version: 7.2, 7.3, 7.4, 8.0, 8.1, 8.2, 8.3, 8.4, 8.5
 echo   install:         Install to PHP ext folder once the tests pass (optional)
 echo.
 echo Builds php_ucache.dll for the non-thread-safe (NTS) x64 PHP of that version into
-echo bin\Release\php^<major^>^<minor^> (php72, php73, php74, php80, php81, php82, php83, php84 or php85),
+echo bin\Release\^<version^>\php^<major^>^<minor^> (php72, php73, php74, php80, php81, php82, php83, php84 or
+echo php85), where ^<version^> is the name of the current git branch, or else the version in precomp.h,
 echo then tests it, without and with opcache, with the php.exe in that version's PHP_DIR
 echo (the table at the end of build.bat).
 echo.
