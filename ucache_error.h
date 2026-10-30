@@ -120,15 +120,14 @@
 #define FAILED(r)                           ((r != NONFATAL) ? 1 : 0)
 
 typedef struct error_context error_context;
-struct error_context
-{
+struct error_context {
     unsigned int    error_code;
-    unsigned char * error_message;
+    unsigned char*  error_message;
 };
 
 extern unsigned int error_getlasterror();
 extern unsigned int error_setlasterror();
-extern char * error_gethrmessage();
-extern char * error_getmessage(unsigned int error_code);
+extern char*        error_gethrmessage();
+extern char*        error_getmessage(unsigned int error_code);
 
 #endif /* _UCACHE_FATAL_H_ */

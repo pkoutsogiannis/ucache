@@ -56,33 +56,27 @@ error_context ucache_errors[] =
 /* We are only maintaining for the process */
 unsigned int error_glerror = 0;
 
-unsigned int error_getlasterror()
-{
+unsigned int error_getlasterror() {
     return error_glerror;
 }
 
-unsigned int error_setlasterror()
-{
+unsigned int error_setlasterror() {
     error_glerror = GetLastError();
     return error_glerror;
 }
 
-char * error_gethrmessage()
-{
+char* error_gethrmessage() {
     return error_getmessage(error_glerror);
 }
 
-char * error_getmessage(unsigned int error_code)
-{
-    int    count   = 0;
-    int    index   = 0;
-    char * message = NULL;
+char* error_getmessage(unsigned int error_code) {
+    int    count = 0;
+    int    index = 0;
+    char*  message = NULL;
 
-    count = sizeof(ucache_errors)/sizeof(ucache_errors[0]);
-    for(index = 0; index < count; index++)
-    {
-        if(ucache_errors[index].error_code == error_glerror)
-        {
+    count = sizeof(ucache_errors) / sizeof(ucache_errors[0]);
+    for (index = 0; index < count; index++) {
+        if (ucache_errors[index].error_code == error_glerror) {
             message = ucache_errors[index].error_message;
             break;
         }

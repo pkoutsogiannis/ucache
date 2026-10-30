@@ -54,36 +54,33 @@ unsigned short glockid = 1;
 
 /* Create a new lock context */
 /* Call lock_initialize to actually create the lock */
-int lock_create(lock_context ** pplock)
-{
+int lock_create(lock_context** pplock) {
     int            result = NONFATAL;
-    lock_context * plock  = NULL;
+    lock_context*  plock = NULL;
 
     dprintverbose("start lock_create");
 
-    _ASSERT( pplock != NULL );
+    _ASSERT(pplock != NULL);
     *pplock = NULL;
 
-    plock = (lock_context *)alloc_pemalloc(sizeof(lock_context));
-    if(plock == NULL)
-    {
+    plock = (lock_context*)alloc_pemalloc(sizeof(lock_context));
+    if (plock == NULL) {
         result = FATAL_OUT_OF_LMEMORY;
         goto Finished;
     }
 
     /* Initialize lock_context structure with default values */
-    plock->id         = glockid++;
-    plock->type       = LOCK_TYPE_INVALID;
-    plock->unused     = 0;
-    plock->state      = LOCK_STATE_UNLOCKED;
+    plock->id = glockid++;
+    plock->type = LOCK_TYPE_INVALID;
+    plock->unused = 0;
+    plock->state = LOCK_STATE_UNLOCKED;
     plock->nameprefix = NULL;
-    plock->namelen    = 0;
-    plock->hxlock     = NULL;
+    plock->namelen = 0;
+    plock->hxlock = NULL;
     plock->last_owner = NULL;
 
     /* id is 8 bit field. Keep maximum to 255 */
-    if(glockid == 256)
-    {
+    if (glockid == 256) {
         glockid = 1;
     }
 
@@ -92,8 +89,7 @@ int lock_create(lock_context ** pplock)
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in lock_create", result);
     }
 
@@ -103,14 +99,12 @@ Finished:
 }
 
 /* Destroy the lock context */
-void lock_destroy(lock_context * plock)
-{
+void lock_destroy(lock_context* plock) {
     dprintverbose("start lock_destroy");
 
-    if( plock != NULL )
-    {
+    if (plock != NULL) {
         _ASSERT(plock->nameprefix == NULL);
-        _ASSERT(plock->hxlock     == NULL);
+        _ASSERT(plock->hxlock == NULL);
 
         alloc_pefree(plock);
         plock = NULL;
@@ -121,35 +115,32 @@ void lock_destroy(lock_context * plock)
 
 /* Caller must free ppnew_prefix using alloc_pefree() */
 int lock_get_nameprefix(
-    char * name,
+    char* name,
     unsigned short cachekey,
     unsigned short type,
-    char **ppnew_prefix,
-    size_t * pcchnew_prefix
-    )
-{
-    int          result     = NONFATAL;
-    char *       objname    = 0;
-    size_t       namelen    = 0;
+    char** ppnew_prefix,
+    size_t* pcchnew_prefix
+) {
+    int          result = NONFATAL;
+    char*        objname = 0;
+    size_t       namelen = 0;
     int          actual_len = 0;
-    int          pid        = 0;
-    const char * group      = NULL;
+    int          pid = 0;
+    const char*  group = NULL;
 
     /* Get the initial length of name prefix */
     namelen = strlen(name);
     _ASSERT(namelen > 0);
 
     /* If a namesalt is specified, put _<salt> in the name */
-    if(UCG(namesalt) != NULL)
-    {
+    if (UCG(namesalt) != NULL) {
         namelen += strlen(UCG(namesalt)) + 1;
     }
 
     /* A lock shared by the processes of the group has the group in its name (see */
     /* filemap_global_initialize). The pid stays 0 in the name: only the */
     /* process-local lock type, now removed, set it */
-    switch(type)
-    {
+    switch (type) {
         case LOCK_TYPE_SHARED:
             group = UCG(fmapgdata)->group;
             namelen += GROUP_MAX_LENGTH;
@@ -162,7 +153,7 @@ int lock_get_nameprefix(
     /* Add 6 for underscores, 1 for null termination, */
     /* LOCK_NUMBER_MAX_STRLEN for adding cachekey, 2 for the pid (always 0), */
     /* PHP_UCACHE_VERSION_LEN, plus the length of the PHP Maj.Min version. */
-    namelen  = namelen + LOCK_NUMBER_MAX_STRLEN + 9;
+    namelen = namelen + LOCK_NUMBER_MAX_STRLEN + 9;
     namelen += sizeof(STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION));
     namelen += PHP_UCACHE_VERSION_LEN;
 
@@ -174,15 +165,13 @@ int lock_get_nameprefix(
     namelen += 2;
 
     /* Synchronization object names are limited to MAX_PATH characters */
-    if(namelen >= MAX_PATH - 1)
-    {
+    if (namelen >= MAX_PATH - 1) {
         result = FATAL_LOCK_LONGNAME;
         goto Finished;
     }
 
-    objname = (char *)alloc_pemalloc(namelen + 1);
-    if(objname == NULL)
-    {
+    objname = (char*)alloc_pemalloc(namelen + 1);
+    if (objname == NULL) {
         result = FATAL_OUT_OF_LMEMORY;
         goto Finished;
     }
@@ -190,17 +179,13 @@ int lock_get_nameprefix(
     ZeroMemory(objname, namelen + 1);
 
     /* Create nameprefix as name_pid_group_ */
-    if(UCG(namesalt) == NULL)
-    {
+    if (UCG(namesalt) == NULL) {
         actual_len = _snprintf_s(objname, namelen + 1, namelen, LOCK_NAME_PREFIX "%s_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION LOCK_SUFFIX_FORMAT, name, cachekey, pid, group);
-    }
-    else
-    {
+    } else {
         actual_len = _snprintf_s(objname, namelen + 1, namelen, LOCK_NAME_PREFIX "%s_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION LOCK_NAMESALT_SUFFIX_FORMAT, name, cachekey, UCG(namesalt), pid, group);
     }
 
-    if (-1 == actual_len)
-    {
+    if (-1 == actual_len) {
         error_setlasterror();
         result = FATAL_LOCK_LONGNAME;
         goto Finished;
@@ -209,7 +194,7 @@ int lock_get_nameprefix(
     /* Zero out the trailing portion of the buffer, for safety! */
     ZeroMemory(objname + actual_len, namelen - actual_len);
 
-    *ppnew_prefix   = objname;
+    *ppnew_prefix = objname;
     *pcchnew_prefix = actual_len;
 
 Finished:
@@ -235,29 +220,26 @@ Return Value:
     FAIL_LOCK_INIT_CREATMUTEX   Failed to create named mutex.  Call error_getlasterror() for more info.
 
 --*/
-int lock_initialize(lock_context * plock, char * name, unsigned short cachekey, unsigned short type, unsigned int * plast_owner)
-{
-    int    result  = NONFATAL;
-    char * objname = 0;
+int lock_initialize(lock_context* plock, char* name, unsigned short cachekey, unsigned short type, unsigned int* plast_owner) {
+    int    result = NONFATAL;
+    char*  objname = 0;
     size_t namelen = 0;
 
     dprintverbose("start lock_initialize");
 
-    _ASSERT(plock    != NULL);
-    _ASSERT(name     != NULL);
+    _ASSERT(plock != NULL);
+    _ASSERT(name != NULL);
     _ASSERT(cachekey != 0);
     _ASSERT(cachekey <= LOCK_NUMBER_MAXIMUM);
-    _ASSERT(type     <= LOCK_TYPE_MAXIMUM);
+    _ASSERT(type <= LOCK_TYPE_MAXIMUM);
 
-    if(cachekey > LOCK_NUMBER_MAXIMUM)
-    {
+    if (cachekey > LOCK_NUMBER_MAXIMUM) {
         result = FATAL_LOCK_NUMBER_LARGE;
         goto Finished;
     }
 
     result = lock_get_nameprefix(name, cachekey, type, &objname, &namelen);
-    if (FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -271,8 +253,7 @@ int lock_initialize(lock_context * plock, char * name, unsigned short cachekey, 
 
     /* Create mutex which will be used to synchronize access */
     plock->hxlock = CreateMutex(NULL, FALSE, objname);
-    if(plock->hxlock == NULL)
-    {
+    if (plock->hxlock == NULL) {
         dprintimportant("Failed to create lock %s due to error %u", objname, error_setlasterror());
         result = FATAL_LOCK_INIT_CREATEMUTEX;
         goto Finished;
@@ -284,25 +265,22 @@ int lock_initialize(lock_context * plock, char * name, unsigned short cachekey, 
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in lock_initialize", result);
 
-        if(plock->hxlock != NULL)
-        {
+        if (plock->hxlock != NULL) {
             CloseHandle(plock->hxlock);
             plock->hxlock = NULL;
         }
 
-        if(plock->nameprefix != NULL)
-        {
+        if (plock->nameprefix != NULL) {
             alloc_pefree(plock->nameprefix);
             plock->nameprefix = NULL;
 
             plock->namelen = 0;
         }
 
-        plock->type       = LOCK_TYPE_INVALID;
+        plock->type = LOCK_TYPE_INVALID;
         plock->last_owner = NULL;
     }
 
@@ -311,28 +289,24 @@ Finished:
     return result;
 }
 
-void lock_terminate(lock_context * plock)
-{
+void lock_terminate(lock_context* plock) {
     dprintverbose("start lock_terminate");
 
-    if(plock != NULL)
-    {
-        if(plock->hxlock != NULL)
-        {
+    if (plock != NULL) {
+        if (plock->hxlock != NULL) {
             CloseHandle(plock->hxlock);
             plock->hxlock = NULL;
         }
 
-        if(plock->nameprefix != NULL)
-        {
+        if (plock->nameprefix != NULL) {
             alloc_pefree(plock->nameprefix);
             plock->nameprefix = NULL;
 
             plock->namelen = 0;
         }
 
-        plock->type    = LOCK_TYPE_INVALID;
-        plock->state   = LOCK_STATE_UNLOCKED;
+        plock->type = LOCK_TYPE_INVALID;
+        plock->state = LOCK_STATE_UNLOCKED;
         plock->last_owner = NULL;
     }
 
@@ -346,45 +320,40 @@ void lock_terminate(lock_context * plock)
  * the wait failed (an invalid handle): the lock is not held then, and the caller must not use what it
  * guards nor release the lock.
  */
-int lock_lock(lock_context * plock)
-{
-    int    result    = NONFATAL;
-    DWORD  ret       = 0;
+int lock_lock(lock_context* plock) {
+    int          result = NONFATAL;
+    DWORD        ret = 0;
     unsigned int last_owner = 0;
 
     dprintverbose("start lock_lock   %p", plock);
 
-    _ASSERT(plock          != NULL);
-    _ASSERT(plock->hxlock  != NULL);
+    _ASSERT(plock != NULL);
+    _ASSERT(plock->hxlock != NULL);
 
     /* Simple case. Just lock hxwrite */
     ret = WaitForSingleObject(plock->hxlock, INFINITE);
 
     /* PID of the process which got the lock before, for the messages below */
-    if (plock->last_owner)
-    {
+    if (plock->last_owner) {
         last_owner = *plock->last_owner;
     }
 
     /* The mutex is ours all the same: record it as for WAIT_OBJECT_0 below, so that lock_unlock() finds it locked */
-    if (ret == WAIT_ABANDONED)
-    {
+    if (ret == WAIT_ABANDONED) {
         error_setlasterror();
         dprintcritical("lock_lock: acquired abandoned mutex %s (last owner pid %u). Something bad happend in another process!",
-                        plock->nameprefix, last_owner);
+            plock->nameprefix, last_owner);
         result = WARNING_LOCK_ABANDONED;
     }
 
-    if (ret == WAIT_FAILED)
-    {
+    if (ret == WAIT_FAILED) {
         dprintcritical("lock_lock: Failure waiting on lock %s (%d, last owner pid %u). Something bad happened!",
-                        plock->nameprefix, error_setlasterror(), last_owner);
+            plock->nameprefix, error_setlasterror(), last_owner);
         result = FATAL_LOCK_WAIT;
         goto Finished;
     }
 
-    if (plock->last_owner)
-    {
+    if (plock->last_owner) {
         *plock->last_owner = GetCurrentProcessId();
     }
 
@@ -422,24 +391,21 @@ Finished:
  * place; it costs no instruction.  A replay is idempotent: a process ended while it replays leaves the
  * log as it was, and the next one replays it again.
  */
-void lock_undo_initialize(lock_undo * pundo, void * pbase, size_t size, unsigned int * pcount, lock_undo_entry * pentries)
-{
-    _ASSERT(pundo    != NULL);
-    _ASSERT(pbase    != NULL);
-    _ASSERT(pcount   != NULL);
+void lock_undo_initialize(lock_undo* pundo, void* pbase, size_t size, unsigned int* pcount, lock_undo_entry* pentries) {
+    _ASSERT(pundo != NULL);
+    _ASSERT(pbase != NULL);
+    _ASSERT(pcount != NULL);
     _ASSERT(pentries != NULL);
 
-    pundo->pcount   = pcount;
+    pundo->pcount = pcount;
     pundo->pentries = pentries;
-    pundo->pbase    = (char *)pbase;
-    pundo->size     = size;
+    pundo->pbase = (char*)pbase;
+    pundo->size = size;
 }
 
 /* An update logs more fields than the log holds (see lock_undo_write): out of line, it never happens */
-static __declspec(noinline) void lock_undo_overflow(lock_undo * pundo)
-{
-    if(*pundo->pcount != LOCK_UNDO_OVERFLOW)
-    {
+static __declspec(noinline) void lock_undo_overflow(lock_undo* pundo) {
+    if (*pundo->pcount != LOCK_UNDO_OVERFLOW) {
         dprintcritical("lock_undo_write: an update writes more than %u fields: it cannot be undone", LOCK_UNDO_MAXIMUM);
         *pundo->pcount = LOCK_UNDO_OVERFLOW;
     }
@@ -453,46 +419,38 @@ static __declspec(noinline) void lock_undo_overflow(lock_undo * pundo)
  * first, the next owner of the lock cannot undo the update whole, and does not use the structures the lock
  * guards (see lock_undo_replay): the calls fail rather than work on half-updated memory.
  */
-void lock_undo_write(lock_undo * pundo, void * pfield, size_t width, unsigned __int64 value)
-{
-    unsigned int      count  = *pundo->pcount;
-    lock_undo_entry * pentry = NULL;
+void lock_undo_write(lock_undo* pundo, void* pfield, size_t width, unsigned __int64 value) {
+    unsigned int      count = *pundo->pcount;
+    lock_undo_entry*  pentry = NULL;
 
     _ASSERT(count < LOCK_UNDO_MAXIMUM);
     _ASSERT(width == 4 || width == 8);
-    _ASSERT((char *)pfield >= pundo->pbase && (char *)pfield + width <= pundo->pbase + pundo->size);
+    _ASSERT((char*)pfield >= pundo->pbase && (char*)pfield + width <= pundo->pbase + pundo->size);
 
-    if(count < LOCK_UNDO_MAXIMUM)
-    {
+    if (count < LOCK_UNDO_MAXIMUM) {
         pentry = pundo->pentries + count;
-        pentry->where = (size_t)((char *)pfield - pundo->pbase) | ((width == 8) ? 1 : 0);
-        pentry->value = (width == 8) ? *(unsigned __int64 *)pfield : *(unsigned int *)pfield;
+        pentry->where = (size_t)((char*)pfield - pundo->pbase) | ((width == 8) ? 1 : 0);
+        pentry->value = (width == 8) ? *(unsigned __int64*)pfield : *(unsigned int*)pfield;
 
         /* The entry before the count that includes it */
         _ReadWriteBarrier();
         *pundo->pcount = count + 1;
-    }
-    else
-    {
+    } else {
         lock_undo_overflow(pundo);
     }
 
     /* The count before the field */
     _ReadWriteBarrier();
 
-    if(width == 8)
-    {
-        *(unsigned __int64 *)pfield = value;
-    }
-    else
-    {
-        *(unsigned int *)pfield = (unsigned int)value;
+    if (width == 8) {
+        *(unsigned __int64*)pfield = value;
+    } else {
+        *(unsigned int*)pfield = (unsigned int)value;
     }
 }
 
 /* The update is complete: a process ended from here on leaves nothing to undo */
-void lock_undo_commit(lock_undo * pundo)
-{
+void lock_undo_commit(lock_undo* pundo) {
     /* Every write of the update before the log is emptied, and every write after the update after it */
     _ReadWriteBarrier();
     *pundo->pcount = 0;
@@ -507,45 +465,37 @@ void lock_undo_commit(lock_undo * pundo)
  * finds it so: the caller must not use the structures the lock guards.  Out of line: it runs only after a
  * process ended inside an update.
  */
-__declspec(noinline) int lock_undo_replay(lock_undo * pundo)
-{
-    unsigned int      count  = *pundo->pcount;
-    unsigned int      index  = 0;
+__declspec(noinline) int lock_undo_replay(lock_undo* pundo) {
+    unsigned int      count = *pundo->pcount;
+    unsigned int      index = 0;
     size_t            offset = 0;
-    size_t            width  = 0;
-    lock_undo_entry * pentry = NULL;
+    size_t            width = 0;
+    lock_undo_entry*  pentry = NULL;
 
-    if(count > LOCK_UNDO_MAXIMUM)
-    {
+    if (count > LOCK_UNDO_MAXIMUM) {
         dprintcritical("lock_undo_replay: the log of an update that was not completed counts %u entries: it cannot be replayed", count);
         return -1;
     }
 
-    for(index = 0; index < count; index++)
-    {
+    for (index = 0; index < count; index++) {
         pentry = pundo->pentries + index;
-        width  = (pentry->where & 1) ? 8 : 4;
+        width = (pentry->where & 1) ? 8 : 4;
         offset = pentry->where & ~(size_t)1;
 
-        if(offset % width != 0 || pundo->size < width || offset > pundo->size - width)
-        {
+        if (offset % width != 0 || pundo->size < width || offset > pundo->size - width) {
             dprintcritical("lock_undo_replay: entry %u of the log of an update that was not completed is outside the segment: it cannot be replayed", index);
             return -1;
         }
     }
 
-    for(index = count; index > 0; index--)
-    {
+    for (index = count; index > 0; index--) {
         pentry = pundo->pentries + index - 1;
         offset = pentry->where & ~(size_t)1;
 
-        if(pentry->where & 1)
-        {
-            *(unsigned __int64 *)(pundo->pbase + offset) = pentry->value;
-        }
-        else
-        {
-            *(unsigned int *)(pundo->pbase + offset) = (unsigned int)pentry->value;
+        if (pentry->where & 1) {
+            *(unsigned __int64*)(pundo->pbase + offset) = pentry->value;
+        } else {
+            *(unsigned int*)(pundo->pbase + offset) = (unsigned int)pentry->value;
         }
     }
 
@@ -558,13 +508,12 @@ __declspec(noinline) int lock_undo_replay(lock_undo * pundo)
 }
 
 /* Release write lock */
-void lock_unlock(lock_context * plock)
-{
+void lock_unlock(lock_context* plock) {
     dprintverbose("start lock_unlock %p", plock);
 
-    _ASSERT(plock          != NULL);
-    _ASSERT(plock->hxlock  != NULL);
-    _ASSERT(plock->state   == LOCK_STATE_LOCKED);
+    _ASSERT(plock != NULL);
+    _ASSERT(plock->hxlock != NULL);
+    _ASSERT(plock->state == LOCK_STATE_LOCKED);
 
     /* Simple case. Just release the mutex */
     plock->state = LOCK_STATE_UNLOCKED;

@@ -68,17 +68,17 @@ static char ucache_namesalt[NAMESALT_LENGTH_MAXIMUM + 1];
 
 /* ucache_functions with the names that ucache.prefix gives them, registered in MINIT and */
 /* unregistered in MSHUTDOWN. NULL when they are not registered */
-static zend_function_entry * ucache_registered_functions = NULL;
+static zend_function_entry* ucache_registered_functions = NULL;
 
 /* How ucache_modify_size read ucache.size (SIZE_READ_*) */
 static unsigned char ucache_size_read = SIZE_READ_AS_WRITTEN;
 
-static void set_success(zval * success, zend_bool value);
-static HashTable * array_form_table(zval * pzarray, zval * psnapshot);
-static void set_or_add(INTERNAL_FUNCTION_PARAMETERS, unsigned char isadd);
-static void inc_or_dec(INTERNAL_FUNCTION_PARAMETERS, unsigned char isdec);
-static int functions_register(int type);
-static void functions_unregister(void);
+static void       set_success(zval* success, zend_bool value);
+static HashTable* array_form_table(zval* pzarray, zval* psnapshot);
+static void       set_or_add(INTERNAL_FUNCTION_PARAMETERS, unsigned char isadd);
+static void       inc_or_dec(INTERNAL_FUNCTION_PARAMETERS, unsigned char isdec);
+static int        functions_register(int type);
+static void       functions_unregister(void);
 static ZEND_INI_MH(ucache_modify_size);
 static void size_validate(void);
 static void startup_failure_warning(int result);
@@ -114,51 +114,51 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_meminfo, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_get, 0, 0, 1)
-    ZEND_ARG_INFO(0, key)
-    UCACHE_ARG_INFO_DEFAULT(1, success, "null")
+ZEND_ARG_INFO(0, key)
+UCACHE_ARG_INFO_DEFAULT(1, success, "null")
 ZEND_END_ARG_INFO()
 
 /* One required argument, as in zend_parse_parameters: the array form takes only the array */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_set, 0, 0, 1)
-    ZEND_ARG_INFO(0, key)
-    UCACHE_ARG_INFO_DEFAULT(0, value, "null")
-    UCACHE_ARG_INFO_DEFAULT(0, ttl, "0")
+ZEND_ARG_INFO(0, key)
+UCACHE_ARG_INFO_DEFAULT(0, value, "null")
+UCACHE_ARG_INFO_DEFAULT(0, ttl, "0")
 ZEND_END_ARG_INFO()
 
 /* The same parameters (see set_or_add), as PHP 8's gen_stub.php writes identical arginfo */
 #define arginfo_ucache_add arginfo_ucache_set
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_delete, 0, 0, 1)
-    ZEND_ARG_INFO(0, key)
+ZEND_ARG_INFO(0, key)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_clear, 0, 0, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_exists, 0, 0, 1)
-    ZEND_ARG_INFO(0, key)
+ZEND_ARG_INFO(0, key)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_info, 0, 0, 0)
-    UCACHE_ARG_INFO_DEFAULT(0, summaryonly, "false")
-    UCACHE_ARG_INFO_DEFAULT(0, key, "null")
-    UCACHE_ARG_INFO_DEFAULT(0, offset, "0")
-    UCACHE_ARG_INFO_DEFAULT(0, limit, "0")
+UCACHE_ARG_INFO_DEFAULT(0, summaryonly, "false")
+UCACHE_ARG_INFO_DEFAULT(0, key, "null")
+UCACHE_ARG_INFO_DEFAULT(0, offset, "0")
+UCACHE_ARG_INFO_DEFAULT(0, limit, "0")
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_inc, 0, 0, 1)
-    ZEND_ARG_INFO(0, key)
-    UCACHE_ARG_INFO_DEFAULT(0, delta, "1")
-    UCACHE_ARG_INFO_DEFAULT(1, success, "null")
+ZEND_ARG_INFO(0, key)
+UCACHE_ARG_INFO_DEFAULT(0, delta, "1")
+UCACHE_ARG_INFO_DEFAULT(1, success, "null")
 ZEND_END_ARG_INFO()
 
 /* The same parameters (see inc_or_dec) */
 #define arginfo_ucache_dec arginfo_ucache_inc
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_ucache_cas, 0, 0, 3)
-    ZEND_ARG_INFO(0, key)
-    ZEND_ARG_INFO(0, cvalue)
-    ZEND_ARG_INFO(0, nvalue)
+ZEND_ARG_INFO(0, key)
+ZEND_ARG_INFO(0, cvalue)
+ZEND_ARG_INFO(0, nvalue)
 ZEND_END_ARG_INFO()
 
 #ifdef UCACHE_TEST
@@ -201,7 +201,7 @@ zend_module_entry ucache_module_entry = {
 };
 
 #ifdef COMPILE_DL_UCACHE
-    ZEND_GET_MODULE(ucache)
+ZEND_GET_MODULE(ucache)
 #endif
 
 PHP_INI_BEGIN()
@@ -222,12 +222,11 @@ PHP_INI_END()
 
 /* END OF PHP EXTENSION MACROS STUFF */
 
-static void globals_initialize(zend_ucache_globals * globals);
-static void globals_terminate(zend_ucache_globals * globals);
+static void globals_initialize(zend_ucache_globals* globals);
+static void globals_terminate(zend_ucache_globals* globals);
 
 /* Initialize globals */
-static void globals_initialize(zend_ucache_globals * globals)
-{
+static void globals_initialize(zend_ucache_globals* globals) {
     dprintverbose("start globals_initialize");
 
 #if defined(COMPILE_DL_UCACHE) && defined(ZTS)
@@ -235,24 +234,24 @@ static void globals_initialize(zend_ucache_globals * globals)
 #endif
 
     /* Initalize the ucache_globals items, before parsing the INI file */
-    UCG(ucenabled)   = 1;    /* User cache enabled by default */
-    UCG(enablecli)   = 0;    /* ucache not enabled by default for CLI */
-    UCG(ucachesize)  = SIZE_DEFAULT; /* User cache size is 8 MB by default */
-    UCG(ucgc_threshold) = 0;   /* Writes do not run the scavenger by default */
-    UCG(ucgc_interval)  = 10;   /* Secs between scavenger runs at the end of requests */
-    UCG(ucgc_ttl)       = 0;   /* Scavenger removes expired entries only */
-    UCG(ucgc_step)      = 0;   /* Hash buckets scanned per scavenger step: automatic */
-    UCG(ucgc_evict)     = 0;   /* A full cache evicts nothing */
-    UCG(debuglevel)  = 0;    /* Debug dump not enabled by default */
-    UCG(namesalt)    = NULL; /* Salt to use in names used by ucache */
-    UCG(prefix)      = NULL; /* Prefix of the function names: PREFIX_DEFAULT */
-    UCG(apppoolid)   = NULL; /* Use this application id */
-    UCG(filemapdir)  = NULL; /* Directory where temp filemap files should be created */
+    UCG(ucenabled) = 1;             /* User cache enabled by default */
+    UCG(enablecli) = 0;             /* ucache not enabled by default for CLI */
+    UCG(ucachesize) = SIZE_DEFAULT; /* User cache size is 8 MB by default */
+    UCG(ucgc_threshold) = 0;        /* Writes do not run the scavenger by default */
+    UCG(ucgc_interval) = 10;        /* Secs between scavenger runs at the end of requests */
+    UCG(ucgc_ttl) = 0;              /* Scavenger removes expired entries only */
+    UCG(ucgc_step) = 0;             /* Hash buckets scanned per scavenger step: automatic */
+    UCG(ucgc_evict) = 0;            /* A full cache evicts nothing */
+    UCG(debuglevel) = 0;            /* Debug dump not enabled by default */
+    UCG(namesalt) = NULL;           /* Salt to use in names used by ucache */
+    UCG(prefix) = NULL;             /* Prefix of the function names: PREFIX_DEFAULT */
+    UCG(apppoolid) = NULL;          /* Use this application id */
+    UCG(filemapdir) = NULL;         /* Directory where temp filemap files should be created */
 
-    UCG(uclasterror) = 0;    /* Last error returned by user cache */
-    UCG(zvucache)    = NULL; /* zvcache_context for user zvals */
-    UCG(parentpid)   = 0;    /* Parent process identifier to use */
-    UCG(fmapgdata)   = NULL; /* Global filemap information data */
+    UCG(uclasterror) = 0;           /* Last error returned by user cache */
+    UCG(zvucache) = NULL;           /* zvcache_context for user zvals */
+    UCG(parentpid) = 0;             /* Parent process identifier to use */
+    UCG(fmapgdata) = NULL;          /* Global filemap information data */
 
     dprintverbose("end globals_initialize");
 
@@ -260,8 +259,7 @@ static void globals_initialize(zend_ucache_globals * globals)
 }
 
 /* Terminate globals */
-static void globals_terminate(zend_ucache_globals * globals)
-{
+static void globals_terminate(zend_ucache_globals* globals) {
     dprintverbose("start globals_terminate");
     dprintverbose("end globals_terminate");
 
@@ -279,90 +277,75 @@ static void globals_terminate(zend_ucache_globals * globals)
  * creates the cache, so the CLI without ucache.enablecli stays silent. The size is only used there: a [PATH=] or
  * [HOST=] section of php.ini (php-cgi) that sets it per request changes nothing
  */
-static ZEND_INI_MH(ucache_modify_size)
-{
-    const char *  value  = ZSTR_VAL(new_value);
-    size_t        index  = 0;
+static ZEND_INI_MH(ucache_modify_size) {
+    const char*   value = ZSTR_VAL(new_value);
+    size_t        index = 0;
     size_t        digits = 0;
     zend_ulong    number = 0;
-    zend_ulong    size   = SIZE_DEFAULT;
-    unsigned char read   = SIZE_READ_AS_WRITTEN;
+    zend_ulong    size = SIZE_DEFAULT;
+    unsigned char read = SIZE_READ_AS_WRITTEN;
 
-    while(value[index] == ' ' || value[index] == '\t')
-    {
+    while (value[index] == ' ' || value[index] == '\t') {
         index++;
     }
 
     /* Empty: the default, as when the setting is not there */
-    if(value[index] == '\0')
-    {
+    if (value[index] == '\0') {
         goto Finished;
     }
 
     /* A hexadecimal number, which OnUpdateLong read as such (0x40 was 64), is not the 0 it starts with */
-    if(value[index] == '0' && (value[index + 1] == 'x' || value[index + 1] == 'X'))
-    {
+    if (value[index] == '0' && (value[index + 1] == 'x' || value[index + 1] == 'X')) {
         read = SIZE_READ_NOT_A_SIZE;
         goto Finished;
     }
 
-    for(; value[index] >= '0' && value[index] <= '9'; index++, digits++)
-    {
-        if(number < SIZE_NUMBER_SATURATED)
-        {
+    for (; value[index] >= '0' && value[index] <= '9'; index++, digits++) {
+        if (number < SIZE_NUMBER_SATURATED) {
             number = number * 10 + (zend_ulong)(value[index] - '0');
         }
     }
 
-    if(digits == 0)
-    {
+    if (digits == 0) {
         read = SIZE_READ_NOT_A_SIZE;
         goto Finished;
     }
 
     size = number;
 
-    while(value[index] == ' ' || value[index] == '\t')
-    {
+    while (value[index] == ' ' || value[index] == '\t') {
         index++;
     }
 
     /* The suffix, and a B after it */
-    if(value[index] == 'k' || value[index] == 'K' || value[index] == 'm' || value[index] == 'M'
-        || value[index] == 'g' || value[index] == 'G')
-    {
-        if(value[index] == 'k' || value[index] == 'K')
-        {
+    if (value[index] == 'k' || value[index] == 'K' || value[index] == 'm' || value[index] == 'M'
+        || value[index] == 'g' || value[index] == 'G') {
+        if (value[index] == 'k' || value[index] == 'K') {
             size = (number + 1023) / 1024;
-        }
-        else if(value[index] == 'g' || value[index] == 'G')
-        {
+        } else if (value[index] == 'g' || value[index] == 'G') {
             size = number * 1024;
         }
 
         index++;
 
-        if(value[index] == 'b' || value[index] == 'B')
-        {
+        if (value[index] == 'b' || value[index] == 'B') {
             index++;
         }
     }
 
-    while(value[index] == ' ' || value[index] == '\t')
-    {
+    while (value[index] == ' ' || value[index] == '\t') {
         index++;
     }
 
     /* Other text after the number: the number, in megabytes */
-    if(value[index] != '\0')
-    {
+    if (value[index] != '\0') {
         size = number;
         read = SIZE_READ_LEADING_NUMBER;
     }
 
 Finished:
 
-    UCG(ucachesize)  = (zend_long)size;
+    UCG(ucachesize) = (zend_long)size;
     ucache_size_read = read;
 
     return SUCCESS;
@@ -370,44 +353,34 @@ Finished:
 
 /* Clamps UCG(ucachesize) to ZCACHE_SIZE_MINIMUM..ZCACHE_SIZE_MAXIMUM, and raises a startup warning when the cache */
 /* does not get the ucache.size that was written. Called by MINIT where it creates the cache */
-static void size_validate(void)
-{
-    const char * value   = INI_STR("ucache.size");
-    zend_long    size    = UCG(ucachesize);
+static void size_validate(void) {
+    const char*  value = INI_STR("ucache.size");
+    zend_long    size = UCG(ucachesize);
     zend_bool    clamped = 0;
 
-    if(value == NULL)
-    {
+    if (value == NULL) {
         value = "";
     }
 
-    if(size < ZCACHE_SIZE_MINIMUM || size > ZCACHE_SIZE_MAXIMUM)
-    {
-        size    = (size < ZCACHE_SIZE_MINIMUM) ? ZCACHE_SIZE_MINIMUM : ZCACHE_SIZE_MAXIMUM;
+    if (size < ZCACHE_SIZE_MINIMUM || size > ZCACHE_SIZE_MAXIMUM) {
+        size = (size < ZCACHE_SIZE_MINIMUM) ? ZCACHE_SIZE_MINIMUM : ZCACHE_SIZE_MAXIMUM;
         clamped = 1;
 
         UCG(ucachesize) = size;
     }
 
-    if(ucache_size_read == SIZE_READ_NOT_A_SIZE)
-    {
+    if (ucache_size_read == SIZE_READ_NOT_A_SIZE) {
         zend_error(E_CORE_WARNING, "ucache.size \"%s\" is not a number of megabytes nor a size such as 64M: the cache has the default size, %d MB",
-                   value, SIZE_DEFAULT);
-    }
-    else if(ucache_size_read == SIZE_READ_LEADING_NUMBER && clamped)
-    {
+            value, SIZE_DEFAULT);
+    } else if (ucache_size_read == SIZE_READ_LEADING_NUMBER && clamped) {
         zend_error(E_CORE_WARNING, "ucache.size \"%s\" is not a number of megabytes nor a size such as 64M, and the number it starts with is outside %d to %d MB: the cache has %d MB",
-                   value, ZCACHE_SIZE_MINIMUM, ZCACHE_SIZE_MAXIMUM, (int)size);
-    }
-    else if(ucache_size_read == SIZE_READ_LEADING_NUMBER)
-    {
+            value, ZCACHE_SIZE_MINIMUM, ZCACHE_SIZE_MAXIMUM, (int)size);
+    } else if (ucache_size_read == SIZE_READ_LEADING_NUMBER) {
         zend_error(E_CORE_WARNING, "ucache.size \"%s\" is not a number of megabytes nor a size such as 64M: the cache has %d MB, the number it starts with",
-                   value, (int)size);
-    }
-    else if(clamped)
-    {
+            value, (int)size);
+    } else if (clamped) {
         zend_error(E_CORE_WARNING, "ucache.size \"%s\" is outside %d to %d MB: the cache has %d MB",
-                   value, ZCACHE_SIZE_MINIMUM, ZCACHE_SIZE_MAXIMUM, (int)size);
+            value, ZCACHE_SIZE_MINIMUM, ZCACHE_SIZE_MAXIMUM, (int)size);
     }
 }
 
@@ -419,14 +392,12 @@ static void size_validate(void)
  * it: error_glerror is kept for the whole process and other steps record errors they recover from, so MINIT clears it
  * first and the warning leaves it out for the other results
  */
-static void startup_failure_warning(int result)
-{
-    unsigned int winerror    = error_getlasterror();
+static void startup_failure_warning(int result) {
+    unsigned int winerror = error_getlasterror();
     zend_bool    haswinerror = 0;
-    const char * cause       = NULL;
+    const char*  cause = NULL;
 
-    switch(result)
-    {
+    switch (result) {
         case FATAL_LOCK_INIT_CREATEMUTEX:
         case FATAL_FILEMAP_INIT_EVENT:
         case FATAL_FILEMAP_INFOMAP:
@@ -441,26 +412,22 @@ static void startup_failure_warning(int result)
             break;
     }
 
-    if(result == FATAL_FILEMAP_CREATEFILE)
-    {
+    if (result == FATAL_FILEMAP_CREATEFILE) {
         /* Not necessarily the folder: a file of another account can be in the way too (Windows error 5) */
         zend_error(E_CORE_WARNING, "ucache: the user cache could not be created, so the ucache functions fail: its file in ucache.filemapdir \"%s\" could not be created or opened (error %d, Windows error %u)",
-                   (UCG(filemapdir) != NULL) ? UCG(filemapdir) : "", result, winerror);
+            (UCG(filemapdir) != NULL) ? UCG(filemapdir) : "", result, winerror);
         return;
     }
 
     /* utils_create_init_event records WAIT_TIMEOUT when the wait for an init mutex times out */
-    if(haswinerror && winerror == WAIT_TIMEOUT)
-    {
+    if (haswinerror && winerror == WAIT_TIMEOUT) {
         zend_error(E_CORE_WARNING, "ucache: the user cache could not be created, so the ucache functions fail: a process that shares it kept its initialization lock for %d seconds (error %d, Windows error %u)",
-                   MAX_INIT_EVENT_WAIT / 1000, result, winerror);
+            MAX_INIT_EVENT_WAIT / 1000, result, winerror);
         return;
     }
 
-    if(haswinerror)
-    {
-        switch(winerror)
-        {
+    if (haswinerror) {
+        switch (winerror) {
             case ERROR_ACCESS_DENIED:
                 cause = "access to its shared memory or locks was denied: processes of another account may use the same ucache.apppoolid (or APP_POOL_ID) and ucache.namesalt";
                 break;
@@ -472,40 +439,31 @@ static void startup_failure_warning(int result)
         }
     }
 
-    if(cause != NULL)
-    {
+    if (cause != NULL) {
         zend_error(E_CORE_WARNING, "ucache: the user cache could not be created, so the ucache functions fail: %s (error %d, Windows error %u)",
-                   cause, result, winerror);
-    }
-    else if(haswinerror)
-    {
+            cause, result, winerror);
+    } else if (haswinerror) {
         zend_error(E_CORE_WARNING, "ucache: the user cache could not be created, so the ucache functions fail (error %d, Windows error %u)",
-                   result, winerror);
-    }
-    else
-    {
+            result, winerror);
+    } else {
         zend_error(E_CORE_WARNING, "ucache: the user cache could not be created, so the ucache functions fail (error %d)", result);
     }
 }
 
 /* A prefix that makes valid PHP function names: letters, digits, underscores and the bytes */
 /* 0x80 to 0xff, not starting with a digit. Empty is valid: the names are then "get", "set", ... */
-static zend_bool prefix_is_valid(const char * prefix)
-{
+static zend_bool prefix_is_valid(const char* prefix) {
     size_t length = strlen(prefix);
-    size_t index  = 0;
+    size_t index = 0;
 
-    if(length > PREFIX_LENGTH_MAXIMUM || (length > 0 && prefix[0] >= '0' && prefix[0] <= '9'))
-    {
+    if (length > PREFIX_LENGTH_MAXIMUM || (length > 0 && prefix[0] >= '0' && prefix[0] <= '9')) {
         return 0;
     }
 
-    for(index = 0; index < length; index++)
-    {
+    for (index = 0; index < length; index++) {
         unsigned char c = (unsigned char)prefix[index];
 
-        if(!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c >= 0x80))
-        {
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c >= 0x80)) {
             return 0;
         }
     }
@@ -517,17 +475,15 @@ static zend_bool prefix_is_valid(const char * prefix)
 /* where EG(current_module) is this module, so the functions belong to it (get_extension_funcs, */
 /* reflection). An invalid prefix, or a name that another extension already uses, leaves the */
 /* functions out, with a startup warning, rather than stop PHP from starting */
-static int functions_register(int type)
-{
-    const char *          prefix         = (UCG(prefix) != NULL) ? UCG(prefix) : PREFIX_DEFAULT;
-    size_t                prefix_length  = 0;
+static int functions_register(int type) {
+    const char*           prefix = (UCG(prefix) != NULL) ? UCG(prefix) : PREFIX_DEFAULT;
+    size_t                prefix_length = 0;
     size_t                default_length = sizeof(PREFIX_DEFAULT) - 1;
-    size_t                count          = sizeof(ucache_functions) / sizeof(ucache_functions[0]) - 1;
-    size_t                index          = 0;
-    zend_function_entry * entries        = NULL;
+    size_t                count = sizeof(ucache_functions) / sizeof(ucache_functions[0]) - 1;
+    size_t                index = 0;
+    zend_function_entry*  entries = NULL;
 
-    if(!prefix_is_valid(prefix))
-    {
+    if (!prefix_is_valid(prefix)) {
         zend_error(E_CORE_WARNING, "ucache.prefix \"%s\" is not a valid function name prefix: the ucache functions are not available", prefix);
         return FAILURE;
     }
@@ -535,13 +491,12 @@ static int functions_register(int type)
     prefix_length = strlen(prefix);
 
     /* Zeroed: the entry after the last one is the end marker */
-    entries = (zend_function_entry *)pecalloc(count + 1, sizeof(zend_function_entry), 1);
+    entries = (zend_function_entry*)pecalloc(count + 1, sizeof(zend_function_entry), 1);
 
-    for(index = 0; index < count; index++)
-    {
-        const char * suffix        = ucache_functions[index].fname + default_length;
+    for (index = 0; index < count; index++) {
+        const char*  suffix = ucache_functions[index].fname + default_length;
         size_t       suffix_length = strlen(suffix);
-        char *       name          = (char *)pemalloc(prefix_length + suffix_length + 1, 1);
+        char*        name = (char*)pemalloc(prefix_length + suffix_length + 1, 1);
 
         _ASSERT(strncmp(ucache_functions[index].fname, PREFIX_DEFAULT, default_length) == 0);
 
@@ -553,11 +508,9 @@ static int functions_register(int type)
     }
 
     /* On a duplicate name, zend_register_functions warns and unregisters the ones it registered */
-    if(zend_register_functions(NULL, entries, NULL, type) != SUCCESS)
-    {
-        for(index = 0; index < count; index++)
-        {
-            pefree((char *)entries[index].fname, 1);
+    if (zend_register_functions(NULL, entries, NULL, type) != SUCCESS) {
+        for (index = 0; index < count; index++) {
+            pefree((char*)entries[index].fname, 1);
         }
 
         pefree(entries, 1);
@@ -569,30 +522,26 @@ static int functions_register(int type)
 }
 
 /* Unregisters the functions that functions_register registered. Called from MSHUTDOWN */
-static void functions_unregister(void)
-{
-    zend_function_entry * entry = NULL;
+static void functions_unregister(void) {
+    zend_function_entry* entry = NULL;
 
-    if(ucache_registered_functions == NULL)
-    {
+    if (ucache_registered_functions == NULL) {
         return;
     }
 
     zend_unregister_functions(ucache_registered_functions, -1, NULL);
 
-    for(entry = ucache_registered_functions; entry->fname != NULL; entry++)
-    {
-        pefree((char *)entry->fname, 1);
+    for (entry = ucache_registered_functions; entry->fname != NULL; entry++) {
+        pefree((char*)entry->fname, 1);
     }
 
     pefree(ucache_registered_functions, 1);
     ucache_registered_functions = NULL;
 }
 
-PHP_MINIT_FUNCTION(ucache)
-{
-    int                result    = NONFATAL;
-    zvcache_context *  pzcache   = NULL;
+PHP_MINIT_FUNCTION(ucache) {
+    int                result = NONFATAL;
+    zvcache_context*   pzcache = NULL;
 
     ZEND_INIT_MODULE_GLOBALS(ucache, globals_initialize, globals_terminate);
     REGISTER_INI_ENTRIES();
@@ -603,8 +552,7 @@ PHP_MINIT_FUNCTION(ucache)
     functions_register(type);
 
     /* If enablecli is set to 0, don't initialize when run with cli sapi */
-    if(!UCG(enablecli) && !strcmp(sapi_module.name, "cli"))
-    {
+    if (!UCG(enablecli) && !strcmp(sapi_module.name, "cli")) {
         goto Finished;
     }
 
@@ -613,18 +561,15 @@ PHP_MINIT_FUNCTION(ucache)
     /* with an empty id would share one cache whatever APP_POOL_ID or its parent process, the file of the cache would go */
     /* to the root of the current drive, and an empty salt would keep a cache apart from the unsalted one although */
     /* ini_get() shows the same for both. The INI values themselves are left alone (see ucache_namesalt) */
-    if(UCG(apppoolid) != NULL && UCG(apppoolid)[0] == '\0')
-    {
+    if (UCG(apppoolid) != NULL && UCG(apppoolid)[0] == '\0') {
         UCG(apppoolid) = NULL;
     }
 
-    if(UCG(filemapdir) != NULL && UCG(filemapdir)[0] == '\0')
-    {
+    if (UCG(filemapdir) != NULL && UCG(filemapdir)[0] == '\0') {
         UCG(filemapdir) = NULL;
     }
 
-    if(UCG(namesalt) != NULL && UCG(namesalt)[0] == '\0')
-    {
+    if (UCG(namesalt) != NULL && UCG(namesalt)[0] == '\0') {
         UCG(namesalt) = NULL;
     }
 
@@ -632,8 +577,7 @@ PHP_MINIT_FUNCTION(ucache)
     size_validate();
 
     /* Truncate namesalt to 8 characters, in a copy (see ucache_namesalt) */
-    if(UCG(namesalt) != NULL && strlen(UCG(namesalt)) > NAMESALT_LENGTH_MAXIMUM)
-    {
+    if (UCG(namesalt) != NULL && strlen(UCG(namesalt)) > NAMESALT_LENGTH_MAXIMUM) {
         memcpy(ucache_namesalt, UCG(namesalt), NAMESALT_LENGTH_MAXIMUM);
         ucache_namesalt[NAMESALT_LENGTH_MAXIMUM] = '\0';
 
@@ -650,8 +594,7 @@ PHP_MINIT_FUNCTION(ucache)
 
     /* Call filemap global initialized. Terminate in MSHUTDOWN */
     result = filemap_global_initialize();
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -661,15 +604,13 @@ PHP_MINIT_FUNCTION(ucache)
 
     /* Always create user cache as ucenabled can be set by script */
     result = zvcache_create(&pzcache);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
     /* cachekey = 1 */
     result = zvcache_initialize(pzcache, 1, UCG(ucachesize));
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -682,15 +623,13 @@ PHP_MINIT_FUNCTION(ucache)
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in php_minit", result);
 
         /* PHP keeps running and the functions fail, as before, but the warning says why */
         startup_failure_warning(result);
 
-        if(pzcache != NULL)
-        {
+        if (pzcache != NULL) {
             zvcache_terminate(pzcache);
             zvcache_destroy(pzcache);
 
@@ -703,18 +642,15 @@ Finished:
     return SUCCESS;
 }
 
-PHP_MSHUTDOWN_FUNCTION(ucache)
-{
+PHP_MSHUTDOWN_FUNCTION(ucache) {
     dprintverbose("start php_mshutdown");
 
     /* If enablecli is 0, short circuit this call in cli mode */
-    if(!UCG(enablecli) && !strcmp(sapi_module.name, "cli"))
-    {
+    if (!UCG(enablecli) && !strcmp(sapi_module.name, "cli")) {
         goto Finished;
     }
 
-    if(UCG(zvucache) != NULL)
-    {
+    if (UCG(zvucache) != NULL) {
         zvcache_terminate(UCG(zvucache));
         zvcache_destroy(UCG(zvucache));
 
@@ -742,33 +678,25 @@ Finished:
 }
 
 /* ucache.gc.interval > 0: the scavenger runs at the end of requests (see zvcache_scavenge_periodic) */
-PHP_RSHUTDOWN_FUNCTION(ucache)
-{
-    if(UCG(ucgc_interval) > 0 && UCG(ucenabled) && UCG(zvucache) != NULL)
-    {
+PHP_RSHUTDOWN_FUNCTION(ucache) {
+    if (UCG(ucgc_interval) > 0 && UCG(ucenabled) && UCG(zvucache) != NULL) {
         zvcache_scavenge_periodic(UCG(zvucache));
     }
 
     return SUCCESS;
 }
 
-PHP_MINFO_FUNCTION(ucache)
-{
+PHP_MINFO_FUNCTION(ucache) {
     dprintverbose("start php_minfo");
 
     php_info_print_table_start();
 
-    if(!UCG(enablecli) && !strcmp(sapi_module.name, "cli"))
-    {
+    if (!UCG(enablecli) && !strcmp(sapi_module.name, "cli")) {
         php_info_print_table_row(2, "User cache", "disabled");
-    }
-    else if(UCG(zvucache) == NULL)
-    {
+    } else if (UCG(zvucache) == NULL) {
         /* MINIT could not create it: its startup warning says why */
         php_info_print_table_row(2, "User cache", "unavailable");
-    }
-    else
-    {
+    } else {
         php_info_print_table_row(2, "User cache", UCG(ucenabled) ? "enabled" : "disabled");
     }
 
@@ -789,22 +717,19 @@ PHP_MINFO_FUNCTION(ucache)
 /* zend_try_assign_typed_ref_bool(): in PHP 7.4 to 8.4 they release the old value before storing, */
 /* and a destructor that writes the variable then frees its object twice; and */
 /* ZEND_TRY_ASSIGN_REF_BOOL stores true in a typed reference whatever the value */
-static void set_success(zval * success, zend_bool value)
-{
+static void set_success(zval* success, zend_bool value) {
 #if PHP_VERSION_ID >= 70400
     zval old;
     zval val;
 
     ZVAL_BOOL(&val, value);
 
-    if(Z_ISREF_P(success))
-    {
-        zend_reference * ref = Z_REF_P(success);
+    if (Z_ISREF_P(success)) {
+        zend_reference* ref = Z_REF_P(success);
 
         /* A typed reference: check (and coerce) the bool before touching the old value */
-        if(ZEND_REF_HAS_TYPE_SOURCES(ref)
-            && !zend_verify_ref_assignable_zval(ref, &val, ZEND_ARG_USES_STRICT_TYPES()))
-        {
+        if (ZEND_REF_HAS_TYPE_SOURCES(ref)
+            && !zend_verify_ref_assignable_zval(ref, &val, ZEND_ARG_USES_STRICT_TYPES())) {
             zval_ptr_dtor(&val);
             return;
         }
@@ -837,13 +762,11 @@ static void set_success(zval * success, zend_bool value)
 /* set, as $GLOBALS is from PHP 8.1 on; ucache_delete(), which runs no user code, walks one too, */
 /* so that the four read such an array alike. *psnapshot receives the copy: the caller */
 /* initializes it as UNDEF and releases it with zval_ptr_dtor() */
-static HashTable * array_form_table(zval * pzarray, zval * psnapshot)
-{
-    HashTable * htable = Z_ARRVAL_P(pzarray);
+static HashTable* array_form_table(zval* pzarray, zval* psnapshot) {
+    HashTable* htable = Z_ARRVAL_P(pzarray);
 
 #if PHP_VERSION_ID < 80100
-    if(htable == &EG(symbol_table))
-    {
+    if (htable == &EG(symbol_table)) {
         ZVAL_ARR(psnapshot, zend_array_dup(htable));
         htable = Z_ARRVAL_P(psnapshot);
     }
@@ -857,17 +780,14 @@ static HashTable * array_form_table(zval * pzarray, zval * psnapshot)
 /* Every function parses its arguments first: on PHP 8, a call that does not match the arginfo */
 /* must throw (ArgumentCountError, TypeError), even when the cache is switched off */
 
-PHP_FUNCTION(ucache_meminfo)
-{
+PHP_FUNCTION(ucache_meminfo) {
     alloc_info   info;
 
-    if(zend_parse_parameters_none() == FAILURE)
-    {
+    if (zend_parse_parameters_none() == FAILURE) {
         return;
     }
 
-    if(UCG(zvucache) == NULL)
-    {
+    if (UCG(zvucache) == NULL) {
         return;
     }
 
@@ -884,151 +804,127 @@ PHP_FUNCTION(ucache_meminfo)
     return;
 }
 
-PHP_FUNCTION(ucache_get)
-{
-    int          result    = NONFATAL;
-    zval *       pzkey     = NULL;
-    zval *       success   = NULL;
-    HashTable *  htable    = NULL;
-    zval *       hentry    = NULL;
+PHP_FUNCTION(ucache_get) {
+    int          result = NONFATAL;
+    zval*        pzkey = NULL;
+    zval*        success = NULL;
+    HashTable*   htable = NULL;
+    zval*        hentry = NULL;
     zval         nentry;
-    zval *       pnentry   = &nentry;
-    char *       key       = NULL;
-    size_t       keylen    = 0;
-    zend_string * zkey     = NULL;
-    char         digits[MAX_ARRAY_INDEX_DIGITS] = {0};
-    zend_bool    isarray   = 0;
+    zval*        pnentry = &nentry;
+    char*        key = NULL;
+    size_t       keylen = 0;
+    zend_string* zkey = NULL;
+    char         digits[MAX_ARRAY_INDEX_DIGITS] = { 0 };
+    zend_bool    isarray = 0;
     zval         snapshot;
 
     /* See array_form_table; released at Finished */
     ZVAL_UNDEF(&snapshot);
 
-    if(zend_parse_parameters(ZEND_NUM_ARGS(), "z|z", &pzkey, &success) == FAILURE)
-    {
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z|z", &pzkey, &success) == FAILURE) {
         result = FATAL_INVALID_ARGUMENT;
         goto Finished;
     }
 
     /* If the user cache is disabled, return false */
-    if(!UCG(ucenabled))
-    {
+    if (!UCG(ucenabled)) {
         RETURN_FALSE;
     }
 
-    if(UCG(zvucache) == NULL)
-    {
+    if (UCG(zvucache) == NULL) {
         result = FATAL_UNEXPECTED_FCALL;
         goto Finished;
     }
 
-    if(success != NULL)
-    {
+    if (success != NULL) {
         set_success(success, 0);
 
         /* A typed reference that cannot hold a bool threw a TypeError */
-        if(EG(exception))
-        {
+        if (EG(exception)) {
             result = FATAL_INVALID_ARGUMENT;
             goto Finished;
         }
     }
 
     /* Convert zval to string zval */
-    if(Z_TYPE_P(pzkey) != IS_STRING && Z_TYPE_P(pzkey) != IS_ARRAY)
-    {
+    if (Z_TYPE_P(pzkey) != IS_STRING && Z_TYPE_P(pzkey) != IS_ARRAY) {
         convert_to_string(pzkey);
 
         /* An object without __toString(): PHP 7.4 and later throw an Error, PHP 7.2 and 7.3 raise */
         /* a recoverable error that an error handler can turn into an exception */
-        if(EG(exception))
-        {
+        if (EG(exception)) {
             result = FATAL_INVALID_ARGUMENT;
             goto Finished;
         }
     }
 
-    if(Z_TYPE_P(pzkey) == IS_STRING)
-    {
+    if (Z_TYPE_P(pzkey) == IS_STRING) {
         result = zvcache_get(UCG(zvucache), Z_STRVAL_P(pzkey), &return_value);
-        if(FAILED(result))
-        {
+        if (FAILED(result)) {
             goto Finished;
         }
-    }
-    else if(Z_TYPE_P(pzkey) == IS_ARRAY)
-    {
+    } else if (Z_TYPE_P(pzkey) == IS_ARRAY) {
         array_init(return_value);
         isarray = 1;
         htable = array_form_table(pzkey, &snapshot);
-        ZEND_HASH_FOREACH_VAL(htable, hentry)
-        {
+        ZEND_HASH_FOREACH_VAL(htable, hentry) {
             /* An element can be a reference (a foreach by reference leaves them in the array) */
             ZVAL_DEREF(hentry);
 
-            if(Z_TYPE_P(hentry) != IS_STRING && Z_TYPE_P(hentry) != IS_LONG)
-            {
+            if (Z_TYPE_P(hentry) != IS_STRING && Z_TYPE_P(hentry) != IS_LONG) {
                 php_error_docref(NULL, E_WARNING, "key array elements can only be string or long");
 
                 result = WARNING_ZVCACHE_ARGUMENT;
                 goto Finished;
             }
 
-            if(Z_TYPE_P(hentry) == IS_LONG)
-            {
+            if (Z_TYPE_P(hentry) == IS_LONG) {
                 keylen = snprintf(digits, MAX_ARRAY_INDEX_DIGITS, ZEND_LONG_FMT, Z_LVAL_P(hentry));
                 key = digits;
-            }
-            else
-            {
+            } else {
                 _ASSERT(Z_TYPE_P(hentry) == IS_STRING);
 
                 /* Hold the string: unserializing a stored object runs user code, which can assign */
                 /* another value to the variable that a referenced element shares */
-                zkey   = zend_string_copy(Z_STR_P(hentry));
-                key    = ZSTR_VAL(zkey);
+                zkey = zend_string_copy(Z_STR_P(hentry));
+                key = ZSTR_VAL(zkey);
                 keylen = ZSTR_LEN(zkey);
             }
 
             result = zvcache_get(UCG(zvucache), key, &pnentry);
 
             /* Ignore failures and try getting values of other keys */
-            if(SUCCEEDED(result))
-            {
+            if (SUCCEEDED(result)) {
                 /* Symtable insert: numeric keys become integer keys, as in any PHP array */
                 add_assoc_zval_ex(return_value, key, keylen, &nentry);
             }
 
-            if(zkey != NULL)
-            {
+            if (zkey != NULL) {
                 zend_string_release(zkey);
                 zkey = NULL;
             }
 
             result = NONFATAL;
-            key    = NULL;
+            key = NULL;
             keylen = 0;
 
             /* Unserializing a stored object threw (__wakeup, __unserialize) */
-            if(EG(exception))
-            {
+            if (EG(exception)) {
                 break;
             }
 
             /* The array of values can pass memory_limit (see zvcache_over_memory_limit) */
-            if(zvcache_over_memory_limit())
-            {
+            if (zvcache_over_memory_limit()) {
                 result = FATAL_OUT_OF_LMEMORY;
                 goto Finished;
             }
         } ZEND_HASH_FOREACH_END();
-    }
-    else
-    {
+    } else {
         _ASSERT(FALSE);
     }
 
-    if(success != NULL && !EG(exception))
-    {
+    if (success != NULL && !EG(exception)) {
         set_success(success, 1);
     }
 
@@ -1036,15 +932,13 @@ Finished:
 
     zval_ptr_dtor(&snapshot);
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         UCG(uclasterror) = result;
 
         dprintimportant("failure %d in ucache_get", result);
 
         /* RETURN_FALSE does not release the array of values built so far */
-        if(isarray)
-        {
+        if (isarray) {
             zval_ptr_dtor(return_value);
         }
 
@@ -1053,45 +947,40 @@ Finished:
 }
 
 /* ucache_set() and ucache_add(), which differ only in isadd: an add fails on a key that exists */
-static void set_or_add(INTERNAL_FUNCTION_PARAMETERS, unsigned char isadd)
-{
-    int           result   = NONFATAL;
-    zval *        pzkey    = NULL;
-    zval *        pzval    = NULL;
-    unsigned int  ttl      = 0;
-    zend_long     lttl     = 0;
-    HashTable *   htable   = NULL;
-    zval *        hentry   = NULL;
+static void set_or_add(INTERNAL_FUNCTION_PARAMETERS, unsigned char isadd) {
+    int           result = NONFATAL;
+    zval*         pzkey = NULL;
+    zval*         pzval = NULL;
+    unsigned int  ttl = 0;
+    zend_long     lttl = 0;
+    HashTable*    htable = NULL;
+    zval*         hentry = NULL;
     zend_ulong    num_key;
-    zend_string * key      = NULL;
-    int           keylen   = 0;
-    char          digits[MAX_ARRAY_INDEX_DIGITS] = {0};
-    size_t        peak0    = 0;
-    unsigned char stop     = 0;
+    zend_string*  key = NULL;
+    int           keylen = 0;
+    char          digits[MAX_ARRAY_INDEX_DIGITS] = { 0 };
+    size_t        peak0 = 0;
+    unsigned char stop = 0;
     zval          snapshot;
 
     /* "l" stores a full zend_long, so parse into lttl and keep ttl the entry's unsigned int */
-    if(zend_parse_parameters(ZEND_NUM_ARGS(), "z|zl", &pzkey, &pzval, &lttl) == FAILURE)
-    {
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z|zl", &pzkey, &pzval, &lttl) == FAILURE) {
         result = FATAL_INVALID_ARGUMENT;
         goto Finished;
     }
 
     /* If the user cache is disabled, return false */
-    if(!UCG(ucenabled))
-    {
+    if (!UCG(ucenabled)) {
         RETURN_FALSE;
     }
 
-    if(UCG(zvucache) == NULL)
-    {
+    if (UCG(zvucache) == NULL) {
         result = FATAL_UNEXPECTED_FCALL;
         goto Finished;
     }
 
     /* Negative ttl and resource values are not allowed */
-    if(lttl < 0)
-    {
+    if (lttl < 0) {
         php_error_docref(NULL, E_WARNING, "ttl cannot be less than 0");
 
         result = WARNING_ZVCACHE_ARGUMENT;
@@ -1101,31 +990,26 @@ static void set_or_add(INTERNAL_FUNCTION_PARAMETERS, unsigned char isadd)
     /* A ttl beyond the entry's unsigned int (4294967295 seconds, about 136 years) is its maximum */
     ttl = ((zend_ulong)lttl > UINT_MAX) ? UINT_MAX : (unsigned int)lttl;
 
-    if(pzval && Z_TYPE_P(pzval) == IS_RESOURCE)
-    {
+    if (pzval && Z_TYPE_P(pzval) == IS_RESOURCE) {
         php_error_docref(NULL, E_WARNING, "value cannot be a resource");
 
         result = WARNING_ZVCACHE_RESCOPYIN;
         goto Finished;
     }
 
-    if(Z_TYPE_P(pzkey) != IS_STRING && Z_TYPE_P(pzkey) != IS_ARRAY)
-    {
+    if (Z_TYPE_P(pzkey) != IS_STRING && Z_TYPE_P(pzkey) != IS_ARRAY) {
         convert_to_string(pzkey);
 
         /* An object without __toString() (see ucache_get) */
-        if(EG(exception))
-        {
+        if (EG(exception)) {
             result = FATAL_INVALID_ARGUMENT;
             goto Finished;
         }
     }
 
-    if(Z_TYPE_P(pzkey) == IS_STRING)
-    {
+    if (Z_TYPE_P(pzkey) == IS_STRING) {
         /* Blank string as key is not allowed */
-        if(Z_STRLEN_P(pzkey) == 0 || *(Z_STRVAL_P(pzkey)) == '\0')
-        {
+        if (Z_STRLEN_P(pzkey) == 0 || *(Z_STRVAL_P(pzkey)) == '\0') {
             php_error_docref(NULL, E_WARNING, "key cannot be blank string");
 
             result = WARNING_ZVCACHE_ARGUMENT;
@@ -1133,22 +1017,18 @@ static void set_or_add(INTERNAL_FUNCTION_PARAMETERS, unsigned char isadd)
         }
 
         /* When first argument is string, value is required */
-        if(pzval == NULL || Z_STRLEN_P(pzkey) > 4096)
-        {
+        if (pzval == NULL || Z_STRLEN_P(pzkey) > 4096) {
             result = WARNING_ZVCACHE_ARGUMENT;
             goto Finished;
         }
 
         result = zvcache_set(UCG(zvucache), Z_STRVAL_P(pzkey), pzval, ttl, isadd);
-        if(FAILED(result))
-        {
+        if (FAILED(result)) {
             goto Finished;
         }
 
         ZVAL_BOOL(return_value, 1);
-    }
-    else if(Z_TYPE_P(pzkey) == IS_ARRAY)
-    {
+    } else if (Z_TYPE_P(pzkey) == IS_ARRAY) {
         array_init(return_value);
         ZVAL_UNDEF(&snapshot);
         htable = array_form_table(pzkey, &snapshot);
@@ -1159,75 +1039,62 @@ static void set_or_add(INTERNAL_FUNCTION_PARAMETERS, unsigned char isadd)
         /* _IND: before PHP 8.1, an array that array_merge(), array_slice(), ... made of $GLOBALS */
         /* holds slots of the symbol table (IS_INDIRECT), which point to the variables: the loop */
         /* takes their values, and leaves out the slots of the variables that are not set */
-        ZEND_HASH_FOREACH_KEY_VAL_IND(htable, num_key, key, hentry)
-        {
+        ZEND_HASH_FOREACH_KEY_VAL_IND(htable, num_key, key, hentry) {
             char alloc_str = 0;
 
             /* We are taking care of long keys properly */
-            if(!key)
-            {
+            if (!key) {
                 /* Convert num_key to string and use that instead (integer keys are signed) */
                 keylen = snprintf(digits, MAX_ARRAY_INDEX_DIGITS, ZEND_LONG_FMT, (zend_long)num_key);
                 key = zend_string_init(digits, keylen, 0);
                 alloc_str = 1;
             }
 
-            if(ZSTR_LEN(key) > 4096 || Z_TYPE_P(hentry) == IS_RESOURCE)
-            {
+            if (ZSTR_LEN(key) > 4096 || Z_TYPE_P(hentry) == IS_RESOURCE) {
                 result = WARNING_ZVCACHE_ARGUMENT;
-            }
-            else
-            {
+            } else {
                 result = zvcache_set(UCG(zvucache), ZSTR_VAL(key), hentry, ttl, isadd);
             }
 
-            if(FAILED(result))
-            {
+            if (FAILED(result)) {
                 add_assoc_long_ex(return_value, ZSTR_VAL(key), ZSTR_LEN(key), -1);
 
                 /* memory_limit passed with delayed OOM: PHP raises the fatal error when this
                  * call returns, store nothing more (see zvcache_peak_over_memory_limit) */
-                if(result == FATAL_OUT_OF_LMEMORY && zvcache_peak_over_memory_limit(peak0))
-                {
+                if (result == FATAL_OUT_OF_LMEMORY && zvcache_peak_over_memory_limit(peak0)) {
                     stop = 1;
                 }
             }
 
-            if (alloc_str == 1)
-            {
+            if (alloc_str == 1) {
                 zend_string_release(key);
                 alloc_str = 0;
             }
 
-            result  = NONFATAL;
-            key     = NULL;
+            result = NONFATAL;
+            key = NULL;
 
             /* Serializing an object threw (Closure, __sleep, __serialize), or memory_limit was
              * passed (see above): stop there */
-            if(EG(exception) || stop)
-            {
+            if (EG(exception) || stop) {
                 break;
             }
         } ZEND_HASH_FOREACH_END();
 
         zval_ptr_dtor(&snapshot);
-    }
-    else
-    {
+    } else {
         _ASSERT(FALSE);
     }
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         UCG(uclasterror) = result;
 
         dprintimportant("failure %d in %s", result, isadd ? "ucache_add" : "ucache_set");
 
         /* Only an add gets WARNING_ZVCACHE_EXISTS */
-        if(result == WARNING_ZVCACHE_EXISTS)
-        {
+        if (result == WARNING_ZVCACHE_EXISTS) {
             php_error_docref(NULL, E_WARNING, "function called with a key which already exists");
         }
 
@@ -1235,82 +1102,68 @@ Finished:
     }
 }
 
-PHP_FUNCTION(ucache_set)
-{
+PHP_FUNCTION(ucache_set) {
     set_or_add(INTERNAL_FUNCTION_PARAM_PASSTHRU, 0);
 }
 
-PHP_FUNCTION(ucache_add)
-{
+PHP_FUNCTION(ucache_add) {
     set_or_add(INTERNAL_FUNCTION_PARAM_PASSTHRU, 1);
 }
 
-PHP_FUNCTION(ucache_delete)
-{
-    int           result   = NONFATAL;
-    zval *        pzkey    = NULL;
-    HashTable *   htable   = NULL;
-    zval *        hentry   = NULL;
-    char *        key      = NULL;
-    char          digits[MAX_ARRAY_INDEX_DIGITS] = {0};
-    zend_bool     isarray  = 0;
+PHP_FUNCTION(ucache_delete) {
+    int           result = NONFATAL;
+    zval*         pzkey = NULL;
+    HashTable*    htable = NULL;
+    zval*         hentry = NULL;
+    char*         key = NULL;
+    char          digits[MAX_ARRAY_INDEX_DIGITS] = { 0 };
+    zend_bool     isarray = 0;
     zval          snapshot;
 
     /* See array_form_table; released at Finished */
     ZVAL_UNDEF(&snapshot);
 
-    if(zend_parse_parameters(ZEND_NUM_ARGS(), "z", &pzkey) == FAILURE)
-    {
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "z", &pzkey) == FAILURE) {
         result = FATAL_INVALID_ARGUMENT;
         goto Finished;
     }
 
     /* If the user cache is disabled, return false */
-    if(!UCG(ucenabled))
-    {
+    if (!UCG(ucenabled)) {
         RETURN_FALSE;
     }
 
-    if(UCG(zvucache) == NULL)
-    {
+    if (UCG(zvucache) == NULL) {
         result = FATAL_UNEXPECTED_FCALL;
         goto Finished;
     }
 
-    if(Z_TYPE_P(pzkey) != IS_STRING && Z_TYPE_P(pzkey) != IS_ARRAY)
-    {
+    if (Z_TYPE_P(pzkey) != IS_STRING && Z_TYPE_P(pzkey) != IS_ARRAY) {
         convert_to_string(pzkey);
 
         /* An object without __toString() (see ucache_get) */
-        if(EG(exception))
-        {
+        if (EG(exception)) {
             result = FATAL_INVALID_ARGUMENT;
             goto Finished;
         }
     }
 
-    if(Z_TYPE_P(pzkey) == IS_STRING)
-    {
+    if (Z_TYPE_P(pzkey) == IS_STRING) {
         result = zvcache_delete(UCG(zvucache), Z_STRVAL_P(pzkey));
-        if(FAILED(result))
-        {
+        if (FAILED(result)) {
             goto Finished;
         }
 
         ZVAL_BOOL(return_value, 1);
-    }
-    else if(Z_TYPE_P(pzkey) == IS_ARRAY)
-    {
+    } else if (Z_TYPE_P(pzkey) == IS_ARRAY) {
         array_init(return_value);
         isarray = 1;
         htable = array_form_table(pzkey, &snapshot);
-        ZEND_HASH_FOREACH_VAL(htable, hentry)
-        {
+        ZEND_HASH_FOREACH_VAL(htable, hentry) {
             /* An element can be a reference (see ucache_get); the string, not the reference, is returned */
             ZVAL_DEREF(hentry);
 
-            if(Z_TYPE_P(hentry) != IS_STRING && Z_TYPE_P(hentry) != IS_LONG)
-            {
+            if (Z_TYPE_P(hentry) != IS_STRING && Z_TYPE_P(hentry) != IS_LONG) {
                 php_error_docref(NULL, E_WARNING, "key array elements can only be string or long");
 
                 result = WARNING_ZVCACHE_ARGUMENT;
@@ -1319,27 +1172,20 @@ PHP_FUNCTION(ucache_delete)
 
             /* Don't convert hentry in place: the key array belongs to the */
             /* caller and can be shared or immutable (opcache) */
-            if(Z_TYPE_P(hentry) == IS_LONG)
-            {
+            if (Z_TYPE_P(hentry) == IS_LONG) {
                 snprintf(digits, MAX_ARRAY_INDEX_DIGITS, ZEND_LONG_FMT, Z_LVAL_P(hentry));
                 key = digits;
-            }
-            else
-            {
+            } else {
                 _ASSERT(Z_TYPE_P(hentry) == IS_STRING);
                 key = Z_STRVAL_P(hentry);
             }
 
             result = zvcache_delete(UCG(zvucache), key);
-            if(SUCCEEDED(result))
-            {
-                if(Z_TYPE_P(hentry) == IS_LONG)
-                {
+            if (SUCCEEDED(result)) {
+                if (Z_TYPE_P(hentry) == IS_LONG) {
                     /* Deleted keys are returned as strings */
                     add_next_index_string(return_value, digits);
-                }
-                else
-                {
+                } else {
                     add_next_index_zval(return_value, hentry);
                     Z_TRY_ADDREF_P(hentry);
                 }
@@ -1347,9 +1193,7 @@ PHP_FUNCTION(ucache_delete)
 
             key = NULL;
         } ZEND_HASH_FOREACH_END();
-    }
-    else
-    {
+    } else {
         _ASSERT(FALSE);
     }
 
@@ -1357,15 +1201,13 @@ Finished:
 
     zval_ptr_dtor(&snapshot);
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         UCG(uclasterror) = result;
 
         dprintimportant("failure %d in ucache_delete", result);
 
         /* RETURN_FALSE does not release the array of deleted keys built so far */
-        if(isarray)
-        {
+        if (isarray) {
             zval_ptr_dtor(return_value);
         }
 
@@ -1373,32 +1215,27 @@ Finished:
     }
 }
 
-PHP_FUNCTION(ucache_clear)
-{
+PHP_FUNCTION(ucache_clear) {
     int result = NONFATAL;
 
     /* PHP 8 throws an ArgumentCountError, PHP 7 warns (or throws too, under strict_types) */
-    if(zend_parse_parameters_none() == FAILURE)
-    {
+    if (zend_parse_parameters_none() == FAILURE) {
         result = FATAL_INVALID_ARGUMENT;
         goto Finished;
     }
 
     /* If the user cache is disabled, return false */
-    if(!UCG(ucenabled))
-    {
+    if (!UCG(ucenabled)) {
         RETURN_FALSE;
     }
 
-    if(UCG(zvucache) == NULL)
-    {
+    if (UCG(zvucache) == NULL) {
         result = FATAL_UNEXPECTED_FCALL;
         goto Finished;
     }
 
     result = zvcache_clear(UCG(zvucache));
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -1406,8 +1243,7 @@ PHP_FUNCTION(ucache_clear)
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         UCG(uclasterror) = result;
 
         dprintimportant("failure %d in ucache_clear", result);
@@ -1418,34 +1254,29 @@ Finished:
     RETURN_TRUE;
 }
 
-PHP_FUNCTION(ucache_exists)
-{
+PHP_FUNCTION(ucache_exists) {
     int           result = NONFATAL;
-    char *        key    = NULL;
+    char*         key = NULL;
     size_t        keylen = 0;
     unsigned char exists = 0;
 
-    if(zend_parse_parameters(ZEND_NUM_ARGS(), "s", &key, &keylen) == FAILURE)
-    {
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s", &key, &keylen) == FAILURE) {
         result = FATAL_INVALID_ARGUMENT;
         goto Finished;
     }
 
     /* If the user cache is disabled, return false */
-    if(!UCG(ucenabled))
-    {
+    if (!UCG(ucenabled)) {
         RETURN_FALSE;
     }
 
-    if(UCG(zvucache) == NULL)
-    {
+    if (UCG(zvucache) == NULL) {
         result = FATAL_UNEXPECTED_FCALL;
         goto Finished;
     }
 
     result = zvcache_exists(UCG(zvucache), key, &exists);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -1453,8 +1284,7 @@ PHP_FUNCTION(ucache_exists)
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         UCG(uclasterror) = result;
 
         dprintimportant("failure %d in ucache_exists", result);
@@ -1462,46 +1292,41 @@ Finished:
         RETURN_FALSE;
     }
 
-    if(!exists)
-    {
+    if (!exists) {
         RETURN_FALSE;
     }
 
     RETURN_TRUE;
 }
 
-PHP_FUNCTION(ucache_info)
-{
-    int                  result      = NONFATAL;
-    zend_llist *         plist       = NULL;
-    zvcache_info_entry * peinfo      = NULL;
+PHP_FUNCTION(ucache_info) {
+    int                  result = NONFATAL;
+    zend_llist*          plist = NULL;
+    zvcache_info_entry*  peinfo = NULL;
     zval                 zfentries;
     zval                 zfentry;
-    zend_ulong           index       = 1;
-    const char *         valuetype   = NULL;
-    zvcache_info         zvinfo      = {0};
-    alloc_info           ainfo       = {0};
+    zend_ulong           index = 1;
+    const char*          valuetype = NULL;
+    zvcache_info         zvinfo = { 0 };
+    alloc_info           ainfo = { 0 };
     zend_bool            summaryonly = 0;   /* "b" stores a zend_bool (bool since PHP 8.0) */
-    char *               entrykey    = NULL;
-    size_t               entrylen    = 0;
-    zend_long            offset      = 0;
-    zend_long            limit       = 0;
+    char*                entrykey = NULL;
+    size_t               entrylen = 0;
+    zend_long            offset = 0;
+    zend_long            limit = 0;
 
-    if(zend_parse_parameters(ZEND_NUM_ARGS(), "|bs!ll", &summaryonly, &entrykey, &entrylen, &offset, &limit) == FAILURE)
-    {
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "|bs!ll", &summaryonly, &entrykey, &entrylen, &offset, &limit) == FAILURE) {
         result = FATAL_INVALID_ARGUMENT;
         goto Finished;
     }
 
-    if(UCG(zvucache) == NULL)
-    {
+    if (UCG(zvucache) == NULL) {
         result = FATAL_UNEXPECTED_FCALL;
         goto Finished;
     }
 
     /* Negative offset and limit are not allowed */
-    if(offset < 0 || limit < 0)
-    {
+    if (offset < 0 || limit < 0) {
         php_error_docref(NULL, E_WARNING, "offset and limit cannot be less than 0");
 
         result = WARNING_ZVCACHE_ARGUMENT;
@@ -1509,21 +1334,18 @@ PHP_FUNCTION(ucache_info)
     }
 
     /* The full listing is indexed by position: the entries after offset start at offset + 1 */
-    if(entrykey == NULL)
-    {
+    if (entrykey == NULL) {
         index = (zend_ulong)offset + 1;
     }
 
-    plist = (zend_llist *)alloc_emalloc(sizeof(zend_llist));
-    if(plist == NULL)
-    {
+    plist = (zend_llist*)alloc_emalloc(sizeof(zend_llist));
+    if (plist == NULL) {
         result = FATAL_OUT_OF_LMEMORY;
         goto Finished;
     }
 
     result = zvcache_list(UCG(zvucache), summaryonly, entrykey, (zend_ulong)offset, (zend_ulong)limit, &zvinfo, plist);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -1538,12 +1360,9 @@ PHP_FUNCTION(ucache_info)
 
     /* The scavenger: seconds since its last step (null before the first one), what that step removed, */
     /* what all the steps removed since the cache was created, and how many of those were evicted */
-    if(zvinfo.scavenged)
-    {
+    if (zvinfo.scavenged) {
         add_assoc_long(return_value, "last_scavenge_seconds", zvinfo.scage);
-    }
-    else
-    {
+    } else {
         add_assoc_null(return_value, "last_scavenge_seconds");
     }
     add_assoc_long(return_value, "last_scavenge_count", zvinfo.sccount);
@@ -1559,12 +1378,10 @@ PHP_FUNCTION(ucache_info)
 
     array_init(&zfentries);
 
-    peinfo = (zvcache_info_entry *)zend_llist_get_first(plist);
-    while(peinfo != NULL)
-    {
+    peinfo = (zvcache_info_entry*)zend_llist_get_first(plist);
+    while (peinfo != NULL) {
         /* The array of many entries can pass memory_limit (see zvcache_over_memory_limit) */
-        if(zvcache_over_memory_limit())
-        {
+        if (zvcache_over_memory_limit()) {
             result = FATAL_OUT_OF_LMEMORY;
             break;
         }
@@ -1574,22 +1391,21 @@ PHP_FUNCTION(ucache_info)
         valuetype = utils_get_typename(peinfo->type);
 
         add_assoc_string(&zfentry, "key_name", peinfo->key);
-        add_assoc_string(&zfentry, "value_type", (char *)valuetype);
+        add_assoc_string(&zfentry, "value_type", (char*)valuetype);
         add_assoc_long(&zfentry, "value_size", peinfo->sizeb);
         add_assoc_long(&zfentry, "ttl_seconds", peinfo->ttl);
         add_assoc_long(&zfentry, "age_seconds", peinfo->age);
         add_assoc_long(&zfentry, "hitcount", peinfo->hitcount);
 
         add_index_zval(&zfentries, index++, &zfentry);
-        peinfo = (zvcache_info_entry *)zend_llist_get_next(plist);
+        peinfo = (zvcache_info_entry*)zend_llist_get_next(plist);
     }
 
     zend_llist_destroy(plist);
     alloc_efree(plist);
     plist = NULL;
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         /* RETURN_FALSE does not release the arrays built so far */
         zval_ptr_dtor(&zfentries);
         zval_ptr_dtor(return_value);
@@ -1602,14 +1418,12 @@ PHP_FUNCTION(ucache_info)
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         UCG(uclasterror) = result;
 
         dprintimportant("failure %d in ucache_info", result);
 
-        if(plist != NULL)
-        {
+        if (plist != NULL) {
             alloc_efree(plist);
             plist = NULL;
         }
@@ -1621,59 +1435,50 @@ Finished:
 }
 
 /* ucache_inc() and ucache_dec(), which differ only in isdec: a dec adds -delta */
-static void inc_or_dec(INTERNAL_FUNCTION_PARAMETERS, unsigned char isdec)
-{
-    int          result  = NONFATAL;
-    char *       key     = NULL;
-    size_t       keylen  = 0;
-    zend_long    delta   = 1;
-    zend_long    newval  = 0;
-    zval *       success = NULL;
+static void inc_or_dec(INTERNAL_FUNCTION_PARAMETERS, unsigned char isdec) {
+    int          result = NONFATAL;
+    char*        key = NULL;
+    size_t       keylen = 0;
+    zend_long    delta = 1;
+    zend_long    newval = 0;
+    zval*        success = NULL;
 
-    if(zend_parse_parameters(ZEND_NUM_ARGS(), "s|lz", &key, &keylen, &delta, &success) == FAILURE)
-    {
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "s|lz", &key, &keylen, &delta, &success) == FAILURE) {
         result = FATAL_INVALID_ARGUMENT;
         goto Finished;
     }
 
     /* If the user cache is disabled, return false */
-    if(!UCG(ucenabled))
-    {
+    if (!UCG(ucenabled)) {
         RETURN_FALSE;
     }
 
-    if(UCG(zvucache) == NULL)
-    {
+    if (UCG(zvucache) == NULL) {
         result = FATAL_UNEXPECTED_FCALL;
         goto Finished;
     }
 
-    if(success != NULL)
-    {
+    if (success != NULL) {
         set_success(success, 0);
 
         /* A typed reference that cannot hold a bool threw a TypeError */
-        if(EG(exception))
-        {
+        if (EG(exception)) {
             result = FATAL_INVALID_ARGUMENT;
             goto Finished;
         }
     }
 
     /* Wraps around like zvcache_change(), without signed overflow: -ZEND_LONG_MIN is ZEND_LONG_MIN */
-    if(isdec)
-    {
+    if (isdec) {
         delta = (zend_long)(0 - (zend_ulong)delta);
     }
 
     result = zvcache_change(UCG(zvucache), key, delta, &newval);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
-    if(success != NULL)
-    {
+    if (success != NULL) {
         set_success(success, 1);
     }
 
@@ -1681,14 +1486,12 @@ static void inc_or_dec(INTERNAL_FUNCTION_PARAMETERS, unsigned char isdec)
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         UCG(uclasterror) = result;
 
         dprintimportant("failure %d in %s", result, isdec ? "ucache_dec" : "ucache_inc");
 
-        if(result == WARNING_ZVCACHE_NOTLONG)
-        {
+        if (result == WARNING_ZVCACHE_NOTLONG) {
             php_error_docref(NULL, E_WARNING, "function can only be called for key whose value is long");
         }
 
@@ -1698,45 +1501,38 @@ Finished:
     RETURN_LONG(newval);
 }
 
-PHP_FUNCTION(ucache_inc)
-{
+PHP_FUNCTION(ucache_inc) {
     inc_or_dec(INTERNAL_FUNCTION_PARAM_PASSTHRU, 0);
 }
 
-PHP_FUNCTION(ucache_dec)
-{
+PHP_FUNCTION(ucache_dec) {
     inc_or_dec(INTERNAL_FUNCTION_PARAM_PASSTHRU, 1);
 }
 
-PHP_FUNCTION(ucache_cas)
-{
+PHP_FUNCTION(ucache_cas) {
     int          result = NONFATAL;
-    char *       key    = NULL;
+    char*        key = NULL;
     size_t       keylen = 0;
     zend_long    cvalue = 0;
     zend_long    nvalue = 0;
 
-    if(zend_parse_parameters(ZEND_NUM_ARGS(), "sll", &key, &keylen, &cvalue, &nvalue) == FAILURE)
-    {
+    if (zend_parse_parameters(ZEND_NUM_ARGS(), "sll", &key, &keylen, &cvalue, &nvalue) == FAILURE) {
         result = FATAL_INVALID_ARGUMENT;
         goto Finished;
     }
 
     /* If the user cache is disabled, return false */
-    if(!UCG(ucenabled))
-    {
+    if (!UCG(ucenabled)) {
         RETURN_FALSE;
     }
 
-    if(UCG(zvucache) == NULL)
-    {
+    if (UCG(zvucache) == NULL) {
         result = FATAL_UNEXPECTED_FCALL;
         goto Finished;
     }
 
     result = zvcache_compswitch(UCG(zvucache), key, cvalue, nvalue);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -1744,10 +1540,8 @@ PHP_FUNCTION(ucache_cas)
 
 Finished:
 
-    if(FAILED(result))
-    {
-        if(result == WARNING_ZVCACHE_CASNEQ)
-        {
+    if (FAILED(result)) {
+        if (result == WARNING_ZVCACHE_CASNEQ) {
             RETURN_FALSE;
         }
 
@@ -1755,8 +1549,7 @@ Finished:
 
         dprintimportant("failure %d in ucache_cas", result);
 
-        if(result == WARNING_ZVCACHE_NOTLONG)
-        {
+        if (result == WARNING_ZVCACHE_NOTLONG) {
             php_error_docref(NULL, E_WARNING, "function can only be called for key whose value is long");
         }
 
@@ -1767,10 +1560,8 @@ Finished:
 }
 
 #ifdef UCACHE_TEST
-PHP_FUNCTION(ucache_lasterror)
-{
-    if(UCG(zvucache) == NULL)
-    {
+PHP_FUNCTION(ucache_lasterror) {
+    if (UCG(zvucache) == NULL) {
         RETURN_LONG(0);
     }
 

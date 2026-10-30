@@ -72,8 +72,7 @@
 #define FILEMAP_INFO_INITDONE                   0x454E4F44
 
 typedef struct filemap_information_header filemap_information_header;
-struct filemap_information_header
-{
+struct filemap_information_header {
     size_t                       size;          /* Total size of the memory map */
     unsigned int                 initdone;      /* FILEMAP_INFO_INITDONE once initialized, else not */
     unsigned short               entry_count;   /* How many other filemap objects are present */
@@ -81,67 +80,62 @@ struct filemap_information_header
 };
 
 typedef struct filemap_information_entry filemap_information_entry;
-struct filemap_information_entry
-{
-    unsigned short               fmaptype;      /* Type which tells what is the purpose of this filemap */
-    unsigned short               cachekey;      /* short key which uniquely identifies fmap of this type */
-    char                         name[MAX_PATH];/* name of filemap */
-    size_t                       size;          /* Size of this filemap */
-    unsigned int                 mapcount;      /* How many processes mapped this filemap */
-    unsigned int                 cpid;          /* ProcessID of process which initially created this map */
-    unsigned int                 opid;          /* Current ProcessID which is the owner */
-    void *                       mapaddr;       /* Map address where owner has this memory mapped */
+struct filemap_information_entry {
+    unsigned short               fmaptype;       /* Type which tells what is the purpose of this filemap */
+    unsigned short               cachekey;       /* short key which uniquely identifies fmap of this type */
+    char                         name[MAX_PATH]; /* name of filemap */
+    size_t                       size;           /* Size of this filemap */
+    unsigned int                 mapcount;       /* How many processes mapped this filemap */
+    unsigned int                 cpid;           /* ProcessID of process which initially created this map */
+    unsigned int                 opid;           /* Current ProcessID which is the owner */
+    void*                        mapaddr;        /* Map address where owner has this memory mapped */
 };
 
 typedef struct filemap_context filemap_context;
-struct filemap_context
-{
+struct filemap_context {
     unsigned short               id;            /* unique id of this filemap context */
-    filemap_information_entry *  infoentry;     /* pointer to filemap information entry */
+    filemap_information_entry*   infoentry;     /* pointer to filemap information entry */
     HANDLE                       hshmfile;      /* file handle for file backed shared memory */
     unsigned int                 existing;      /* 1 if the file mapping object already existed (another process had it open), whatever its file holds */
     HANDLE                       hfilemap;      /* handle to memory map object */
-    void *                       mapaddr;       /* local adddress mapped for this process */
+    void*                        mapaddr;       /* local adddress mapped for this process */
 };
 
 typedef struct filemap_information filemap_information;
-struct filemap_information
-{
+struct filemap_information {
     HANDLE                       hinfomap;      /* Handle to filemap object */
-    char *                       infoname;      /* Name of memory map to store filemap info */
+    char*                        infoname;      /* Name of memory map to store filemap info */
     size_t                       infonlen;      /* Length of name buffer */
-    filemap_information_header * header;        /* Mapped memory address to information segment */
+    filemap_information_header*  header;        /* Mapped memory address to information segment */
     HANDLE                       hinitdone;     /* init mutex (_FILEMAP_INIT), owned while the process creates or opens the information filemap */
-    lock_context *               hlock;         /* Lock object for info filemap */
+    lock_context*                hlock;         /* Lock object for info filemap */
 };
 
 typedef struct filemap_global_context filemap_global_context;
-struct filemap_global_context
-{
-    unsigned int                 pid;           /* PID of this process */
-    unsigned int                 ispool;        /* 1 if an application pool id groups the processes, 0 if their parent process does */
+struct filemap_global_context {
+    unsigned int                 pid;                         /* PID of this process */
+    unsigned int                 ispool;                      /* 1 if an application pool id groups the processes, 0 if their parent process does */
     char                         group[GROUP_MAX_LENGTH + 1]; /* The group in the object names: "P" and 16 hex digits of the hash of the pool id, or the parent process id */
-    filemap_information *        info;          /* pointer to filemap_information */
+    filemap_information*         info;                        /* pointer to filemap_information */
 };
 
-extern int  filemap_global_initialize();
-extern void filemap_global_terminate();
+extern int          filemap_global_initialize();
+extern void         filemap_global_terminate();
 extern unsigned int filemap_getpid();
 
-extern int    filemap_create(filemap_context ** ppfilemap);
-extern void   filemap_destroy(filemap_context * pfilemap);
+extern int    filemap_create(filemap_context** ppfilemap);
+extern void   filemap_destroy(filemap_context* pfilemap);
 
-extern int
-filemap_initialize(
-    filemap_context * pfilemap,
+extern int    filemap_initialize(
+    filemap_context* pfilemap,
     unsigned short fmaptype,
     unsigned short cachekey,
     unsigned int size_mb,
     unsigned char isfirst);
 
-extern void   filemap_terminate(filemap_context * pfilemap);
+extern void   filemap_terminate(filemap_context* pfilemap);
 
-extern size_t filemap_getsize(filemap_context * pfilemap);
-extern unsigned int filemap_getcpid(filemap_context * pfilemap);
+extern size_t       filemap_getsize(filemap_context* pfilemap);
+extern unsigned int filemap_getcpid(filemap_context* pfilemap);
 
 #endif /* _UCACHE_FILEMAP_H_ */

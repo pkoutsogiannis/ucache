@@ -37,12 +37,12 @@
 #define _UCACHE_DEBUG_H_
 
 extern void dprintsetlevel(unsigned int level);
-extern void dprintmessage(char * format, va_list args);
-extern void dprintalways(char * format, ...);
-extern void dprintcritical(char * format, ...);
-extern void dprintimportant(char * format, ...);
-extern void dprintverbose(char * format, ...);
-extern void dprintdecorate(char * format, ...);
+extern void dprintmessage(char* format, va_list args);
+extern void dprintalways(char* format, ...);
+extern void dprintcritical(char* format, ...);
+extern void dprintimportant(char* format, ...);
+extern void dprintverbose(char* format, ...);
+extern void dprintdecorate(char* format, ...);
 
 ZEND_INI_MH(ucache_modify_debuglevel);
 

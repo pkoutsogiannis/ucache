@@ -44,100 +44,82 @@
 
 unsigned int gdebuglevel = 0;
 
-void dprintsetlevel(unsigned int level)
-{
-    if(level == UCACHE_DEBUG_MTYPE_DISABLED  ||
-       level == UCACHE_DEBUG_MTYPE_ALWAYS    ||
-       level == UCACHE_DEBUG_MTYPE_CRITICAL  ||
-       level == UCACHE_DEBUG_MTYPE_IMPORTANT ||
-       level == UCACHE_DEBUG_MTYPE_VERBOSE   ||
-       level == UCACHE_DEBUG_MTYPE_DECORATE)
-    {
+void dprintsetlevel(unsigned int level) {
+    if (level == UCACHE_DEBUG_MTYPE_DISABLED ||
+        level == UCACHE_DEBUG_MTYPE_ALWAYS ||
+        level == UCACHE_DEBUG_MTYPE_CRITICAL ||
+        level == UCACHE_DEBUG_MTYPE_IMPORTANT ||
+        level == UCACHE_DEBUG_MTYPE_VERBOSE ||
+        level == UCACHE_DEBUG_MTYPE_DECORATE) {
         gdebuglevel = level;
     }
 
     return;
 }
 
-void dprintmessage(char * format, va_list args)
-{
+void dprintmessage(char* format, va_list args) {
     char debug_message[255];
 
     sprintf_s(debug_message, 255, "UCACHE: ");
     vsprintf_s(debug_message + 8, 247, format, args);
 
     OutputDebugStringA(debug_message);
-    if(IsDebuggerPresent())
-    {
+    if (IsDebuggerPresent()) {
         OutputDebugStringA("\n");
     }
 
     return;
 }
 
-void dprintalways(char * format, ...)
-{
+void dprintalways(char* format, ...) {
     va_list args;
-    if(gdebuglevel >= UCACHE_DEBUG_MTYPE_ALWAYS)
-    {
+    if (gdebuglevel >= UCACHE_DEBUG_MTYPE_ALWAYS) {
         va_start(args, format);
         dprintmessage(format, args);
         va_end(args);
     }
 }
 
-void dprintcritical(char * format, ...)
-{
+void dprintcritical(char* format, ...) {
     va_list args;
-    if(gdebuglevel >= UCACHE_DEBUG_MTYPE_CRITICAL)
-    {
+    if (gdebuglevel >= UCACHE_DEBUG_MTYPE_CRITICAL) {
         va_start(args, format);
         dprintmessage(format, args);
         va_end(args);
     }
 }
 
-void dprintimportant(char * format, ...)
-{
+void dprintimportant(char* format, ...) {
     va_list args;
-    if(gdebuglevel >= UCACHE_DEBUG_MTYPE_IMPORTANT)
-    {
+    if (gdebuglevel >= UCACHE_DEBUG_MTYPE_IMPORTANT) {
         va_start(args, format);
         dprintmessage(format, args);
         va_end(args);
     }
 }
 
-void dprintverbose(char * format, ...)
-{
+void dprintverbose(char* format, ...) {
     va_list args;
-    if(gdebuglevel >= UCACHE_DEBUG_MTYPE_VERBOSE)
-    {
+    if (gdebuglevel >= UCACHE_DEBUG_MTYPE_VERBOSE) {
         va_start(args, format);
         dprintmessage(format, args);
         va_end(args);
     }
 }
 
-void dprintdecorate(char * format, ...)
-{
+void dprintdecorate(char* format, ...) {
     va_list args;
-    if(gdebuglevel >= UCACHE_DEBUG_MTYPE_DECORATE)
-    {
+    if (gdebuglevel >= UCACHE_DEBUG_MTYPE_DECORATE) {
         va_start(args, format);
         dprintmessage(format, args);
         va_end(args);
     }
 }
 
-ZEND_INI_MH(ucache_modify_debuglevel)
-{
-    if (ZSTR_LEN(new_value) == 0)
-    {
+ZEND_INI_MH(ucache_modify_debuglevel) {
+    if (ZSTR_LEN(new_value) == 0) {
         dprintsetlevel(UCACHE_DEBUG_MTYPE_DISABLED);
-    }
-    else
-    {
+    } else {
         dprintsetlevel(atoi(ZSTR_VAL(new_value)));
         UCG(debuglevel) = gdebuglevel;
     }

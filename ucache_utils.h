@@ -37,36 +37,33 @@
 #ifndef _UCACHE_UTILS_H_
 #define _UCACHE_UTILS_H_
 
-extern uint32_t     utils_hashcalc(const char * str, size_t strlen);
-extern uint32_t     utils_getindex(const char * key, unsigned int count);
-extern int          utils_apoolhash(uint64_t * phash);
+extern uint32_t     utils_hashcalc(const char* str, size_t strlen);
+extern uint32_t     utils_getindex(const char* key, unsigned int count);
+extern int          utils_apoolhash(uint64_t* phash);
 extern ULONGLONG    utils_ticksdiff(ULONGLONG present, ULONGLONG past);
-extern char *       utils_build_temp_filename(char * suffix);
+extern char*        utils_build_temp_filename(char* suffix);
 extern unsigned int utils_get_prime_less_than(size_t num);
 
-extern int
-utils_create_init_event(
-    char * prefix,
-    char * name,
-    HANDLE *pinit_event,
-    unsigned char *pisfirst
-    );
+extern int utils_create_init_event(
+    char* prefix,
+    char* name,
+    HANDLE* pinit_event,
+    unsigned char* pisfirst
+);
 
 #if (defined(_MSC_VER) && (_MSC_VER < 1500))
-extern int ucache_php_snprintf_s(char *buf, size_t len, size_t len2, const char *format,...);
+extern int ucache_php_snprintf_s(char* buf, size_t len, size_t len2, const char* format, ...);
 #endif
 
-extern const char *
-utils_get_apppool_name();
+extern const char* utils_get_apppool_name();
 
-extern int
-utils_set_apppool_acl(
-    char * filename
-    );
+extern int utils_set_apppool_acl(
+    char* filename
+);
 
-extern int          utils_revert_if_necessary(HANDLE *phOriginalToken);
+extern int          utils_revert_if_necessary(HANDLE* phOriginalToken);
 extern void         utils_reimpersonate_if_necessary(HANDLE hOriginalToken);
 
-extern const char * utils_get_typename(zend_uchar type);
+extern const char* utils_get_typename(zend_uchar type);
 
 #endif /* _UCACHE_UTILS_H_ */

@@ -55,17 +55,16 @@
 /* lock_undo_entry - SHARED */
 
 typedef struct lock_context lock_context;
-struct lock_context
-{
-    unsigned       id:8;              /* Unique identifier for the lock */
-    unsigned       type:3;            /* Type of lock (LOCK_TYPE_SHARED) */
-    unsigned       unused:3;          /* padding */
-    unsigned       state:2;           /* Current state of the lock for debugging */
-    unsigned       namelen:16;        /* length of name buffers */
+struct lock_context {
+    unsigned       id : 8;              /* Unique identifier for the lock */
+    unsigned       type : 3;            /* Type of lock (LOCK_TYPE_SHARED) */
+    unsigned       unused : 3;          /* padding */
+    unsigned       state : 2;           /* Current state of the lock for debugging */
+    unsigned       namelen : 16;        /* length of name buffers */
 
-    char *         nameprefix;        /* Name prefix to use for named objects */
-    HANDLE         hxlock;            /* Handle to mutex to prevent multiple writers */
-    unsigned int * last_owner;        /* Pointer to shared memory which has the last owner PID */
+    char*          nameprefix;          /* Name prefix to use for named objects */
+    HANDLE         hxlock;              /* Handle to mutex to prevent multiple writers */
+    unsigned int*  last_owner;          /* Pointer to shared memory which has the last owner PID */
 };
 
 /*
@@ -82,18 +81,16 @@ struct lock_context
 #define LOCK_UNDO_OVERFLOW      0xFFFFFFFF
 
 typedef struct lock_undo_entry lock_undo_entry;
-struct lock_undo_entry
-{
+struct lock_undo_entry {
     size_t                  where;    /* Offset of the field from the start of the segment, plus 1 if it takes 8 bytes (else 4) */
     unsigned __int64        value;    /* What the field held before the update */
 };
 
 typedef struct lock_undo lock_undo;
-struct lock_undo
-{
-    volatile unsigned int * pcount;   /* Entries in the log, 0 between updates (shared) */
-    lock_undo_entry *       pentries; /* Its LOCK_UNDO_MAXIMUM entries (shared) */
-    char *                  pbase;    /* Start of the segment */
+struct lock_undo {
+    volatile unsigned int*  pcount;   /* Entries in the log, 0 between updates (shared) */
+    lock_undo_entry*        pentries; /* Its LOCK_UNDO_MAXIMUM entries (shared) */
+    char*                   pbase;    /* Start of the segment */
     size_t                  size;     /* Size of the segment */
 };
 
@@ -103,25 +100,25 @@ struct lock_undo
 #define LOCK_UNDO_SET(pundo, field, value) \
     lock_undo_write((pundo), (void *)&(field), sizeof(char[(sizeof(field) == 4 || sizeof(field) == 8) ? 1 : -1]) * sizeof(field), (unsigned __int64)(value))
 
-extern int  lock_create(lock_context ** pplock);
-extern void lock_destroy(lock_context * plock);
+extern int  lock_create(lock_context** pplock);
+extern void lock_destroy(lock_context* plock);
 
 extern int lock_get_nameprefix(
-    char * name,
+    char* name,
     unsigned short cachekey,
     unsigned short type,
-    char **ppnew_prefix,
-    size_t * pcchnew_prefix
-    );
-extern int  lock_initialize(lock_context * plock, char * name, unsigned short cachekey, unsigned short type, unsigned int * plast_owner);
-extern void lock_terminate(lock_context * plock);
+    char** ppnew_prefix,
+    size_t* pcchnew_prefix
+);
+extern int  lock_initialize(lock_context* plock, char* name, unsigned short cachekey, unsigned short type, unsigned int* plast_owner);
+extern void lock_terminate(lock_context* plock);
 
-extern int  lock_lock(lock_context * plock);
-extern void lock_unlock(lock_context * plock);
+extern int  lock_lock(lock_context* plock);
+extern void lock_unlock(lock_context* plock);
 
-extern void lock_undo_initialize(lock_undo * pundo, void * pbase, size_t size, unsigned int * pcount, lock_undo_entry * pentries);
-extern void lock_undo_write(lock_undo * pundo, void * pfield, size_t width, unsigned __int64 value);
-extern void lock_undo_commit(lock_undo * pundo);
-extern int  lock_undo_replay(lock_undo * pundo);
+extern void lock_undo_initialize(lock_undo* pundo, void* pbase, size_t size, unsigned int* pcount, lock_undo_entry* pentries);
+extern void lock_undo_write(lock_undo* pundo, void* pfield, size_t width, unsigned __int64 value);
+extern void lock_undo_commit(lock_undo* pundo);
+extern int  lock_undo_replay(lock_undo* pundo);
 
 #endif /* _UCACHE_LOCK_H_ */

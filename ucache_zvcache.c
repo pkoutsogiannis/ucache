@@ -119,22 +119,22 @@ C_ASSERT(sizeof(zvcache_value) == 64);
   ((char*)(ZVALUE((pcopy),(size_t)(ht)->arData)) - HT_HASH_SIZE((ht)->nTableMask))
 
 
-static int  copyin_prepare(zvcopy_prepared * pprep, zval * pzval);
-static int  copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned int depth);
-static int  copyin_serialize_objects(zvcopy_prepared * pprep);
-static void copyin_free_serialized(zvcopy_prepared * pprep);
-static void copyin_release(zvcopy_prepared * pprep);
-static size_t copyin_minimum_size(zvcopy_prepared * pprep, const char * key);
-static void copyin_rollback(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * pxlate);
-static int  copyin_memory(zvcopy_context * pcopy, HashTable * phtable, void * src, size_t size, void **ppdest, zend_uchar *pallocated);
-static int  copyin_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * phtable, zval * poriginal, zval ** ppcopied);
-static int  copyin_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * phtable, HashTable * poriginal, HashTable ** ppcopied);
-static int  copyin_string(zvcopy_context * pcopy, HashTable *phxlate, zend_string * orig_string, zend_string ** new_string);
-static int  copyin_reference(zvcache_context * pcache, zvcopy_context * pcopy, HashTable *phtable, zend_reference * orig_ref, zend_reference ** new_ref);
+static int    copyin_prepare(zvcopy_prepared* pprep, zval* pzval);
+static int    copyin_prepare_walk(zvcopy_prepared* pprep, zval* pzval, unsigned int depth);
+static int    copyin_serialize_objects(zvcopy_prepared* pprep);
+static void   copyin_free_serialized(zvcopy_prepared* pprep);
+static void   copyin_release(zvcopy_prepared* pprep);
+static size_t copyin_minimum_size(zvcopy_prepared* pprep, const char* key);
+static void   copyin_rollback(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* pxlate);
+static int    copyin_memory(zvcopy_context* pcopy, HashTable* phtable, void* src, size_t size, void** ppdest, zend_uchar* pallocated);
+static int    copyin_zval(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* phtable, zval* poriginal, zval** ppcopied);
+static int    copyin_hashtable(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* phtable, HashTable* poriginal, HashTable** ppcopied);
+static int    copyin_string(zvcopy_context* pcopy, HashTable* phxlate, zend_string* orig_string, zend_string** new_string);
+static int    copyin_reference(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* phtable, zend_reference* orig_ref, zend_reference** new_ref);
 
-static int  copyout_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * phtable, zend_llist * ppending, zval * pcached, zval ** ppcopied);
-static int  copyout_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * phtable, zend_llist * ppending, HashTable * pcached, HashTable ** ppcopied);
-static int  copyout_reference(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * phtable, zend_llist * ppending, zend_reference * pcached, zend_reference ** ppnew_ref);
+static int  copyout_zval(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* phtable, zend_llist* ppending, zval* pcached, zval** ppcopied);
+static int  copyout_hashtable(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* phtable, zend_llist* ppending, HashTable* pcached, HashTable** ppcopied);
+static int  copyout_reference(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* phtable, zend_llist* ppending, zend_reference* pcached, zend_reference** ppnew_ref);
 
 /* At most this many removed entries wait to be freed after the cache lock is released (see remove_zvcache_entry) */
 #define FREELIST_MAXIMUM            32
@@ -167,26 +167,26 @@ static int  copyout_reference(zvcache_context * pcache, zvcopy_context * pcopy, 
 /* undocount next to last_owner, in one aligned 8 bytes: zvcache_lock() reads what lock_lock() has just written */
 C_ASSERT(FIELD_OFFSET(zvcache_header, undocount) / 8 == FIELD_OFFSET(zvcache_header, last_owner) / 8);
 
-static int  zvcache_lock(zvcache_context * pcache);
-static zvcache_value * find_zvcache_entry(zvcache_context * pcache, const char * key, unsigned int index, unsigned char prune);
-static int  create_zvcache_data(zvcache_context * pcache, const char * key, zvcopy_prepared * pprep, unsigned int ttl, zvcache_value ** ppvalue);
-static void destroy_cached_zval(zvcache_context * pcache, zval * pzval);
-static void destroy_zvcache_data(zvcache_context * pcache, zvcache_value * pvalue);
-static void add_zvcache_entry(zvcache_context * pcache, unsigned int index, zvcache_value * pvalue);
-static void remove_zvcache_entry(zvcache_context * pcache, unsigned int index, zvcache_value * pvalue);
-static void free_pending_entries(zvcache_context * pcache);
-static zend_bool entry_expired(zvcache_value * pvalue, ULONGLONG ticks);
-static zend_bool entry_cleared(zvcache_header * header, zvcache_value * pvalue);
-static zend_bool clear_pending(zvcache_header * header);
-static void sweep_cleared_entries(zvcache_context * pcache, LONGLONG budget, unsigned char owner);
-static LONGLONG scavenger_elapsed_us(const LARGE_INTEGER * pstart);
-static unsigned int reclaim_entries(zvcache_context * pcache, zend_long * ppercent, size_t minimum);
+static int            zvcache_lock(zvcache_context* pcache);
+static zvcache_value* find_zvcache_entry(zvcache_context* pcache, const char* key, unsigned int index, unsigned char prune);
+static int            create_zvcache_data(zvcache_context* pcache, const char* key, zvcopy_prepared* pprep, unsigned int ttl, zvcache_value** ppvalue);
+static void           destroy_cached_zval(zvcache_context* pcache, zval* pzval);
+static void           destroy_zvcache_data(zvcache_context* pcache, zvcache_value* pvalue);
+static void           add_zvcache_entry(zvcache_context* pcache, unsigned int index, zvcache_value* pvalue);
+static void           remove_zvcache_entry(zvcache_context* pcache, unsigned int index, zvcache_value* pvalue);
+static void           free_pending_entries(zvcache_context* pcache);
+static zend_bool      entry_expired(zvcache_value* pvalue, ULONGLONG ticks);
+static zend_bool      entry_cleared(zvcache_header* header, zvcache_value* pvalue);
+static zend_bool      clear_pending(zvcache_header* header);
+static void           sweep_cleared_entries(zvcache_context* pcache, LONGLONG budget, unsigned char owner);
+static LONGLONG       scavenger_elapsed_us(const LARGE_INTEGER* pstart);
+static unsigned int   reclaim_entries(zvcache_context* pcache, zend_long* ppercent, size_t minimum);
 
 /* Globals */
 static unsigned short gzvcacheid = 1;
 #pragma warning( push )
 #pragma warning( disable : 4146 ) /* we do negative indexing with unsigneds */
-static const uint32_t uninitialized_bucket[-HT_MIN_MASK] = {HT_INVALID_IDX, HT_INVALID_IDX};
+static const uint32_t uninitialized_bucket[-HT_MIN_MASK] = { HT_INVALID_IDX, HT_INVALID_IDX };
 #pragma warning( pop )
 
 /*
@@ -195,7 +195,7 @@ static const uint32_t uninitialized_bucket[-HT_MIN_MASK] = {HT_INVALID_IDX, HT_I
  */
 struct zvcopy_stack
 {
-    char *            plimit;            /* The walk fails at a frame at or below this address */
+    char*             plimit;            /* The walk fails at a frame at or below this address */
     unsigned char     known;             /* plimit is the limit; else the frame where the walk takes it */
 };
 
@@ -219,7 +219,7 @@ struct zvcopy_prepared
     size_t            poolsize;          /* Bytes, counted by the walk, and the serializations of the objects */
     unsigned char     counted;           /* 1 while poolsize is what phase 2 takes, 0 once the walk met a table it cannot count */
     HashTable         strings;           /* Address -> NULL, for each string counted that phase 2 copies once wherever it occurs */
-    const void *      seen[64];          /* The last of those strings, by bits of their address, in front of strings */
+    const void*       seen[64];          /* The last of those strings, by bits of their address, in front of strings */
 };
 
 /* PHP's serializer state, as the code that called ucache left it (see serializer_isolate) */
@@ -242,8 +242,7 @@ struct zvcache_serializer_state
  * slots, and every lookup would walk a long chain.  The xorshift folds the higher bits into the
  * low ones.  It is a bijection, so distinct addresses stay distinct keys.
  */
-static zend_always_inline zend_ulong ucache_addr_key(const void * paddr)
-{
+static zend_always_inline zend_ulong ucache_addr_key(const void* paddr) {
     zend_ulong key = (zend_ulong)paddr;
 
     return key ^ (key >> 12);
@@ -272,47 +271,42 @@ static zend_always_inline zend_ulong ucache_addr_key(const void * paddr)
  * user code runs during a walk.  PHP 7.2 to 8.0 have no Fibers, and their walks do not check: the
  * deepest value takes a few MB of the main thread's stack.
  */
-static zend_always_inline void ucache_stack_start(zvcopy_stack * pstack)
-{
+static zend_always_inline void ucache_stack_start(zvcopy_stack* pstack) {
 #if UCACHE_OWN_STACK_LIMIT
-    pstack->plimit = (char *)_AddressOfReturnAddress() - UCACHE_STACK_LAZY;
-    pstack->known  = 0;
+    pstack->plimit = (char*)_AddressOfReturnAddress() - UCACHE_STACK_LAZY;
+    pstack->known = 0;
 #else
     pstack->plimit = NULL;
-    pstack->known  = 1;
+    pstack->known = 1;
 #endif
 }
 
 #if UCACHE_OWN_STACK_LIMIT
 /* A frame at or below plimit (see ucache_stack_exhausted): takes the limit, unless plimit is it already */
-static zend_never_inline zend_bool ucache_stack_limit_reached(zvcopy_stack * pstack, char * pframe)
-{
+static zend_never_inline zend_bool ucache_stack_limit_reached(zvcopy_stack* pstack, char* pframe) {
     MEMORY_BASIC_INFORMATION mbi;
 
-    if(pstack->known)
-    {
+    if (pstack->known) {
         return 1;
     }
 
     /* If VirtualQuery fails, the walk goes on without a limit, as before */
-    pstack->known  = 1;
+    pstack->known = 1;
     pstack->plimit = NULL;
 
-    if(VirtualQuery(pframe, &mbi, sizeof(mbi)) != 0)
-    {
-        pstack->plimit = (char *)mbi.AllocationBase + UCACHE_STACK_RESERVE;
+    if (VirtualQuery(pframe, &mbi, sizeof(mbi)) != 0) {
+        pstack->plimit = (char*)mbi.AllocationBase + UCACHE_STACK_RESERVE;
     }
 
     return (pframe <= pstack->plimit) ? 1 : 0;
 }
 #endif
 
-static zend_always_inline zend_bool ucache_stack_exhausted(zvcopy_stack * pstack)
-{
+static zend_always_inline zend_bool ucache_stack_exhausted(zvcopy_stack* pstack) {
 #if defined(ZEND_CHECK_STACK_LIMIT)
     return zend_call_stack_overflowed(EG(stack_limit)) ? 1 : 0;
 #elif UCACHE_OWN_STACK_LIMIT
-    char * pframe = (char *)_AddressOfReturnAddress();
+    char* pframe = (char*)_AddressOfReturnAddress();
 
     return (pframe <= pstack->plimit) ? ucache_stack_limit_reached(pstack, pframe) : 0;
 #else
@@ -341,31 +335,29 @@ static zend_always_inline zend_bool ucache_stack_exhausted(zvcopy_stack * pstack
  * disturbed.  serializer_restore() gives the caller its state back, also when a fatal error
  * interrupts the serialization (see copyin_prepare).
  */
-static void serializer_isolate(zvcache_serializer_state * psaved)
-{
+static void serializer_isolate(zvcache_serializer_state* psaved) {
     _ASSERT(psaved != NULL);
 
-    psaved->lock   = BG(serialize_lock);
-    psaved->sdata  = BG(serialize).data;
+    psaved->lock = BG(serialize_lock);
+    psaved->sdata = BG(serialize).data;
     psaved->slevel = BG(serialize).level;
-    psaved->udata  = BG(unserialize).data;
+    psaved->udata = BG(unserialize).data;
     psaved->ulevel = BG(unserialize).level;
 
-    BG(serialize_lock)    = 0;
-    BG(serialize).data    = NULL;
-    BG(serialize).level   = 0;
-    BG(unserialize).data  = NULL;
+    BG(serialize_lock) = 0;
+    BG(serialize).data = NULL;
+    BG(serialize).level = 0;
+    BG(unserialize).data = NULL;
     BG(unserialize).level = 0;
 }
 
-static void serializer_restore(const zvcache_serializer_state * psaved)
-{
+static void serializer_restore(const zvcache_serializer_state* psaved) {
     _ASSERT(psaved != NULL);
 
-    BG(serialize_lock)    = psaved->lock;
-    BG(serialize).data    = psaved->sdata;
-    BG(serialize).level   = psaved->slevel;
-    BG(unserialize).data  = psaved->udata;
+    BG(serialize_lock) = psaved->lock;
+    BG(serialize).data = psaved->sdata;
+    BG(serialize).level = psaved->slevel;
+    BG(unserialize).data = psaved->udata;
     BG(unserialize).level = psaved->ulevel;
 }
 
@@ -383,12 +375,10 @@ static void serializer_restore(const zvcache_serializer_state * psaved)
  * carries over from one request to the next, and which serializations kept in the heap would
  * reuse.  Counting them refused values that fit, after a big request had run in the process.
  */
-static zend_bool copyin_over_memory_limit(size_t persistent)
-{
+static zend_bool copyin_over_memory_limit(size_t persistent) {
     zend_long limit = PG(memory_limit);
 
-    if(limit <= 0)
-    {
+    if (limit <= 0) {
         return 0;
     }
 
@@ -400,10 +390,8 @@ static zend_bool copyin_over_memory_limit(size_t persistent)
  * since PHP 7.3 it frees a string with efree(), and the serializations are persistent.  The
  * objects themselves (IS_PTR) are held by the held table.
  */
-static void copyin_object_dtor(zval * pzval)
-{
-    if(Z_TYPE_P(pzval) == IS_STRING)
-    {
+static void copyin_object_dtor(zval* pzval) {
+    if (Z_TYPE_P(pzval) == IS_STRING) {
         zend_string_release(Z_STR_P(pzval));
     }
 }
@@ -450,13 +438,12 @@ static void copyin_object_dtor(zval * pzval)
  * serializations before it propagates.  On PHP 7.2, memory_limit reached inside a serialization
  * still ends the process, and its memory with it.
  */
-static int copyin_prepare(zvcopy_prepared * pprep, zval * pzval)
-{
-    int                      result   = NONFATAL;
-    zval *                   pentry   = NULL;
+static int copyin_prepare(zvcopy_prepared* pprep, zval* pzval) {
+    int                      result = NONFATAL;
+    zval*                    pentry = NULL;
     zvcache_serializer_state saved;
     volatile unsigned char   walkfail = 0;
-    volatile unsigned char   bailout  = 0;
+    volatile unsigned char   bailout = 0;
 
     dprintverbose("start copyin_prepare");
 
@@ -470,9 +457,9 @@ static int copyin_prepare(zvcopy_prepared * pprep, zval * pzval)
     zend_hash_init(&pprep->objects, 8, NULL, copyin_object_dtor, 0);
     zend_hash_init(&pprep->flattened, 0, NULL, ZVAL_PTR_DTOR, 0);
     zend_hash_init(&pprep->strings, 8, NULL, NULL, 1);
-    memset((void *)pprep->seen, 0, sizeof(pprep->seen));
+    memset((void*)pprep->seen, 0, sizeof(pprep->seen));
     pprep->poolsize = 0;
-    pprep->counted  = 1;
+    pprep->counted = 1;
 
     /*
      * The table of the strings counted is persistent memory, as the translation table of phase 2 is:
@@ -481,20 +468,17 @@ static int copyin_prepare(zvcopy_prepared * pprep, zval * pzval)
      * when a fatal error interrupts the walk (memory_limit reached by the held table).
      */
     ucache_stack_start(&pprep->stack);
-    if(Z_TYPE(pprep->value) == IS_ARRAY)
-    {
+    if (Z_TYPE(pprep->value) == IS_ARRAY) {
         zend_try
         {
             result = copyin_prepare_walk(pprep, &pprep->value, 0);
         }
-        zend_catch
+            zend_catch
         {
             walkfail = 1;
         }
         zend_end_try();
-    }
-    else
-    {
+    } else {
         /* No string is counted outside arrays: the table stays empty, and has no memory to free */
         result = copyin_prepare_walk(pprep, &pprep->value, 0);
     }
@@ -502,13 +486,11 @@ static int copyin_prepare(zvcopy_prepared * pprep, zval * pzval)
     zend_hash_destroy(&pprep->strings);
     zend_hash_init(&pprep->strings, 0, NULL, NULL, 1);
 
-    if(walkfail)
-    {
+    if (walkfail) {
         zend_bailout();
     }
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -524,7 +506,7 @@ static int copyin_prepare(zvcopy_prepared * pprep, zval * pzval)
     {
         result = copyin_serialize_objects(pprep);
     }
-    zend_catch
+        zend_catch
     {
         bailout = 1;
     }
@@ -532,19 +514,15 @@ static int copyin_prepare(zvcopy_prepared * pprep, zval * pzval)
 
     serializer_restore(&saved);
 
-    if(bailout)
-    {
+    if (bailout) {
         copyin_free_serialized(pprep);
         zend_bailout();
     }
 
     /* The objects of an array go into its pool, each once (see copyin_zval) */
-    if(SUCCEEDED(result) && Z_TYPE(pprep->value) == IS_ARRAY)
-    {
-        ZEND_HASH_FOREACH_VAL(&pprep->objects, pentry)
-        {
-            if(Z_TYPE_P(pentry) == IS_STRING && Z_STRLEN_P(pentry) != 0)
-            {
+    if (SUCCEEDED(result) && Z_TYPE(pprep->value) == IS_ARRAY) {
+        ZEND_HASH_FOREACH_VAL(&pprep->objects, pentry) {
+            if (Z_TYPE_P(pentry) == IS_STRING && Z_STRLEN_P(pentry) != 0) {
                 pprep->poolsize += UCACHE_BLOCK_SIZE(_ZSTR_STRUCT_SIZE(Z_STRLEN_P(pentry)));
             }
         }
@@ -553,8 +531,7 @@ static int copyin_prepare(zvcopy_prepared * pprep, zval * pzval)
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in copyin_prepare", result);
     }
 
@@ -567,27 +544,24 @@ Finished:
  * Serializes the objects that the walk recorded, in the order of the walk (see copyin_prepare).
  * Runs user code: copyin_prepare() calls it inside a zend_try, with the serializer state isolated.
  */
-static int copyin_serialize_objects(zvcopy_prepared * pprep)
-{
-    int                  result     = NONFATAL;
+static int copyin_serialize_objects(zvcopy_prepared* pprep) {
+    int                  result = NONFATAL;
     size_t               persistent = 0;
-    zval *               pentry     = NULL;
+    zval*                pentry = NULL;
     zval                 object;
-    smart_str            buffer     = {0};
+    smart_str            buffer = { 0 };
     php_serialize_data_t serdata;
 
-    ZEND_HASH_FOREACH_VAL(&pprep->objects, pentry)
-    {
+    ZEND_HASH_FOREACH_VAL(&pprep->objects, pentry) {
         /* No reference of its own: the held table keeps the object alive */
         _ASSERT(Z_TYPE_P(pentry) == IS_PTR);
-        ZVAL_OBJ(&object, (zend_object *)Z_PTR_P(pentry));
+        ZVAL_OBJ(&object, (zend_object*)Z_PTR_P(pentry));
 
         PHP_VAR_SERIALIZE_INIT(serdata);
         php_var_serialize(&buffer, &object, &serdata);
         PHP_VAR_SERIALIZE_DESTROY(serdata);
 
-        if(EG(exception))
-        {
+        if (EG(exception)) {
             /*
              * Closure, anonymous class, __sleep()/__serialize() throwing, ...: the buffer holds a
              * truncated serialization.  Store nothing; the exception propagates to the caller of
@@ -598,20 +572,16 @@ static int copyin_serialize_objects(zvcopy_prepared * pprep)
             break;
         }
 
-        if(buffer.s != NULL)
-        {
+        if (buffer.s != NULL) {
             /* Exact size, and NUL terminated, as php_var_unserialize() relies on (see copyin_prepare) */
             persistent += ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(ZSTR_LEN(buffer.s)));
             ZVAL_STR(pentry, zend_string_init(ZSTR_VAL(buffer.s), ZSTR_LEN(buffer.s), 1));
             smart_str_free(&buffer);
-        }
-        else
-        {
+        } else {
             ZVAL_NULL(pentry);
         }
 
-        if(copyin_over_memory_limit(persistent))
-        {
+        if (copyin_over_memory_limit(persistent)) {
             result = FATAL_OUT_OF_LMEMORY;
             break;
         }
@@ -626,21 +596,17 @@ static int copyin_serialize_objects(zvcopy_prepared * pprep)
  * copy: the hash part and the used elements, with the hash part of a sparse hash table made smaller
  * (see ucache_compat.h).  The walk of phase 1 counts it with the same function.
  */
-static size_t copyin_data_size(HashTable * ptable, uint32_t * pmask)
-{
+static size_t copyin_data_size(HashTable* ptable, uint32_t* pmask) {
     uint32_t hash_size = 0;
 
-    if(HT_IS_PACKED(ptable))
-    {
+    if (HT_IS_PACKED(ptable)) {
         *pmask = ptable->nTableMask;
         return UCACHE_HT_PACKED_USED_SIZE(ptable);
     }
 
-    if(UCACHE_HT_SHOULD_COMPACT(ptable))
-    {
+    if (UCACHE_HT_SHOULD_COMPACT(ptable)) {
         hash_size = UCACHE_HT_HASH_SLOTS(ptable);
-        while((hash_size >> 2) > ptable->nNumUsed)
-        {
+        while ((hash_size >> 2) > ptable->nNumUsed) {
             hash_size >>= 1;
         }
 
@@ -666,25 +632,21 @@ static size_t copyin_data_size(HashTable * ptable, uint32_t * pmask)
  * number of references from outside the value can change.  zvcache_set() also refuses a value that
  * the empty cache could not hold by this count (copyin_minimum_size).
  */
-static zend_always_inline void copyin_count_string(zvcopy_prepared * pprep, zend_string * pstr)
-{
+static zend_always_inline void copyin_count_string(zvcopy_prepared* pprep, zend_string* pstr) {
     size_t slot = 0;
 
-    if(!ZSTR_IS_INTERNED(pstr) && GC_REFCOUNT(pstr) == 1)
-    {
+    if (!ZSTR_IS_INTERNED(pstr) && GC_REFCOUNT(pstr) == 1) {
         pprep->poolsize += UCACHE_BLOCK_SIZE(_ZSTR_STRUCT_SIZE(ZSTR_LEN(pstr)));
         return;
     }
 
     slot = (size_t)(ucache_addr_key(pstr) >> 3) % (sizeof(pprep->seen) / sizeof(pprep->seen[0]));
-    if(pprep->seen[slot] == (const void *)pstr)
-    {
+    if (pprep->seen[slot] == (const void*)pstr) {
         return;
     }
 
-    pprep->seen[slot] = (const void *)pstr;
-    if(zend_hash_index_add_empty_element(&pprep->strings, ucache_addr_key(pstr)) != NULL)
-    {
+    pprep->seen[slot] = (const void*)pstr;
+    if (zend_hash_index_add_empty_element(&pprep->strings, ucache_addr_key(pstr)) != NULL) {
         pprep->poolsize += UCACHE_BLOCK_SIZE(_ZSTR_STRUCT_SIZE(ZSTR_LEN(pstr)));
     }
 }
@@ -703,21 +665,19 @@ static zend_always_inline void copyin_count_string(zvcopy_prepared * pprep, zend
  * well; they check the stack themselves, since their frames are bigger.  Nothing is allocated in
  * shared memory yet, so refusing costs nothing.
  */
-static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned int depth)
-{
-    int              result   = NONFATAL;
-    zval *           pelem    = NULL;
+static int copyin_prepare_walk(zvcopy_prepared* pprep, zval* pzval, unsigned int depth) {
+    int              result = NONFATAL;
+    zval*            pelem = NULL;
     zval             value;
-    zend_reference * pref     = NULL;
+    zend_reference*  pref = NULL;
     unsigned char    indirect = 0;
-    unsigned char    packed   = 0;
-    HashTable *      ptable   = NULL;
-    Bucket *         pbucket  = NULL;
-    uint32_t         idx      = 0;
-    uint32_t         mask     = 0;
+    unsigned char    packed = 0;
+    HashTable*       ptable = NULL;
+    Bucket*          pbucket = NULL;
+    uint32_t         idx = 0;
+    uint32_t         mask = 0;
 
-    switch(Z_TYPE_P(pzval))
-    {
+    switch (Z_TYPE_P(pzval)) {
         case IS_UNDEF:
         case IS_NULL:
         case IS_TRUE:
@@ -730,13 +690,11 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
 
         case IS_ARRAY:
             /* Walked already: a sub-array that occurs twice, or a cycle through a reference */
-            if(zend_hash_index_exists(&pprep->held, ucache_addr_key(Z_ARR_P(pzval))))
-            {
+            if (zend_hash_index_exists(&pprep->held, ucache_addr_key(Z_ARR_P(pzval)))) {
                 break;
             }
 
-            if(depth >= UCACHE_MAX_NESTING || ucache_stack_exhausted(&pprep->stack))
-            {
+            if (depth >= UCACHE_MAX_NESTING || ucache_stack_exhausted(&pprep->stack)) {
                 dprintimportant("copyin_prepare_walk: value nested too deeply (level %u)", depth + 1);
                 result = FATAL_ZVCACHE_INVALID_ZVAL;
                 break;
@@ -746,8 +704,7 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
             Z_TRY_ADDREF_P(pzval);
             zend_hash_index_add_new(&pprep->held, ucache_addr_key(Z_ARR_P(pzval)), pzval);
 
-            if(zvcache_over_memory_limit())
-            {
+            if (zvcache_over_memory_limit()) {
                 result = FATAL_OUT_OF_LMEMORY;
                 break;
             }
@@ -763,8 +720,7 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
              * PHP's serialize() takes the variables.  Always, not only when the table has an
              * IS_INDIRECT slot: a script without variables at the top level has none.
              */
-            if(Z_ARR_P(pzval) == &EG(symbol_table))
-            {
+            if (Z_ARR_P(pzval) == &EG(symbol_table)) {
                 ZVAL_ARR(&value, zend_array_dup(Z_ARR_P(pzval)));
                 zend_hash_index_add_new(&pprep->flattened, ucache_addr_key(Z_ARR_P(pzval)), &value);
                 result = copyin_prepare_walk(pprep, &value, depth);
@@ -777,35 +733,27 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
             packed = HT_IS_PACKED(ptable) ? 1 : 0;
 
             pprep->poolsize += UCACHE_BLOCK_SIZE(sizeof(zend_array));
-            if(HT_IS_INITIALIZED(ptable))
-            {
+            if (HT_IS_INITIALIZED(ptable)) {
                 pprep->poolsize += UCACHE_BLOCK_SIZE(copyin_data_size(ptable, &mask));
             }
 
-            for(idx = 0; idx < ptable->nNumUsed; idx++)
-            {
-                if(packed)
-                {
+            for (idx = 0; idx < ptable->nNumUsed; idx++) {
+                if (packed) {
                     pelem = UCACHE_HT_PACKED_ZVAL(ptable, idx);
-                }
-                else
-                {
+                } else {
                     pbucket = ptable->arData + idx;
-                    pelem   = &pbucket->val;
+                    pelem = &pbucket->val;
 
                     /* Its key, which phase 2 copies with the element */
-                    if(Z_TYPE_P(pelem) != IS_UNDEF && pbucket->key != NULL)
-                    {
+                    if (Z_TYPE_P(pelem) != IS_UNDEF && pbucket->key != NULL) {
                         copyin_count_string(pprep, pbucket->key);
                     }
                 }
 
                 /* The strings of the value are counted (see copyin_count_string); a string lives as */
                 /* long as the held array that contains it */
-                if(Z_TYPE_P(pelem) < IS_ARRAY)
-                {
-                    if(Z_TYPE_P(pelem) == IS_STRING)
-                    {
+                if (Z_TYPE_P(pelem) < IS_ARRAY) {
+                    if (Z_TYPE_P(pelem) == IS_STRING) {
                         copyin_count_string(pprep, Z_STR_P(pelem));
                     }
 
@@ -813,21 +761,18 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
                 }
 
                 /* A slot of the symbol table that an array function copied (see below) */
-                if(Z_TYPE_P(pelem) == IS_INDIRECT)
-                {
+                if (Z_TYPE_P(pelem) == IS_INDIRECT) {
                     indirect = 1;
                     break;
                 }
 
                 /* Phase 2 gives each place of an array a tracker of its own (see copyin_zval) */
-                if(Z_TYPE_P(pelem) == IS_ARRAY)
-                {
+                if (Z_TYPE_P(pelem) == IS_ARRAY) {
                     pprep->poolsize += UCACHE_BLOCK_SIZE(sizeof(zvcache_hashtable_pool_tracker));
                 }
 
                 result = copyin_prepare_walk(pprep, pelem, depth + 1);
-                if(FAILED(result))
-                {
+                if (FAILED(result)) {
                     break;
                 }
             }
@@ -842,12 +787,10 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
              * The elements before the slot were counted, and so are those of the copy: the count
              * is no longer exact, and the pool gets chunks as the copy needs them.
              */
-            if(indirect && SUCCEEDED(result))
-            {
+            if (indirect && SUCCEEDED(result)) {
                 pprep->counted = 0;
 
-                if(HT_IS_PACKED(Z_ARR_P(pzval)))
-                {
+                if (HT_IS_PACKED(Z_ARR_P(pzval))) {
                     dprintimportant("copyin_prepare_walk: a list that holds slots of the symbol table cannot be stored");
                     result = FATAL_ZVCACHE_INVALID_ZVAL;
                     break;
@@ -861,13 +804,11 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
 
         case IS_REFERENCE:
             pref = Z_REF_P(pzval);
-            if(zend_hash_index_exists(&pprep->held, ucache_addr_key(pref)))
-            {
+            if (zend_hash_index_exists(&pprep->held, ucache_addr_key(pref))) {
                 break;
             }
 
-            if(depth >= UCACHE_MAX_NESTING || ucache_stack_exhausted(&pprep->stack))
-            {
+            if (depth >= UCACHE_MAX_NESTING || ucache_stack_exhausted(&pprep->stack)) {
                 dprintimportant("copyin_prepare_walk: value nested too deeply (level %u)", depth + 1);
                 result = FATAL_ZVCACHE_INVALID_ZVAL;
                 break;
@@ -880,20 +821,16 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
             ZVAL_COPY(&value, &pref->val);
             zend_hash_index_add_new(&pprep->refvals, ucache_addr_key(pref), &value);
 
-            if(zvcache_over_memory_limit())
-            {
+            if (zvcache_over_memory_limit()) {
                 result = FATAL_OUT_OF_LMEMORY;
                 break;
             }
 
             /* What phase 2 allocates for it (see copyin_reference): the reference, once, and its value */
             pprep->poolsize += UCACHE_BLOCK_SIZE(sizeof(zend_reference));
-            if(Z_TYPE(value) == IS_STRING)
-            {
+            if (Z_TYPE(value) == IS_STRING) {
                 copyin_count_string(pprep, Z_STR(value));
-            }
-            else if(Z_TYPE(value) == IS_ARRAY)
-            {
+            } else if (Z_TYPE(value) == IS_ARRAY) {
                 pprep->poolsize += UCACHE_BLOCK_SIZE(sizeof(zvcache_hashtable_pool_tracker));
             }
 
@@ -902,8 +839,7 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
             break;
 
         case IS_OBJECT:
-            if(zend_hash_index_exists(&pprep->objects, ucache_addr_key(Z_OBJ_P(pzval))))
-            {
+            if (zend_hash_index_exists(&pprep->objects, ucache_addr_key(Z_OBJ_P(pzval)))) {
                 break;
             }
 
@@ -914,8 +850,7 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
             ZVAL_PTR(&value, Z_OBJ_P(pzval));
             zend_hash_index_add_new(&pprep->objects, ucache_addr_key(Z_OBJ_P(pzval)), &value);
 
-            if(zvcache_over_memory_limit())
-            {
+            if (zvcache_over_memory_limit()) {
                 result = FATAL_OUT_OF_LMEMORY;
             }
             break;
@@ -938,8 +873,7 @@ static int copyin_prepare_walk(zvcopy_prepared * pprep, zval * pzval, unsigned i
  * serializations (persistent memory, see copyin_prepare) before the error propagates.  The objects
  * table stays usable (empty).  Runs no user code and allocates nothing.
  */
-static void copyin_free_serialized(zvcopy_prepared * pprep)
-{
+static void copyin_free_serialized(zvcopy_prepared* pprep) {
     _ASSERT(pprep != NULL);
 
     zend_hash_clean(&pprep->objects);
@@ -950,8 +884,7 @@ static void copyin_free_serialized(zvcopy_prepared * pprep)
  * is held and the new entry is either in the cache or freed (a fatal error in a destructor must
  * not leave a half-built entry behind).
  */
-static void copyin_release(zvcopy_prepared * pprep)
-{
+static void copyin_release(zvcopy_prepared* pprep) {
     _ASSERT(pprep != NULL);
 
     zend_hash_destroy(&pprep->objects);
@@ -970,23 +903,20 @@ static void copyin_release(zvcopy_prepared * pprep)
  * count it (see copyin_count_string).  The entry and its key, the top-level zval, and a string, the
  * serialization of an object, or the tracker of an array and what its pool holds.
  */
-static size_t copyin_minimum_size(zvcopy_prepared * pprep, const char * key)
-{
-    size_t size        = UCACHE_BLOCK_SIZE(sizeof(zvcache_value) + strlen(key) + 1) + UCACHE_BLOCK_SIZE(sizeof(zval));
-    zval * pserialized = NULL;
+static size_t copyin_minimum_size(zvcopy_prepared* pprep, const char* key) {
+    size_t size = UCACHE_BLOCK_SIZE(sizeof(zvcache_value) + strlen(key) + 1) + UCACHE_BLOCK_SIZE(sizeof(zval));
+    zval*  pserialized = NULL;
 
     _ASSERT(pprep != NULL);
-    _ASSERT(key   != NULL);
+    _ASSERT(key != NULL);
 
-    switch(Z_TYPE(pprep->value))
-    {
+    switch (Z_TYPE(pprep->value)) {
         case IS_STRING:
             size += UCACHE_BLOCK_SIZE(_ZSTR_STRUCT_SIZE(Z_STRLEN(pprep->value)));
             break;
 
         case IS_ARRAY:
-            if(!pprep->counted)
-            {
+            if (!pprep->counted) {
                 return 0;
             }
 
@@ -995,8 +925,7 @@ static size_t copyin_minimum_size(zvcopy_prepared * pprep, const char * key)
 
         case IS_OBJECT:
             pserialized = zend_hash_index_find(&pprep->objects, ucache_addr_key(Z_OBJ(pprep->value)));
-            if(pserialized != NULL && Z_TYPE_P(pserialized) == IS_STRING && Z_STRLEN_P(pserialized) != 0)
-            {
+            if (pserialized != NULL && Z_TYPE_P(pserialized) == IS_STRING && Z_STRLEN_P(pserialized) != 0) {
                 size += UCACHE_BLOCK_SIZE(_ZSTR_STRUCT_SIZE(Z_STRLEN_P(pserialized)));
             }
             break;
@@ -1016,30 +945,25 @@ static size_t copyin_minimum_size(zvcopy_prepared * pprep, const char * key)
  * string or serialized object is the last thing its copy allocates, nothing can fail after it.
  * No lock is held here.
  */
-static void copyin_rollback(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * pxlate)
-{
+static void copyin_rollback(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* pxlate) {
     dprintimportant("copyin_rollback: a fatal error interrupted the copy-in, freeing the new entry");
 
-    if(pcopy->mpool != 0)
-    {
+    if (pcopy->mpool != 0) {
         alloc_free_mpool(pcache->zvalloc, pcopy->mpool);
         pcopy->mpool = 0;
     }
 
-    if(pcopy->ptracker != NULL)
-    {
+    if (pcopy->ptracker != NULL) {
         ZFREE(pcopy, pcopy->ptracker);
         pcopy->ptracker = NULL;
     }
 
-    if(pcopy->pnewzval != NULL)
-    {
+    if (pcopy->pnewzval != NULL) {
         ZFREE(pcopy, pcopy->pnewzval);
         pcopy->pnewzval = NULL;
     }
 
-    if(pcopy->pnewvalue != NULL)
-    {
+    if (pcopy->pnewvalue != NULL) {
         ZFREE(pcopy, pcopy->pnewvalue);
         pcopy->pnewvalue = NULL;
     }
@@ -1048,22 +972,19 @@ static void copyin_rollback(zvcache_context * pcache, zvcopy_context * pcopy, Ha
     zend_hash_destroy(pxlate);
 }
 
-static int copyin_memory(zvcopy_context * pcopy, HashTable * phtable, void * src, size_t size, void **ppdest, zend_uchar *pallocated)
-{
-    int         result      = NONFATAL;
-    void *      pdest       = NULL;
+static int copyin_memory(zvcopy_context* pcopy, HashTable* phtable, void* src, size_t size, void** ppdest, zend_uchar* pallocated) {
+    int         result = NONFATAL;
+    void*       pdest = NULL;
 
-    _ASSERT(pallocated  != NULL);
-    _ASSERT(ppdest      != NULL);
-    _ASSERT(*ppdest     == NULL);
+    _ASSERT(pallocated != NULL);
+    _ASSERT(ppdest != NULL);
+    _ASSERT(*ppdest == NULL);
 
     *pallocated = 0;
 
-    if(phtable != NULL)
-    {
+    if (phtable != NULL) {
         /* Check if memory is already copied */
-        if((pdest = zend_hash_index_find_ptr(phtable, ucache_addr_key(src))) != NULL)
-        {
+        if ((pdest = zend_hash_index_find_ptr(phtable, ucache_addr_key(src))) != NULL) {
             *ppdest = pdest;
             goto Finished;
         }
@@ -1071,8 +992,7 @@ static int copyin_memory(zvcopy_context * pcopy, HashTable * phtable, void * src
 
     /* Allocate cache memory & copy the original into the cache. */
     pdest = ZMALLOC(pcopy, size);
-    if (pdest == NULL)
-    {
+    if (pdest == NULL) {
         result = pcopy->oomcode;
         goto Finished;
     }
@@ -1083,9 +1003,8 @@ static int copyin_memory(zvcopy_context * pcopy, HashTable * phtable, void * src
     memcpy_s(pdest, size, src, size);
 
     /* update the table */
-    if(phtable != NULL)
-    {
-        zend_hash_index_update_ptr(phtable, ucache_addr_key(src), (void *)pdest);
+    if (phtable != NULL) {
+        zend_hash_index_update_ptr(phtable, ucache_addr_key(src), (void*)pdest);
     }
 
     *ppdest = pdest;
@@ -1096,12 +1015,10 @@ Finished:
 }
 
 /* Phase 2: the table to copy for *ptable, phase 1's copy of it if it is the symbol table or holds slots of it (see copyin_prepare_walk) */
-static zend_always_inline HashTable * copyin_flattened(zvcopy_context * pcopy, HashTable * ptable)
-{
-    zval * pflat = NULL;
+static zend_always_inline HashTable* copyin_flattened(zvcopy_context* pcopy, HashTable* ptable) {
+    zval* pflat = NULL;
 
-    if(pcopy->pprepared == NULL || zend_hash_num_elements(&pcopy->pprepared->flattened) == 0)
-    {
+    if (pcopy->pprepared == NULL || zend_hash_num_elements(&pcopy->pprepared->flattened) == 0) {
         return ptable;
     }
 
@@ -1115,38 +1032,35 @@ static zend_always_inline HashTable * copyin_flattened(zvcopy_context * pcopy, H
  * table of the top-level copy.  The top-level value is copied with pcopy->hoffset 0; a top-level
  * array gets a memory pool, and everything nested in it is copied into that pool.
  */
-static int copyin_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * phtable, zval * poriginal, zval ** ppcopied)
-{
-    int                  result      = NONFATAL;
-    zval *               pnewzv      = NULL;
-    zend_uchar           allocated   = 0;
-    HashTable *          phashtable  = NULL;
-    zvcopy_context       poolcopy;
-    size_t               offset      = 0;
-    zend_string *        pzstr       = NULL;
-    zvcache_hashtable_pool_tracker * table_tracker = NULL;
-    zend_reference *     pzref       = NULL;
-    zval *               pserialized = NULL;
-    zend_string *        pdest       = NULL;
+static int copyin_zval(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* phtable, zval* poriginal, zval** ppcopied) {
+    int                             result = NONFATAL;
+    zval*                           pnewzv = NULL;
+    zend_uchar                      allocated = 0;
+    HashTable*                      phashtable = NULL;
+    zvcopy_context                  poolcopy;
+    size_t                          offset = 0;
+    zend_string*                    pzstr = NULL;
+    zvcache_hashtable_pool_tracker* table_tracker = NULL;
+    zend_reference*                 pzref = NULL;
+    zval*                           pserialized = NULL;
+    zend_string*                    pdest = NULL;
 
     dprintverbose("start copyin_zval");
 
-    _ASSERT(pcache    != NULL);
-    _ASSERT(pcopy     != NULL);
-    _ASSERT(phtable   != NULL);
+    _ASSERT(pcache != NULL);
+    _ASSERT(pcopy != NULL);
+    _ASSERT(phtable != NULL);
     _ASSERT(poriginal != NULL);
-    _ASSERT(ppcopied  != NULL);
+    _ASSERT(ppcopied != NULL);
     _ASSERT(*ppcopied != NULL);
 
     pnewzv = *ppcopied;
-    if (poriginal != pnewzv)
-    {
+    if (poriginal != pnewzv) {
         /* struct copy to pick up flags and such.  Still need to fix up value pointer. */
         *pnewzv = *poriginal;
     }
 
-    switch(Z_TYPE_P(poriginal))
-    {
+    switch (Z_TYPE_P(poriginal)) {
         case IS_UNDEF:
         case IS_NULL:
         case IS_TRUE:
@@ -1157,8 +1071,7 @@ static int copyin_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTab
 
         case IS_STRING:
             result = copyin_string(pcopy, phtable, Z_STR_P(poriginal), &pzstr);
-            if (FAILED(result))
-            {
+            if (FAILED(result)) {
                 goto Finished;
             }
 
@@ -1167,7 +1080,7 @@ static int copyin_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTab
             Z_TYPE_INFO_P(pnewzv) = IS_STRING_EX;
 
             /* Use offset in cached zval pointer */
-            Z_STR_P(pnewzv) = (zend_string *)ZOFFSET(pcopy, pzstr);
+            Z_STR_P(pnewzv) = (zend_string*)ZOFFSET(pcopy, pzstr);
             break;
 
         case IS_ARRAY:
@@ -1178,24 +1091,21 @@ static int copyin_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTab
              * The *ptr will point at a zvcache_hashtable_pool_tracker structure.
              */
 
-            table_tracker = (zvcache_hashtable_pool_tracker *)ZMALLOC(pcopy, sizeof(zvcache_hashtable_pool_tracker));
-            if (table_tracker == NULL)
-            {
+            table_tracker = (zvcache_hashtable_pool_tracker*)ZMALLOC(pcopy, sizeof(zvcache_hashtable_pool_tracker));
+            if (table_tracker == NULL) {
                 result = pcopy->oomcode;
                 goto Finished;
             }
             pcopy->allocsize += sizeof(zvcache_hashtable_pool_tracker);
 
             /* If pcopy is not set to use memory pool, use a different copy context */
-            if(pcopy->hoffset == 0)
-            {
+            if (pcopy->hoffset == 0) {
                 /* Top-level array: record its tracker and pool for copyin_rollback() */
                 pcopy->ptracker = table_tracker;
 
                 /* A pool of the size the walk of phase 1 counted, in one block (see copyin_count_string) */
                 result = alloc_create_mpool(pcache->zvalloc, &offset, pcopy->pprepared->counted ? pcopy->pprepared->poolsize : 0);
-                if(FAILED(result))
-                {
+                if (FAILED(result)) {
                     /* Its FATAL_OUT_OF_MEMORY is the code of request memory: say the cache is full, */
                     /* so that zvcache_set() makes room (reclaim_entries) */
                     result = pcopy->oomcode;
@@ -1205,35 +1115,31 @@ static int copyin_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTab
                 pcopy->mpool = offset;
 
                 /* On the C stack: the copy must not allocate request memory */
-                poolcopy             = *pcopy;
-                poolcopy.oomcode     = FATAL_OUT_OF_SMEMORY;
-                poolcopy.palloc      = pcache->zvalloc;
-                poolcopy.pbaseadr    = pcache->zvmemaddr;
-                poolcopy.hoffset     = offset;
-                poolcopy.allocsize   = 0;
-                poolcopy.fnmalloc    = alloc_ommalloc;
-                poolcopy.fnfree      = alloc_omfree;
-                poolcopy.pnewvalue   = NULL;
-                poolcopy.pnewzval    = NULL;
-                poolcopy.ptracker    = NULL;
-                poolcopy.mpool       = 0;
+                poolcopy = *pcopy;
+                poolcopy.oomcode = FATAL_OUT_OF_SMEMORY;
+                poolcopy.palloc = pcache->zvalloc;
+                poolcopy.pbaseadr = pcache->zvmemaddr;
+                poolcopy.hoffset = offset;
+                poolcopy.allocsize = 0;
+                poolcopy.fnmalloc = alloc_ommalloc;
+                poolcopy.fnfree = alloc_omfree;
+                poolcopy.pnewvalue = NULL;
+                poolcopy.pnewzval = NULL;
+                poolcopy.ptracker = NULL;
+                poolcopy.mpool = 0;
 
                 result = copyin_hashtable(pcache, &poolcopy, phtable, copyin_flattened(pcopy, Z_ARR_P(poriginal)), &phashtable);
                 pcopy->allocsize += poolcopy.allocsize;
 
                 /* Nothing is allocated from the pool any more: what its chunks did not use goes back */
-                if(SUCCEEDED(result))
-                {
+                if (SUCCEEDED(result)) {
                     alloc_trim_mpool(pcache->zvalloc, offset);
                 }
-            }
-            else
-            {
+            } else {
                 result = copyin_hashtable(pcache, pcopy, phtable, copyin_flattened(pcopy, Z_ARR_P(poriginal)), &phashtable);
             }
 
-            if(FAILED(result))
-            {
+            if (FAILED(result)) {
                 goto Finished;
             }
 
@@ -1244,26 +1150,24 @@ static int copyin_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTab
             table_tracker->hoff = offset;
             table_tracker->val = ZOFFSET(pcopy, phashtable);
             phashtable = NULL;
-            Z_PTR_P(pnewzv) = (void *)ZOFFSET(pcopy, table_tracker);
+            Z_PTR_P(pnewzv) = (void*)ZOFFSET(pcopy, table_tracker);
             table_tracker = NULL;
             offset = 0;
             break;
 
         case IS_REFERENCE:
             result = copyin_reference(pcache, pcopy, phtable, Z_REF_P(poriginal), &pzref);
-            if(FAILED(result))
-            {
+            if (FAILED(result)) {
                 goto Finished;
             }
             Z_TYPE_INFO_P(pnewzv) = IS_REFERENCE_EX;
-            Z_REF_P(pnewzv) = (zend_reference *)ZOFFSET(pcopy, pzref);
+            Z_REF_P(pnewzv) = (zend_reference*)ZOFFSET(pcopy, pzref);
             break;
 
         case IS_OBJECT:
             /* Serialized by phase 1 (copyin_prepare) */
             pserialized = zend_hash_index_find(&pcopy->pprepared->objects, ucache_addr_key(Z_OBJ_P(poriginal)));
-            if(pserialized == NULL || Z_TYPE_P(pserialized) == IS_PTR)
-            {
+            if (pserialized == NULL || Z_TYPE_P(pserialized) == IS_PTR) {
                 /*
                  * An object that phase 1 did not see, or did not serialize.  Phase 2 copies what
                  * phase 1 held, and only runs once phase 1 has serialized every object, so this
@@ -1275,21 +1179,17 @@ static int copyin_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTab
                 goto Finished;
             }
 
-            if(Z_TYPE_P(pserialized) == IS_STRING && Z_STRLEN_P(pserialized) != 0)
-            {
+            if (Z_TYPE_P(pserialized) == IS_STRING && Z_STRLEN_P(pserialized) != 0) {
                 /* Through the translation table: an object that occurs twice is stored once */
-                result = copyin_memory(pcopy, phtable, Z_STR_P(pserialized), _ZSTR_STRUCT_SIZE(Z_STRLEN_P(pserialized)), (void **)&pdest, &allocated);
-                if(FAILED(result))
-                {
+                result = copyin_memory(pcopy, phtable, Z_STR_P(pserialized), _ZSTR_STRUCT_SIZE(Z_STRLEN_P(pserialized)), (void**)&pdest, &allocated);
+                if (FAILED(result)) {
                     ZVAL_NULL(pnewzv);
                     goto Finished;
                 }
 
                 /* Use Offset in copied-in zval */
-                Z_PTR_P(pnewzv) = (zend_string *)ZOFFSET(pcopy, pdest);
-            }
-            else
-            {
+                Z_PTR_P(pnewzv) = (zend_string*)ZOFFSET(pcopy, pdest);
+            } else {
                 ZVAL_NULL(pnewzv);
             }
 
@@ -1306,14 +1206,11 @@ static int copyin_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTab
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in copyin_zval", result);
 
-        if(table_tracker != NULL)
-        {
-            if(pcopy->ptracker == table_tracker)
-            {
+        if (table_tracker != NULL) {
+            if (pcopy->ptracker == table_tracker) {
                 pcopy->ptracker = NULL;
             }
 
@@ -1321,10 +1218,8 @@ Finished:
             table_tracker = NULL;
         }
 
-        if(offset != 0)
-        {
-            if(pcopy->mpool == offset)
-            {
+        if (offset != 0) {
+            if (pcopy->mpool == offset) {
                 pcopy->mpool = 0;
             }
 
@@ -1351,8 +1246,8 @@ Finished:
 typedef struct zvcache_pending_object zvcache_pending_object;
 struct zvcache_pending_object
 {
-    zval *            pzval;             /* NULL placeholder that receives the object */
-    zend_string *     pserialized;       /* serialized object, request memory */
+    zval*        pzval;             /* NULL placeholder that receives the object */
+    zend_string* pserialized;       /* serialized object, request memory */
 };
 
 /*
@@ -1361,13 +1256,12 @@ struct zvcache_pending_object
  * an enum case that is not defined, unserialize_max_depth since 7.4) or an exception was thrown;
  * the placeholder then stays NULL.
  */
-static zend_bool unserialize_object(zval * pzval, zend_string * pserialized)
-{
-    php_unserialize_data_t   serdata = {0};
-    const unsigned char *    pbuffer = (const unsigned char *)ZSTR_VAL(pserialized);
-    zval *                   ptmp    = NULL;
+static zend_bool unserialize_object(zval* pzval, zend_string* pserialized) {
+    php_unserialize_data_t   serdata = { 0 };
+    const unsigned char*     pbuffer = (const unsigned char*)ZSTR_VAL(pserialized);
+    zval*                    ptmp = NULL;
     zvcache_serializer_state saved;
-    zend_bool                done    = 0;
+    zend_bool                done = 0;
 
     /*
      * Same pattern as PHP's own unserialize(): the value is built in a temporary that
@@ -1380,13 +1274,10 @@ static zend_bool unserialize_object(zval * pzval, zend_string * pserialized)
 
     PHP_VAR_UNSERIALIZE_INIT(serdata);
     ptmp = var_tmp_var(&serdata);
-    if(php_var_unserialize(ptmp, &pbuffer, pbuffer + ZSTR_LEN(pserialized), &serdata))
-    {
+    if (php_var_unserialize(ptmp, &pbuffer, pbuffer + ZSTR_LEN(pserialized), &serdata)) {
         ZVAL_COPY(pzval, ptmp);
         done = 1;
-    }
-    else
-    {
+    } else {
         dprintimportant("Failed to unserialize cached object: %s", ZSTR_VAL(pserialized));
     }
     PHP_VAR_UNSERIALIZE_DESTROY(serdata);
@@ -1397,8 +1288,7 @@ static zend_bool unserialize_object(zval * pzval, zend_string * pserialized)
      * delayed __wakeup()/__unserialize() calls: a reference must not be returned, nor end up
      * as an element, or as the value of a reference (a reference inside a reference).
      */
-    if(Z_ISREF_P(pzval))
-    {
+    if (Z_ISREF_P(pzval)) {
         zend_unwrap_reference(pzval);
     }
 
@@ -1409,20 +1299,17 @@ static zend_bool unserialize_object(zval * pzval, zend_string * pserialized)
 }
 
 /* 1 if every pending object was unserialized (process must be set), 0 otherwise */
-static zend_bool unserialize_pending_objects(zend_llist * ppending, unsigned char process)
-{
+static zend_bool unserialize_pending_objects(zend_llist* ppending, unsigned char process) {
     zend_llist_position      pos;
-    zvcache_pending_object * pobj = NULL;
-    zend_bool                ok   = process ? 1 : 0;
+    zvcache_pending_object*  pobj = NULL;
+    zend_bool                ok = process ? 1 : 0;
 
-    for(pobj = (zvcache_pending_object *)zend_llist_get_first_ex(ppending, &pos);
+    for (pobj = (zvcache_pending_object*)zend_llist_get_first_ex(ppending, &pos);
         pobj != NULL;
-        pobj = (zvcache_pending_object *)zend_llist_get_next_ex(ppending, &pos))
-    {
+        pobj = (zvcache_pending_object*)zend_llist_get_next_ex(ppending, &pos)) {
         /* After a failure or an exception, leave the remaining placeholders NULL.  Without process
          * (the copy failed), pobj->pzval is not used: zvcache_get() releases the value whole. */
-        if(ok)
-        {
+        if (ok) {
             ok = unserialize_object(pobj->pzval, pobj->pserialized);
         }
 
@@ -1440,32 +1327,30 @@ static zend_bool unserialize_pending_objects(zend_llist * ppending, unsigned cha
  * holds what was built, safe to destroy, or NULL: this runs under the cache lock, and releases
  * nothing (see zvcache_get).
  */
-static int copyout_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * phtable, zend_llist * ppending, zval * pcached, zval ** ppcopied)
-{
-    int                    result     = NONFATAL;
-    zval *                 pnewzv     = NULL;
-    zval                   cached;
-    zend_string *          ptmp_str   = NULL;
-    HashTable *            phashtable = NULL;
-    unsigned char          isfirst    = 0;
-    HashTable              xlate;
-    zvcache_hashtable_pool_tracker * table_tracker = NULL;
-    zend_reference *       pref       = NULL;
-    zvcache_pending_object pending;
+static int copyout_zval(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* phtable, zend_llist* ppending, zval* pcached, zval** ppcopied) {
+    int                             result = NONFATAL;
+    zval*                           pnewzv = NULL;
+    zval                            cached;
+    zend_string*                    ptmp_str = NULL;
+    HashTable*                      phashtable = NULL;
+    unsigned char                   isfirst = 0;
+    HashTable                       xlate;
+    zvcache_hashtable_pool_tracker* table_tracker = NULL;
+    zend_reference*                 pref = NULL;
+    zvcache_pending_object          pending;
 
     dprintverbose("start copyout_zval");
 
-    _ASSERT(pcache    != NULL);
-    _ASSERT(pcopy     != NULL);
-    _ASSERT(pcached   != NULL);
-    _ASSERT(ppcopied  != NULL);
+    _ASSERT(pcache != NULL);
+    _ASSERT(pcopy != NULL);
+    _ASSERT(pcached != NULL);
+    _ASSERT(ppcopied != NULL);
     _ASSERT(*ppcopied != NULL);
 
     pnewzv = *ppcopied;
     cached = *pcached;
 
-    switch(Z_TYPE(cached))
-    {
+    switch (Z_TYPE(cached)) {
         case IS_RESOURCE:
             /* We don't support caching of zend_resource types */
             _ASSERT(FALSE);
@@ -1479,34 +1364,31 @@ static int copyout_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTa
         case IS_LONG:
         case IS_DOUBLE:
         case IS_NULL:
-            if(pnewzv != pcached)
-            {
+            if (pnewzv != pcached) {
                 ZVAL_COPY_VALUE(pnewzv, &cached);
             }
             break;
 
         case IS_STRING:
             /* create a new, non-persistent string from the cached copy */
-            ptmp_str = (zend_string *)ZVALUE(pcache->incopy, (size_t)Z_STR(cached));
+            ptmp_str = (zend_string*)ZVALUE(pcache->incopy, (size_t)Z_STR(cached));
             ZVAL_STR(pnewzv, zend_string_init(ZSTR_VAL(ptmp_str), ZSTR_LEN(ptmp_str), 0));
             break;
 
         case IS_ARRAY:
             /* Translation table for one top-level copy, on the C stack: a nested ucache call
              * from __wakeup()/__unserialize() or from an autoloader cannot clobber it */
-            if(phtable == NULL)
-            {
+            if (phtable == NULL) {
                 phtable = &xlate;
                 isfirst = 1;
                 zend_hash_init(phtable, 8, NULL, NULL, 0);
             }
 
-            table_tracker = (zvcache_hashtable_pool_tracker *)ZVALUE(pcache->incopy, (size_t)Z_PTR(cached));
+            table_tracker = (zvcache_hashtable_pool_tracker*)ZVALUE(pcache->incopy, (size_t)Z_PTR(cached));
 
-            result = copyout_hashtable(pcache, pcopy, phtable, ppending, (HashTable *)ZVALUE(pcache->incopy, table_tracker->val), &phashtable);
+            result = copyout_hashtable(pcache, pcopy, phtable, ppending, (HashTable*)ZVALUE(pcache->incopy, table_tracker->val), &phashtable);
 
-            if(isfirst)
-            {
+            if (isfirst) {
                 zend_hash_destroy(phtable);
                 phtable = NULL;
             }
@@ -1520,8 +1402,7 @@ static int copyout_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTa
              * tables that are still being built, whose unconverted elements hold cache offsets.
              * zvcache_get() releases the whole value once it has released the lock.
              */
-            if(phashtable == NULL)
-            {
+            if (phashtable == NULL) {
                 _ASSERT(FAILED(result));
                 ZVAL_NULL(pnewzv);
                 goto Finished;
@@ -1530,18 +1411,16 @@ static int copyout_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTa
             ZVAL_ARR(pnewzv, phashtable);
             phashtable = NULL;
 
-            if(FAILED(result))
-            {
+            if (FAILED(result)) {
                 goto Finished;
             }
             break;
 
         case IS_REFERENCE:
-            result = copyout_reference(pcache, pcopy, phtable, ppending, (zend_reference *)ZVALUE(pcache->incopy, (size_t)Z_REF(cached)), &pref);
+            result = copyout_reference(pcache, pcopy, phtable, ppending, (zend_reference*)ZVALUE(pcache->incopy, (size_t)Z_REF(cached)), &pref);
 
             /* After a failure, what was built is left in place as for a table: its value is safe to destroy */
-            if(pref == NULL)
-            {
+            if (pref == NULL) {
                 _ASSERT(FAILED(result));
                 ZVAL_NULL(pnewzv);
                 goto Finished;
@@ -1549,8 +1428,7 @@ static int copyout_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTa
 
             ZVAL_REF(pnewzv, pref);
 
-            if(FAILED(result))
-            {
+            if (FAILED(result)) {
                 goto Finished;
             }
             break;
@@ -1561,15 +1439,12 @@ static int copyout_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTa
 
             /* Copy the serialized object to request memory; it is unserialized once the
              * cache lock is released (see zvcache_pending_object) */
-            ptmp_str = (zend_string *)ZVALUE(pcache->incopy, (size_t)Z_PTR(cached));
+            ptmp_str = (zend_string*)ZVALUE(pcache->incopy, (size_t)Z_PTR(cached));
             pending.pzval = pnewzv;
             pending.pserialized = zend_string_init(ZSTR_VAL(ptmp_str), ZSTR_LEN(ptmp_str), 0);
-            if(ppending != NULL)
-            {
+            if (ppending != NULL) {
                 zend_llist_add_element(ppending, &pending);
-            }
-            else
-            {
+            } else {
                 unserialize_object(pending.pzval, pending.pserialized);
                 zend_string_release(pending.pserialized);
             }
@@ -1586,8 +1461,7 @@ static int copyout_zval(zvcache_context * pcache, zvcopy_context * pcopy, HashTa
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in copyout_zval", result);
     }
 
@@ -1596,19 +1470,18 @@ Finished:
     return result;
 }
 
-static int copyin_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * phtable, HashTable * poriginal, HashTable ** ppcopied)
-{
-    int             result     = NONFATAL;
+static int copyin_hashtable(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* phtable, HashTable* poriginal, HashTable** ppcopied) {
+    int             result = NONFATAL;
     uint32_t        idx;
     uint32_t        nIndex;
-    uint32_t        mask       = 0;
-    Bucket *        p          = NULL;
-    zend_string *   pzstr      = NULL;
-    zend_uchar      allocated  = 0;
-    HashTable *     pnew_table = NULL;
-    char *          ptemp      = NULL;
-    size_t          temp_size  = 0;
-    zval *          pzval      = NULL;
+    uint32_t        mask = 0;
+    Bucket*         p = NULL;
+    zend_string*    pzstr = NULL;
+    zend_uchar      allocated = 0;
+    HashTable*      pnew_table = NULL;
+    char*           ptemp = NULL;
+    size_t          temp_size = 0;
+    zval*           pzval = NULL;
 
     _ASSERT(ppcopied);
     _ASSERT(*ppcopied == NULL);
@@ -1616,23 +1489,20 @@ static int copyin_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, Ha
     dprintverbose("begin copyin_hashtable");
 
     /* Nested too deeply for the C stack left (see ucache_stack_exhausted) */
-    if (ucache_stack_exhausted(pcopy->pstack))
-    {
+    if (ucache_stack_exhausted(pcopy->pstack)) {
         result = FATAL_ZVCACHE_INVALID_ZVAL;
         goto Finished;
     }
 
     /* allocate a hashtable & copy over existing table stuff */
     result = copyin_memory(pcopy, phtable, poriginal, sizeof(zend_array), &pnew_table, &allocated);
-    if (FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
     *ppcopied = pnew_table;
 
-    if (allocated == 0)
-    {
+    if (allocated == 0) {
         /* already copied (shared sub-array, or an array that contains itself) */
         goto Finished;
     }
@@ -1650,8 +1520,7 @@ static int copyin_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, Ha
     HT_FLAGS(pnew_table) &= UCACHE_HT_FLAGS_KEEP;
 
     /* Uninitialized (zend_empty_array, or an array that never got an element): no data */
-    if (!HT_IS_INITIALIZED(pnew_table))
-    {
+    if (!HT_IS_INITIALIZED(pnew_table)) {
         pnew_table->nTableMask = HT_MIN_MASK;
         pnew_table->arData = NULL;
         goto Finished;
@@ -1660,12 +1529,10 @@ static int copyin_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, Ha
     /* The size of the data part, as the walk of phase 1 counted it (see copyin_count_string) */
     temp_size = copyin_data_size(poriginal, &mask);
 
-    if (HT_IS_PACKED(pnew_table))
-    {
+    if (HT_IS_PACKED(pnew_table)) {
         /* Packed: hash part (2 slots) + nNumUsed elements (zvals since 8.2, Buckets before) */
         result = copyin_memory(pcopy, NULL, HT_GET_DATA_ADDR(poriginal), temp_size, &ptemp, &allocated);
-        if (FAILED(result))
-        {
+        if (FAILED(result)) {
             goto Finished;
         }
         HT_SET_DATA_ADDR(pnew_table, ptemp);
@@ -1676,21 +1543,16 @@ static int copyin_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, Ha
             if (Z_TYPE_P(pzval) == IS_UNDEF) continue;
 
             result = copyin_zval(pcache, pcopy, phtable, pzval, &pzval);
-            if (FAILED(result))
-            {
+            if (FAILED(result)) {
                 goto Finished;
             }
         }
-    }
-    else
-    {
-        if (UCACHE_HT_SHOULD_COMPACT(poriginal))
-        {
+    } else {
+        if (UCACHE_HT_SHOULD_COMPACT(poriginal)) {
             /* Sparsely populated: shrink the hash part while copying in (see ucache_compat.h) */
             pnew_table->nTableMask = mask;
             ptemp = ZMALLOC(pcopy, temp_size);
-            if (!ptemp)
-            {
+            if (!ptemp) {
                 result = pcopy->oomcode;
                 goto Finished;
             }
@@ -1710,13 +1572,10 @@ static int copyin_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, Ha
                 Z_NEXT(p->val) = HT_HASH(pnew_table, nIndex);
                 HT_HASH(pnew_table, nIndex) = HT_IDX_TO_HASH(idx);
             }
-        }
-        else
-        {
+        } else {
             /* Appropriately sized: copy the hash part and the used Buckets */
             result = copyin_memory(pcopy, NULL, HT_GET_DATA_ADDR(poriginal), temp_size, &ptemp, &allocated);
-            if (FAILED(result))
-            {
+            if (FAILED(result)) {
                 goto Finished;
             }
             HT_SET_DATA_ADDR(pnew_table, ptemp);
@@ -1736,8 +1595,7 @@ static int copyin_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, Ha
                  */
                 HT_FLAGS(pnew_table) &= ~HASH_FLAG_STATIC_KEYS;
                 result = copyin_string(pcopy, phtable, p->key, &pzstr);
-                if (FAILED(result))
-                {
+                if (FAILED(result)) {
                     goto Finished;
                 }
                 /* Copy over the key string's hash from the existing hash value in
@@ -1745,29 +1603,27 @@ static int copyin_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, Ha
                  */
                 ZSTR_H(pzstr) = p->h;
                 /* Use Offset in copied-in zval */
-                p->key = (zend_string *)ZOFFSET(pcopy, pzstr);
+                p->key = (zend_string*)ZOFFSET(pcopy, pzstr);
                 pzstr = NULL;
             }
 
             /* persist the data itself */
             pzval = &p->val;
             result = copyin_zval(pcache, pcopy, phtable, pzval, &pzval);
-            if (FAILED(result))
-            {
+            if (FAILED(result)) {
                 goto Finished;
             }
         }
     }
 
     /* ensure pointer is translated to cache memory offset */
-    pnew_table->arData = (Bucket *)ZOFFSET(pcopy, pnew_table->arData);
+    pnew_table->arData = (Bucket*)ZOFFSET(pcopy, pnew_table->arData);
 
     *ppcopied = pnew_table;
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in copyin_hashtable", result);
     }
 
@@ -1776,47 +1632,43 @@ Finished:
     return result;
 }
 
-static int copyout_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * phtable, zend_llist * ppending, HashTable * pcached, HashTable ** ppcopied)
-{
-    int             result     = NONFATAL;
+static int copyout_hashtable(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* phtable, zend_llist* ppending, HashTable* pcached, HashTable** ppcopied) {
+    int             result = NONFATAL;
     uint32_t        idx;
     uint32_t        jdx;
     uint32_t        nIndex;
-    Bucket *        p          = NULL;
-    HashTable *     pnew_table = NULL;
-    char *          ptemp      = NULL;
-    zval *          pnewzv     = NULL;
-    size_t          used_size  = 0;
+    Bucket*         p = NULL;
+    HashTable*      pnew_table = NULL;
+    char*           ptemp = NULL;
+    zval*           pnewzv = NULL;
+    size_t          used_size = 0;
     size_t          alloc_size = 0;
-    zend_string *   ptmp_str   = NULL;
+    zend_string*    ptmp_str = NULL;
 
     dprintverbose("start copyout_hashtable");
 
-    _ASSERT(pcache    != NULL);
-    _ASSERT(pcopy     != NULL);
-    _ASSERT(phtable   != NULL);
-    _ASSERT(pcached   != NULL);
-    _ASSERT(ppcopied  != NULL);
+    _ASSERT(pcache != NULL);
+    _ASSERT(pcopy != NULL);
+    _ASSERT(phtable != NULL);
+    _ASSERT(pcached != NULL);
+    _ASSERT(ppcopied != NULL);
 
     /* Nested too deeply for the C stack left (see ucache_stack_exhausted) */
-    if(ucache_stack_exhausted(pcopy->pstack))
-    {
+    if (ucache_stack_exhausted(pcopy->pstack)) {
         result = FATAL_ZVCACHE_INVALID_ZVAL;
         goto Finished;
     }
 
     /* A table that occurs more than once (shared sub-array, or a cycle through a
      * reference) is copied out once and then shared, as PHP itself does. */
-    if((pnew_table = zend_hash_index_find_ptr(phtable, ucache_addr_key(pcached))) != NULL)
-    {
+    if ((pnew_table = zend_hash_index_find_ptr(phtable, ucache_addr_key(pcached))) != NULL) {
         GC_ADDREF(pnew_table);
         *ppcopied = pnew_table;
         goto Finished;
     }
 
-    pnew_table = (HashTable *)ZMALLOC(pcopy, sizeof(HashTable));
-    if(pnew_table == NULL)
-    {
+    pnew_table = (HashTable*)ZMALLOC(pcopy, sizeof(HashTable));
+    if (pnew_table == NULL) {
         result = pcopy->oomcode;
         goto Finished;
     }
@@ -1836,7 +1688,7 @@ static int copyout_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, H
     if (!HT_IS_INITIALIZED(pnew_table)) {
         pnew_table->nTableMask = HT_MIN_MASK;
         HT_SET_DATA_ADDR(pnew_table, &uninitialized_bucket);
-        zend_hash_index_update_ptr(phtable, ucache_addr_key(pcached), (void *)pnew_table);
+        zend_hash_index_update_ptr(phtable, ucache_addr_key(pcached), (void*)pnew_table);
         *ppcopied = pnew_table;
         goto Finished;
     }
@@ -1846,16 +1698,15 @@ static int copyout_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, H
      * full nTableSize capacity: the copy has refcount 1, so PHP adds elements in place.
      */
     if (HT_IS_PACKED(pcached)) {
-        used_size  = UCACHE_HT_PACKED_USED_SIZE(pcached);
+        used_size = UCACHE_HT_PACKED_USED_SIZE(pcached);
         alloc_size = UCACHE_HT_PACKED_SIZE(pcached);
     } else {
-        used_size  = HT_USED_SIZE(pcached);
+        used_size = HT_USED_SIZE(pcached);
         alloc_size = HT_SIZE(pcached);
     }
 
     ptemp = ZMALLOC(pcopy, alloc_size);
-    if (!ptemp)
-    {
+    if (!ptemp) {
         /* Nothing refers to the header yet: free it, and the caller's slot becomes NULL */
         ZFREE(pcopy, pnew_table);
         pnew_table = NULL;
@@ -1873,7 +1724,7 @@ static int copyout_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, H
      * parts of the value can refer to it, so it must stay safe to destroy whatever fails, and
      * every later failure turns the elements not yet converted into holes (see Abandon).
      */
-    zend_hash_index_update_ptr(phtable, ucache_addr_key(pcached), (void *)pnew_table);
+    zend_hash_index_update_ptr(phtable, ucache_addr_key(pcached), (void*)pnew_table);
     *ppcopied = pnew_table;
 
     /*
@@ -1904,7 +1755,7 @@ static int copyout_hashtable(zvcache_context * pcache, zvcopy_context * pcopy, H
 
             /* copy out key */
             if (p->key) {
-                ptmp_str = (zend_string *)ZVALUE(pcache->incopy, (size_t)p->key);
+                ptmp_str = (zend_string*)ZVALUE(pcache->incopy, (size_t)p->key);
                 p->key = zend_string_init(ZSTR_VAL(ptmp_str), ZSTR_LEN(ptmp_str), 0);
                 ZSTR_H(p->key) = p->h;
             }
@@ -1964,8 +1815,7 @@ Abandon:
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in copyout_hashtable", result);
     }
 
@@ -1974,15 +1824,14 @@ Finished:
     return result;
 }
 
-static int copyin_string(zvcopy_context * pcopy, HashTable *phtable, zend_string * orig_string, zend_string ** new_string)
-{
-    int                  result     = NONFATAL;
-    size_t               size       = 0;
-    zend_string *        pzstr      = NULL;
-    zend_uchar           allocated  = 0;
+static int copyin_string(zvcopy_context* pcopy, HashTable* phtable, zend_string* orig_string, zend_string** new_string) {
+    int                  result = NONFATAL;
+    size_t               size = 0;
+    zend_string*         pzstr = NULL;
+    zend_uchar           allocated = 0;
 
     _ASSERT(orig_string != NULL);
-    _ASSERT(new_string  != NULL);
+    _ASSERT(new_string != NULL);
     _ASSERT(*new_string == NULL);
 
     /*
@@ -1991,21 +1840,18 @@ static int copyin_string(zvcopy_context * pcopy, HashTable *phtable, zend_string
      * has a single place in the value (the arrays and references that contain it are copied
      * once), and leaving it out keeps the table small.
      */
-    if(!ZSTR_IS_INTERNED(orig_string) && GC_REFCOUNT(orig_string) == 1)
-    {
+    if (!ZSTR_IS_INTERNED(orig_string) && GC_REFCOUNT(orig_string) == 1) {
         phtable = NULL;
     }
 
     size = _ZSTR_STRUCT_SIZE(ZSTR_LEN(orig_string));
     result = copyin_memory(pcopy, phtable, orig_string, size, &pzstr, &allocated);
-    if (FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
-    if (allocated)
-    {
-        *(((char *)pzstr) + size - 1) = 0;
+    if (allocated) {
+        *(((char*)pzstr) + size - 1) = 0;
         zend_string_forget_hash_val(pzstr);
         GC_DEL_FLAGS(pzstr, IS_STR_INTERNED | IS_STR_PERMANENT | IS_STR_PERSISTENT);
     }
@@ -2018,35 +1864,31 @@ Finished:
 
 }
 
-static int copyin_reference(zvcache_context * pcache, zvcopy_context * pcopy, HashTable *phtable, zend_reference * orig_ref, zend_reference ** new_ref)
-{
-    int                  result     = NONFATAL;
-    size_t               size       = 0;
-    zend_reference *     pzref      = NULL;
-    zval *               pnew_zval  = NULL;
-    zval *               pheld      = NULL;
-    zend_uchar           allocated  = 0;
+static int copyin_reference(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* phtable, zend_reference* orig_ref, zend_reference** new_ref) {
+    int                  result = NONFATAL;
+    size_t               size = 0;
+    zend_reference*      pzref = NULL;
+    zval*                pnew_zval = NULL;
+    zval*                pheld = NULL;
+    zend_uchar           allocated = 0;
 
     _ASSERT(orig_ref != NULL);
-    _ASSERT(new_ref  != NULL);
+    _ASSERT(new_ref != NULL);
     _ASSERT(*new_ref == NULL);
 
     /* Nested too deeply for the C stack left (see ucache_stack_exhausted) */
-    if (ucache_stack_exhausted(pcopy->pstack))
-    {
+    if (ucache_stack_exhausted(pcopy->pstack)) {
         result = FATAL_ZVCACHE_INVALID_ZVAL;
         goto Finished;
     }
 
     size = sizeof(zend_reference);
     result = copyin_memory(pcopy, phtable, orig_ref, size, &pzref, &allocated);
-    if (FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
-    if (allocated)
-    {
+    if (allocated) {
         /*
          * Plain reference header.  Since 7.4 a reference also carries the typed properties
          * it belongs to ("sources"): those are pointers into the request that stored the
@@ -2064,8 +1906,7 @@ static int copyin_reference(zvcache_context * pcache, zvcopy_context * pcopy, Ha
          * value, which phase 1 neither held nor walked (see copyin_prepare).
          */
         pheld = zend_hash_index_find(&pcopy->pprepared->refvals, ucache_addr_key(orig_ref));
-        if (pheld == NULL)
-        {
+        if (pheld == NULL) {
             /* Cannot happen: every reference copied here is in something phase 1 held */
             _ASSERT(FALSE);
             ZVAL_NULL(&pzref->val);
@@ -2076,8 +1917,7 @@ static int copyin_reference(zvcache_context * pcache, zvcopy_context * pcopy, Ha
         ZVAL_COPY_VALUE(&pzref->val, pheld);
         pnew_zval = &pzref->val;
         result = copyin_zval(pcache, pcopy, phtable, pnew_zval, &pnew_zval);
-        if (FAILED(result))
-        {
+        if (FAILED(result)) {
             goto Finished;
         }
     }
@@ -2090,38 +1930,33 @@ Finished:
 
 }
 
-static int copyout_reference(zvcache_context * pcache, zvcopy_context * pcopy, HashTable * phtable, zend_llist * ppending, zend_reference * pcached, zend_reference ** ppnew_ref)
-{
-    int                  result     = NONFATAL;
-    zend_reference *     pzref      = NULL;
-    zval *               pnew_zval  = NULL;
+static int copyout_reference(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* phtable, zend_llist* ppending, zend_reference* pcached, zend_reference** ppnew_ref) {
+    int                  result = NONFATAL;
+    zend_reference*      pzref = NULL;
+    zval*                pnew_zval = NULL;
 
-    _ASSERT(pcache    != NULL);
-    _ASSERT(pcopy     != NULL);
-    _ASSERT(pcached   != NULL);
+    _ASSERT(pcache != NULL);
+    _ASSERT(pcopy != NULL);
+    _ASSERT(pcached != NULL);
     _ASSERT(ppnew_ref != NULL);
 
     /* Nested too deeply for the C stack left (see ucache_stack_exhausted) */
-    if(ucache_stack_exhausted(pcopy->pstack))
-    {
+    if (ucache_stack_exhausted(pcopy->pstack)) {
         result = FATAL_ZVCACHE_INVALID_ZVAL;
         goto Finished;
     }
 
     /* check table to see if we've already copied this item out*/
-    if(phtable != NULL)
-    {
-        if((pzref = zend_hash_index_find_ptr(phtable, ucache_addr_key(pcached))) != NULL)
-        {
+    if (phtable != NULL) {
+        if ((pzref = zend_hash_index_find_ptr(phtable, ucache_addr_key(pcached))) != NULL) {
             GC_ADDREF(pzref);
             *ppnew_ref = pzref;
             goto Finished;
         }
     }
 
-    pzref = (zend_reference *)ZMALLOC(pcopy, sizeof(zend_reference));
-    if(pzref == NULL)
-    {
+    pzref = (zend_reference*)ZMALLOC(pcopy, sizeof(zend_reference));
+    if (pzref == NULL) {
         result = pcopy->oomcode;
         goto Finished;
     }
@@ -2137,9 +1972,8 @@ static int copyout_reference(zvcache_context * pcache, zvcopy_context * pcopy, H
 
     /* Register before copying the value: the value may contain this same reference
      * again ($a['self'] = &$a), which must resolve to this zend_reference */
-    if(phtable != NULL)
-    {
-        zend_hash_index_update_ptr(phtable, ucache_addr_key(pcached), (void *)pzref);
+    if (phtable != NULL) {
+        zend_hash_index_update_ptr(phtable, ucache_addr_key(pcached), (void*)pzref);
     }
 
     *ppnew_ref = pzref;
@@ -2147,8 +1981,7 @@ static int copyout_reference(zvcache_context * pcache, zvcopy_context * pcopy, H
     /* copy out zval */
     pnew_zval = &pzref->val;
     result = copyout_zval(pcache, pcopy, phtable, ppending, pnew_zval, &pnew_zval);
-    if (FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -2172,29 +2005,24 @@ Finished:
  * FATAL_LOCK_UNDO if the log cannot be replayed (see lock_undo_replay), which stays so for every process
  * until the cache is created again.  Call it only once zvcache_initialize() has set the header up.
  */
-static int zvcache_lock(zvcache_context * pcache)
-{
+static int zvcache_lock(zvcache_context* pcache) {
     int              result = NONFATAL;
     int              undone = 0;
-    zvcache_header * header = pcache->zvheader;
+    zvcache_header*  header = pcache->zvheader;
 
     result = lock_lock(pcache->zvlock);
-    if(result == WARNING_LOCK_ABANDONED)
-    {
+    if (result == WARNING_LOCK_ABANDONED) {
         header->abandoned++;
         result = NONFATAL;
     }
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         return result;
     }
 
-    if(header->undocount != 0)
-    {
+    if (header->undocount != 0) {
         undone = lock_undo_replay(&pcache->undo);
-        if(undone < 0)
-        {
+        if (undone < 0) {
             lock_unlock(pcache->zvlock);
             return FATAL_LOCK_UNDO;
         }
@@ -2211,35 +2039,29 @@ static int zvcache_lock(zvcache_context * pcache)
  * any key, are removed on the way (their memory is freed by free_pending_entries() once the lock is
  * released); ucache_info() looks up without it.
  */
-static zvcache_value * find_zvcache_entry(zvcache_context * pcache, const char * key, unsigned int index, unsigned char prune)
-{
-    zvcache_header * header = NULL;
-    zvcache_value *  pvalue = NULL;
-    zvcache_value *  pnext  = NULL;
-    ULONGLONG        ticks  = GetTickCount64();
+static zvcache_value* find_zvcache_entry(zvcache_context* pcache, const char* key, unsigned int index, unsigned char prune) {
+    zvcache_header*  header = NULL;
+    zvcache_value*   pvalue = NULL;
+    zvcache_value*   pnext = NULL;
+    ULONGLONG        ticks = GetTickCount64();
 
     dprintverbose("start find_zvcache_entry");
 
-    _ASSERT(pcache  != NULL);
-    _ASSERT(key     != NULL);
+    _ASSERT(pcache != NULL);
+    _ASSERT(key != NULL);
 
     header = pcache->zvheader;
     pvalue = ZVCACHE_VALUE(pcache->zvalloc, header->values[index]);
 
-    while(pvalue != NULL)
-    {
+    while (pvalue != NULL) {
         pnext = ZVCACHE_VALUE(pcache->zvalloc, pvalue->next_value);
 
         /* ttl is counted from the time the entry was stored; ttlive 0 means it never expires */
-        if(entry_cleared(header, pvalue) || entry_expired(pvalue, ticks))
-        {
-            if(prune)
-            {
+        if (entry_cleared(header, pvalue) || entry_expired(pvalue, ticks)) {
+            if (prune) {
                 remove_zvcache_entry(pcache, index, pvalue);
             }
-        }
-        else if(strcmp(ZVCACHE_KEY(pvalue), key) == 0)
-        {
+        } else if (strcmp(ZVCACHE_KEY(pvalue), key) == 0) {
             break;
         }
 
@@ -2256,25 +2078,24 @@ static zvcache_value * find_zvcache_entry(zvcache_context * pcache, const char *
  * Runs no user code and allocates no request memory (see copyin_prepare).  The entry is not
  * reachable by anyone before zvcache_set() adds it to the cache, so no lock is needed.
  */
-static int create_zvcache_data(zvcache_context * pcache, const char * key, zvcopy_prepared * pprep, unsigned int ttl, zvcache_value ** ppvalue)
-{
-    int              result  = NONFATAL;
-    zvcache_value *  pvalue  = NULL;
-    size_t           keylen  = 0;
-    zval *           pcopied = NULL;
-    zvcopy_context * pcopy   = NULL;
-    zvcopy_context   incopy;
-    zvcopy_stack     stack;
-    HashTable        xlate;
-    ULONGLONG        cticks  = 0;
+static int create_zvcache_data(zvcache_context* pcache, const char* key, zvcopy_prepared* pprep, unsigned int ttl, zvcache_value** ppvalue) {
+    int                    result = NONFATAL;
+    zvcache_value*         pvalue = NULL;
+    size_t                 keylen = 0;
+    zval*                  pcopied = NULL;
+    zvcopy_context*        pcopy = NULL;
+    zvcopy_context         incopy;
+    zvcopy_stack           stack;
+    HashTable              xlate;
+    ULONGLONG              cticks = 0;
     volatile unsigned char bailout = 0;
 
     dprintverbose("start create_zvcache_data");
 
-    _ASSERT(pcache   != NULL);
-    _ASSERT(key      != NULL);
-    _ASSERT(pprep    != NULL);
-    _ASSERT(ppvalue  != NULL);
+    _ASSERT(pcache != NULL);
+    _ASSERT(key != NULL);
+    _ASSERT(pprep != NULL);
+    _ASSERT(ppvalue != NULL);
     _ASSERT(*ppvalue == NULL);
 
     *ppvalue = NULL;
@@ -2283,12 +2104,12 @@ static int create_zvcache_data(zvcache_context * pcache, const char * key, zvcop
      * and a nested ucache_set() must not reset and mix up allocsize */
     incopy = *pcache->incopy;
     pcopy = &incopy;
-    pcopy->pstack    = &stack;
+    pcopy->pstack = &stack;
     pcopy->pprepared = pprep;
     pcopy->pnewvalue = NULL;
-    pcopy->pnewzval  = NULL;
-    pcopy->ptracker  = NULL;
-    pcopy->mpool     = 0;
+    pcopy->pnewzval = NULL;
+    pcopy->ptracker = NULL;
+    pcopy->mpool = 0;
 
     /*
      * One translation table per top-level copy, on the C stack.  Persistent memory: phase 2
@@ -2299,15 +2120,13 @@ static int create_zvcache_data(zvcache_context * pcache, const char * key, zvcop
 
     keylen = strlen(key) + 1;
     _ASSERT(keylen < 4098);  /* NOTE: No clue why 4098 */
-    if (keylen > UCACHE_MAX_ZVKEY_LENGTH)
-    {
+    if (keylen > UCACHE_MAX_ZVKEY_LENGTH) {
         result = FATAL_ZVCACHE_INVALID_KEY_LENGTH;
         goto Finished;
     }
 
-    pvalue = (zvcache_value *)ZMALLOC(pcopy, sizeof(zvcache_value) + keylen);
-    if(pvalue == NULL)
-    {
+    pvalue = (zvcache_value*)ZMALLOC(pcopy, sizeof(zvcache_value) + keylen);
+    if (pvalue == NULL) {
         result = pcopy->oomcode;
         goto Finished;
     }
@@ -2322,9 +2141,8 @@ static int create_zvcache_data(zvcache_context * pcache, const char * key, zvcop
     pcopy->allocsize = 0;
 
     /* The top-level zval, allocated here so that copyin_rollback() can free it */
-    pcopied = (zval *)ZMALLOC(pcopy, sizeof(zval));
-    if(pcopied == NULL)
-    {
+    pcopied = (zval*)ZMALLOC(pcopy, sizeof(zval));
+    if (pcopied == NULL) {
         result = pcopy->oomcode;
         goto Finished;
     }
@@ -2343,33 +2161,31 @@ static int create_zvcache_data(zvcache_context * pcache, const char * key, zvcop
     {
         result = copyin_zval(pcache, pcopy, &xlate, &pprep->value, &pcopied);
     }
-    zend_catch
+        zend_catch
     {
         bailout = 1;
     }
     zend_end_try();
 
-    if(bailout)
-    {
+    if (bailout) {
         copyin_rollback(pcache, pcopy, &xlate);
         copyin_free_serialized(pprep);
         zend_bailout();
     }
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
-    pvalue->sizeb      = pcopy->allocsize;
-    pvalue->zvalue     = ZOFFSET(pcopy, pcopied);
+    pvalue->sizeb = pcopy->allocsize;
+    pvalue->zvalue = ZOFFSET(pcopy, pcopied);
 
     cticks = GetTickCount64();
-    pvalue->add_ticks  = cticks;
-    pvalue->use_ticks  = cticks;
+    pvalue->add_ticks = cticks;
+    pvalue->use_ticks = cticks;
 
-    pvalue->ttlive     = ttl;
-    pvalue->hitcount   = 0;
+    pvalue->ttlive = ttl;
+    pvalue->hitcount = 0;
     pvalue->next_value = 0;
     pvalue->prev_value = 0;
 
@@ -2380,19 +2196,16 @@ Finished:
 
     zend_hash_destroy(&xlate);
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in create_zvcache_data", result);
 
         /* copyin_zval() freed what it allocated for the value itself */
-        if(pcopied != NULL)
-        {
+        if (pcopied != NULL) {
             ZFREE(pcopy, pcopied);
             pcopied = NULL;
         }
 
-        if(pvalue != NULL)
-        {
+        if (pvalue != NULL) {
             ZFREE(pcopy, pvalue);
             pvalue = NULL;
         }
@@ -2405,13 +2218,11 @@ Finished:
 
 /* Free what a top-level cached zval points to.  Everything was allocated with
  * pcache->incopy, except the contents of arrays, which live in one memory pool. */
-static void destroy_cached_zval(zvcache_context * pcache, zval * pzval)
-{
-    zvcache_hashtable_pool_tracker * table_tracker = NULL;
-    zend_reference *                 pzref         = NULL;
+static void destroy_cached_zval(zvcache_context* pcache, zval* pzval) {
+    zvcache_hashtable_pool_tracker* table_tracker = NULL;
+    zend_reference*                 pzref = NULL;
 
-    switch(Z_TYPE_P(pzval))
-    {
+    switch (Z_TYPE_P(pzval)) {
         case IS_UNDEF:
         case IS_NULL:
         case IS_TRUE:
@@ -2426,9 +2237,8 @@ static void destroy_cached_zval(zvcache_context * pcache, zval * pzval)
             break;
 
         case IS_ARRAY:
-            table_tracker = (zvcache_hashtable_pool_tracker *)ZVALUE(pcache->incopy, (size_t)Z_PTR_P(pzval));
-            if(table_tracker->hoff != 0)
-            {
+            table_tracker = (zvcache_hashtable_pool_tracker*)ZVALUE(pcache->incopy, (size_t)Z_PTR_P(pzval));
+            if (table_tracker->hoff != 0) {
                 alloc_free_mpool(pcache->zvalloc, table_tracker->hoff);
             }
             table_tracker->hoff = 0;
@@ -2441,7 +2251,7 @@ static void destroy_cached_zval(zvcache_context * pcache, zval * pzval)
         case IS_REFERENCE:
             /* Top-level references are dereferenced by zvcache_set(); free the referenced
              * value too, in case an entry holds one anyway. */
-            pzref = (zend_reference *)ZVALUE(pcache->incopy, (size_t)Z_REF_P(pzval));
+            pzref = (zend_reference*)ZVALUE(pcache->incopy, (size_t)Z_REF_P(pzval));
             destroy_cached_zval(pcache, &pzref->val);
             ZFREE(pcache->incopy, pzref);
             Z_REF_P(pzval) = NULL;
@@ -2457,17 +2267,14 @@ static void destroy_cached_zval(zvcache_context * pcache, zval * pzval)
     }
 }
 
-static void destroy_zvcache_data(zvcache_context * pcache, zvcache_value * pvalue)
-{
-    zval * pzval;
+static void destroy_zvcache_data(zvcache_context* pcache, zvcache_value* pvalue) {
+    zval* pzval;
 
     dprintverbose("start destroy_zvcache_data");
 
-    if(pvalue != NULL)
-    {
-        if(pvalue->zvalue != 0)
-        {
-            pzval = (zval *)ZVALUE(pcache->incopy, pvalue->zvalue);
+    if (pvalue != NULL) {
+        if (pvalue->zvalue != 0) {
+            pzval = (zval*)ZVALUE(pcache->incopy, pvalue->zvalue);
 
             destroy_cached_zval(pcache, pzval);
 
@@ -2491,25 +2298,22 @@ static void destroy_zvcache_data(zvcache_context * pcache, zvcache_value * pvalu
  * entry, at the end of its chain, and the count.  The entry's own fields are written first, without a log:
  * nothing leads to it before the link, nor after an undo, which leaves it out (its memory is lost).
  */
-static void add_zvcache_entry(zvcache_context * pcache, unsigned int index, zvcache_value * pvalue)
-{
-    zvcache_header * header  = NULL;
-    zvcache_value *  pcheck  = NULL;
-    size_t           offset  = 0;
+static void add_zvcache_entry(zvcache_context* pcache, unsigned int index, zvcache_value* pvalue) {
+    zvcache_header*  header = NULL;
+    zvcache_value*   pcheck = NULL;
+    size_t           offset = 0;
 
     dprintverbose("start add_zvcache_entry");
 
-    _ASSERT(pcache         != NULL);
-    _ASSERT(pvalue         != NULL);
+    _ASSERT(pcache != NULL);
+    _ASSERT(pvalue != NULL);
 
     header = pcache->zvheader;
     pcheck = ZVCACHE_VALUE(pcache->zvalloc, header->values[index]);
     offset = alloc_get_valueoffset(pcache->zvalloc, pvalue);
 
-    while(pcheck != NULL)
-    {
-        if(pcheck->next_value == 0)
-        {
+    while (pcheck != NULL) {
+        if (pcheck->next_value == 0) {
             break;
         }
 
@@ -2517,16 +2321,13 @@ static void add_zvcache_entry(zvcache_context * pcache, unsigned int index, zvca
     }
 
     /* Set here, under the lock: an entry built during a ucache_clear() and added after it stays */
-    pvalue->cleargen   = header->cleargen;
+    pvalue->cleargen = header->cleargen;
     pvalue->next_value = 0;
     pvalue->prev_value = alloc_get_valueoffset(pcache->zvalloc, pcheck);
 
-    if(pcheck != NULL)
-    {
+    if (pcheck != NULL) {
         ZVCACHE_SET(pcache, pcheck->next_value, offset);
-    }
-    else
-    {
+    } else {
         ZVCACHE_SET(pcache, header->values[index], offset);
     }
 
@@ -2550,50 +2351,40 @@ static void add_zvcache_entry(zvcache_context * pcache, unsigned int index, zvca
  * fields at most (the count, the 2 links to the entry): a kill before its end leaves the entry in its
  * chain, and the queue reuses the entry's links only after it.
  */
-static void remove_zvcache_entry(zvcache_context * pcache, unsigned int index, zvcache_value * pvalue)
-{
-    alloc_context *   apalloc = NULL;
-    zvcache_header *  header  = NULL;
-    zvcache_value *   ptemp   = NULL;
+static void remove_zvcache_entry(zvcache_context* pcache, unsigned int index, zvcache_value* pvalue) {
+    alloc_context*  apalloc = NULL;
+    zvcache_header* header = NULL;
+    zvcache_value*  ptemp = NULL;
 
     dprintverbose("start remove_zvcache_entry");
 
-    _ASSERT(pcache         != NULL);
-    _ASSERT(pvalue         != NULL);
+    _ASSERT(pcache != NULL);
+    _ASSERT(pvalue != NULL);
 
     apalloc = pcache->zvalloc;
-    header  = pcache->zvheader;
+    header = pcache->zvheader;
 
     /* Decrement itemcount, or clearitems for a cleared entry, and remove entry from hashtable. Not */
     /* below 0, for memory that a build without the undo log shared */
-    if(!entry_cleared(header, pvalue))
-    {
-        if(header->itemcount != 0)
-        {
+    if (!entry_cleared(header, pvalue)) {
+        if (header->itemcount != 0) {
             ZVCACHE_SET(pcache, header->itemcount, header->itemcount - 1);
         }
-    }
-    else if(header->clearitems != 0)
-    {
+    } else if (header->clearitems != 0) {
         ZVCACHE_SET(pcache, header->clearitems, header->clearitems - 1);
     }
 
-    if(pvalue->prev_value == 0)
-    {
+    if (pvalue->prev_value == 0) {
         ZVCACHE_SET(pcache, header->values[index], pvalue->next_value);
-        if(pvalue->next_value != 0)
-        {
+        if (pvalue->next_value != 0) {
             ptemp = ZVCACHE_VALUE(apalloc, pvalue->next_value);
             ZVCACHE_SET(pcache, ptemp->prev_value, 0);
         }
-    }
-    else
-    {
+    } else {
         ptemp = ZVCACHE_VALUE(apalloc, pvalue->prev_value);
         ZVCACHE_SET(pcache, ptemp->next_value, pvalue->next_value);
 
-        if(pvalue->next_value != 0)
-        {
+        if (pvalue->next_value != 0) {
             ptemp = ZVCACHE_VALUE(apalloc, pvalue->next_value);
             ZVCACHE_SET(pcache, ptemp->prev_value, pvalue->prev_value);
         }
@@ -2602,16 +2393,13 @@ static void remove_zvcache_entry(zvcache_context * pcache, unsigned int index, z
     /* The entry is out of the cache from here on: its links are free for the queue */
     lock_undo_commit(&pcache->undo);
 
-    if(pcache->freecount < FREELIST_MAXIMUM)
-    {
+    if (pcache->freecount < FREELIST_MAXIMUM) {
         /* Freed by free_pending_entries(), chained through next_value */
         pvalue->prev_value = 0;
         pvalue->next_value = pcache->freelist;
-        pcache->freelist   = alloc_get_valueoffset(apalloc, pvalue);
+        pcache->freelist = alloc_get_valueoffset(apalloc, pvalue);
         pcache->freecount++;
-    }
-    else
-    {
+    } else {
         destroy_zvcache_data(pcache, pvalue);
     }
     pvalue = NULL;
@@ -2625,12 +2413,10 @@ static void remove_zvcache_entry(zvcache_context * pcache, unsigned int index, z
  * lock, before any user code can run: the frees take only the allocator's lock, and allocate no
  * request memory, so nothing in here can bail out.
  */
-static void free_pending_entries(zvcache_context * pcache)
-{
-    zvcache_value * pvalue = NULL;
+static void free_pending_entries(zvcache_context* pcache) {
+    zvcache_value* pvalue = NULL;
 
-    while(pcache->freelist != 0)
-    {
+    while (pcache->freelist != 0) {
         pvalue = ZVCACHE_VALUE(pcache->zvalloc, pcache->freelist);
         pcache->freelist = pvalue->next_value;
 
@@ -2641,20 +2427,17 @@ static void free_pending_entries(zvcache_context * pcache)
 }
 
 /* Whether an entry has expired, by the rule of the reads: more than ttl whole seconds since it was stored */
-static zend_bool entry_expired(zvcache_value * pvalue, ULONGLONG ticks)
-{
+static zend_bool entry_expired(zvcache_value* pvalue, ULONGLONG ticks) {
     return (pvalue->ttlive > 0 && utils_ticksdiff(ticks, pvalue->add_ticks) / 1000 > pvalue->ttlive) ? 1 : 0;
 }
 
 /* Call under the cache lock: whether ucache_clear() was called since the entry was added (see zvcache_clear) */
-static zend_bool entry_cleared(zvcache_header * header, zvcache_value * pvalue)
-{
+static zend_bool entry_cleared(zvcache_header* header, zvcache_value* pvalue) {
     return (pvalue->cleargen != header->cleargen) ? 1 : 0;
 }
 
 /* Whether a ucache_clear() left entries for sweep_cleared_entries(): read without the lock as a hint, and under it */
-static zend_bool clear_pending(zvcache_header * header)
-{
+static zend_bool clear_pending(zvcache_header* header) {
     return (header->clearitems != 0 && header->clearnext < header->valuecount) ? 1 : 0;
 }
 
@@ -2674,37 +2457,32 @@ static zend_bool clear_pending(zvcache_header * header)
  * budget microseconds at most: the batch stops early when its time passes the budget too.  budget 0:
  * no limit.
  */
-static void sweep_cleared_entries(zvcache_context * pcache, LONGLONG budget, unsigned char owner)
-{
-    zvcache_header * header  = pcache->zvheader;
-    alloc_context *  palloc  = pcache->zvalloc;
-    zvcache_value *  pvalue  = NULL;
-    zvcache_value *  ptemp   = NULL;
-    unsigned int     index   = 0;
-    unsigned int     last    = 0;
-    unsigned int     pid     = GetCurrentProcessId();
+static void sweep_cleared_entries(zvcache_context* pcache, LONGLONG budget, unsigned char owner) {
+    zvcache_header*  header = pcache->zvheader;
+    alloc_context*   palloc = pcache->zvalloc;
+    zvcache_value*   pvalue = NULL;
+    zvcache_value*   ptemp = NULL;
+    unsigned int     index = 0;
+    unsigned int     last = 0;
+    unsigned int     pid = GetCurrentProcessId();
     unsigned int     scanned = 0;
-    size_t           bytes   = 0;
-    unsigned char    full    = 0;
-    unsigned char    held    = 0;
+    size_t           bytes = 0;
+    unsigned char    full = 0;
+    unsigned char    held = 0;
     LARGE_INTEGER    started;
 
     dprintverbose("start sweep_cleared_entries");
 
     QueryPerformanceCounter(&started);
 
-    while(clear_pending(header) && (budget == 0 || scavenger_elapsed_us(&started) < budget))
-    {
-        if(FAILED(zvcache_lock(pcache)))
-        {
+    while (clear_pending(header) && (budget == 0 || scavenger_elapsed_us(&started) < budget)) {
+        if (FAILED(zvcache_lock(pcache))) {
             break;
         }
 
-        if(owner)
-        {
+        if (owner) {
             /* Taken over by a ucache_clear() that found this process silent for too long */
-            if(header->sweeper != pid)
-            {
+            if (header->sweeper != pid) {
                 lock_unlock(pcache->zvlock);
                 break;
             }
@@ -2712,28 +2490,24 @@ static void sweep_cleared_entries(zvcache_context * pcache, LONGLONG budget, uns
             header->sweepticks = GetTickCount64();
         }
 
-        index   = header->clearnext;
-        last    = MIN(index + CLEAR_SWEEP_BUCKETS, header->valuecount);
-        bytes   = 0;
-        full    = 0;
+        index = header->clearnext;
+        last = MIN(index + CLEAR_SWEEP_BUCKETS, header->valuecount);
+        bytes = 0;
+        full = 0;
         scanned = 0;
 
-        while(index < last && header->clearitems != 0 && !full)
-        {
+        while (index < last && header->clearitems != 0 && !full) {
             pvalue = ZVCACHE_VALUE(palloc, header->values[index]);
-            while(pvalue != NULL)
-            {
-                ptemp  = pvalue;
+            while (pvalue != NULL) {
+                ptemp = pvalue;
                 pvalue = ZVCACHE_VALUE(palloc, pvalue->next_value);
 
-                if(!entry_cleared(header, ptemp))
-                {
+                if (!entry_cleared(header, ptemp)) {
                     continue;
                 }
 
                 /* The batch is full: the next one goes through this bucket again */
-                if(pcache->freecount == FREELIST_MAXIMUM || bytes >= CLEAR_SWEEP_BYTES)
-                {
+                if (pcache->freecount == FREELIST_MAXIMUM || bytes >= CLEAR_SWEEP_BYTES) {
                     full = 1;
                     break;
                 }
@@ -2742,16 +2516,14 @@ static void sweep_cleared_entries(zvcache_context * pcache, LONGLONG budget, uns
                 remove_zvcache_entry(pcache, index, ptemp);
             }
 
-            if(full)
-            {
+            if (full) {
                 break;
             }
 
             index++;
 
             /* A sweep with a budget stops the batch once its time has passed */
-            if(budget != 0 && (++scanned % 256) == 0 && scavenger_elapsed_us(&started) >= budget)
-            {
+            if (budget != 0 && (++scanned % 256) == 0 && scavenger_elapsed_us(&started) >= budget) {
                 break;
             }
         }
@@ -2759,16 +2531,14 @@ static void sweep_cleared_entries(zvcache_context * pcache, LONGLONG budget, uns
         /* At the end of the table, every entry cleared since the last ucache_clear() is gone: a count left */
         /* (by memory that a build without the undo log shared) would only make the next sweeps go through */
         /* the table for nothing. One update (see ZVCACHE_SET), 3 fields at most */
-        if(index >= header->valuecount)
-        {
+        if (index >= header->valuecount) {
             ZVCACHE_SET(pcache, header->clearitems, 0);
         }
 
         ZVCACHE_SET(pcache, header->clearnext, (header->clearitems == 0) ? header->valuecount : index);
 
         /* The sweep is over, whoever ended it: the next ucache_clear() sweeps */
-        if(header->clearnext >= header->valuecount)
-        {
+        if (header->clearnext >= header->valuecount) {
             ZVCACHE_SET(pcache, header->sweeper, 0);
         }
 
@@ -2778,12 +2548,10 @@ static void sweep_cleared_entries(zvcache_context * pcache, LONGLONG budget, uns
         /* The allocator's lock once for the batch, not for each block: with several processes sweeping, */
         /* taking it for each block made them queue for it at every free (see alloc_hold). If it cannot */
         /* be taken, each free tries to */
-        if(pcache->freelist != 0)
-        {
+        if (pcache->freelist != 0) {
             held = SUCCEEDED(alloc_hold(palloc));
             free_pending_entries(pcache);
-            if(held)
-            {
+            if (held) {
                 alloc_release(palloc);
             }
         }
@@ -2807,13 +2575,11 @@ static void sweep_cleared_entries(zvcache_context * pcache, LONGLONG budget, uns
  * than these headers, that this DLL also loads into, do not have.  See also
  * UCACHE_MEMORY_LIMIT_CHECK in ucache_compat.h.
  */
-zend_bool zvcache_over_memory_limit(void)
-{
+zend_bool zvcache_over_memory_limit(void) {
 #if UCACHE_MEMORY_LIMIT_CHECK
     zend_long limit = PG(memory_limit);
 
-    if(limit <= 0)
-    {
+    if (limit <= 0) {
         return 0;
     }
 
@@ -2836,13 +2602,11 @@ zend_bool zvcache_over_memory_limit(void)
  * array forms of ucache_set()/ucache_add() also use it, with the peak when the whole call started,
  * to store nothing more once one value has passed the limit.
  */
-zend_bool zvcache_peak_over_memory_limit(size_t peak0)
-{
+zend_bool zvcache_peak_over_memory_limit(size_t peak0) {
 #if UCACHE_MEMORY_LIMIT_CHECK
     zend_long limit = PG(memory_limit);
 
-    if(limit <= 0)
-    {
+    if (limit <= 0) {
         return 0;
     }
 
@@ -2856,8 +2620,7 @@ zend_bool zvcache_peak_over_memory_limit(size_t peak0)
  * ucache.gc.interval in milliseconds, for an interval > 0.  An interval whose milliseconds do not
  * fit in 64 bits (over 584 million years) is the largest value, which never passes.
  */
-static ULONGLONG scavenger_interval_ms(void)
-{
+static ULONGLONG scavenger_interval_ms(void) {
     zend_long interval = UCG(ucgc_interval);
 
     return (interval > (zend_long)(ULLONG_MAX / 1000)) ? ULLONG_MAX : (ULONGLONG)interval * 1000;
@@ -2900,13 +2663,11 @@ static ULONGLONG scavenger_interval_ms(void)
 #define RECLAIM_EVICT_BATCH         64
 
 /* Buckets a step examines: ucache.gc.step, or with 0 or less the automatic size */
-static unsigned int scavenger_step(zvcache_header * pheader)
-{
-    zend_long step     = UCG(ucgc_step);
+static unsigned int scavenger_step(zvcache_header* pheader) {
+    zend_long step = UCG(ucgc_step);
     zend_long interval = UCG(ucgc_interval);
 
-    if(step <= 0)
-    {
+    if (step <= 0) {
         /* ucache.gc.interval 0: only writes run steps, a second apart unless they remove entries */
         interval = (interval < 1) ? 1 : MIN(interval, SCAVENGER_SWEEP_SECONDS);
         step = ((zend_long)pheader->valuecount * interval + SCAVENGER_SWEEP_SECONDS - 1) / SCAVENGER_SWEEP_SECONDS;
@@ -2917,13 +2678,11 @@ static unsigned int scavenger_step(zvcache_header * pheader)
 }
 
 /* Microseconds since start, on the performance counter */
-static LONGLONG scavenger_elapsed_us(const LARGE_INTEGER * pstart)
-{
-    static LARGE_INTEGER frequency = {0};
+static LONGLONG scavenger_elapsed_us(const LARGE_INTEGER* pstart) {
+    static LARGE_INTEGER frequency = { 0 };
     LARGE_INTEGER        now;
 
-    if(frequency.QuadPart == 0)
-    {
+    if (frequency.QuadPart == 0) {
         QueryPerformanceFrequency(&frequency);
     }
 
@@ -2934,17 +2693,14 @@ static LONGLONG scavenger_elapsed_us(const LARGE_INTEGER * pstart)
 
 /* Seconds since an entry was last used: read with ucache_get(), stored, or changed or compared by inc/dec/cas. */
 /* GetTickCount64() counts from the start of Windows, so this stays far below 2^32 seconds (136 years) */
-static unsigned int entry_idle(zvcache_value * pvalue, ULONGLONG ticks)
-{
+static unsigned int entry_idle(zvcache_value* pvalue, ULONGLONG ticks) {
     return (unsigned int)(utils_ticksdiff(ticks, pvalue->use_ticks) / 1000);
 }
 
 /* Whether the scavenger removes an entry: expired (by the rule of the reads), or, with */
 /* ucache.gc.ttl > 0, not used for that many seconds */
-static zend_bool scavenger_removes(zvcache_value * pvalue, ULONGLONG ticks, zend_long idlettl)
-{
-    if(entry_expired(pvalue, ticks))
-    {
+static zend_bool scavenger_removes(zvcache_value* pvalue, ULONGLONG ticks, zend_long idlettl) {
+    if (entry_expired(pvalue, ticks)) {
         return 1;
     }
 
@@ -2952,12 +2708,10 @@ static zend_bool scavenger_removes(zvcache_value * pvalue, ULONGLONG ticks, zend
 }
 
 /* The idle group of an entry for eviction (see EVICTION_GROUPS) */
-static unsigned int eviction_group(unsigned int idle)
-{
+static unsigned int eviction_group(unsigned int idle) {
     unsigned int group = 0;
 
-    while(idle != 0)
-    {
+    while (idle != 0) {
         group++;
         idle >>= 1;
     }
@@ -2971,17 +2725,14 @@ static unsigned int eviction_group(unsigned int idle)
  * the lock of the allocator is taken after it, as everywhere, and is free while the pass goes through
  * the table, for the copies into the cache that other processes make meanwhile.
  */
-static void reclaim_free(zvcache_context * pcache)
-{
+static void reclaim_free(zvcache_context* pcache) {
     unsigned char held = 0;
 
-    if(pcache->freelist != 0)
-    {
+    if (pcache->freelist != 0) {
         /* If the lock cannot be taken, each free tries to */
         held = SUCCEEDED(alloc_hold(pcache->zvalloc));
         free_pending_entries(pcache);
-        if(held)
-        {
+        if (held) {
             alloc_release(pcache->zvalloc);
         }
     }
@@ -3005,22 +2756,21 @@ static void reclaim_free(zvcache_context * pcache)
  * each one.  Entries left by a ucache_clear() are removed too, uncounted.  Counts as a scavenger step
  * in ucache_info().  Returns the number of entries removed.
  */
-static unsigned int reclaim_entries(zvcache_context * pcache, zend_long * ppercent, size_t minimum)
-{
-    zvcache_header * pheader = pcache->zvheader;
-    alloc_context *  palloc  = pcache->zvalloc;
-    zvcache_value *  pvalue  = NULL;
-    zvcache_value *  ptemp   = NULL;
-    ULONGLONG        ticks   = GetTickCount64();
+static unsigned int reclaim_entries(zvcache_context* pcache, zend_long* ppercent, size_t minimum) {
+    zvcache_header*  pheader = pcache->zvheader;
+    alloc_context*   palloc = pcache->zvalloc;
+    zvcache_value*   pvalue = NULL;
+    zvcache_value*   ptemp = NULL;
+    ULONGLONG        ticks = GetTickCount64();
     zend_long        idlettl = UCG(ucgc_ttl);
     zend_long        percent = *ppercent;
-    unsigned int     index   = 0;
-    unsigned int     count   = 0;
+    unsigned int     index = 0;
+    unsigned int     count = 0;
     unsigned int     evicted = 0;
-    unsigned int     group   = 0;
-    unsigned int     batch   = 0;
-    unsigned char    enough  = 0;
-    size_t           target  = 0;
+    unsigned int     group = 0;
+    unsigned int     batch = 0;
+    unsigned char    enough = 0;
+    size_t           target = 0;
     size_t           missing = 0;
     size_t           freeing = 0;
     unsigned int     counts[EVICTION_GROUPS];
@@ -3028,32 +2778,24 @@ static unsigned int reclaim_entries(zvcache_context * pcache, zend_long * pperce
 
     dprintverbose("start reclaim_entries");
 
-    for(index = 0; index < pheader->valuecount; index++)
-    {
+    for (index = 0; index < pheader->valuecount; index++) {
         pvalue = ZVCACHE_VALUE(palloc, pheader->values[index]);
-        while(pvalue != NULL)
-        {
-            ptemp  = pvalue;
+        while (pvalue != NULL) {
+            ptemp = pvalue;
             pvalue = ZVCACHE_VALUE(palloc, pvalue->next_value);
 
             /* Left by a ucache_clear(): make_room() does not run the pass while a sweep is pending (also */
             /* one that a killed process left unfinished), so only damaged counters leave these here */
-            if(entry_cleared(pheader, ptemp))
-            {
+            if (entry_cleared(pheader, ptemp)) {
                 remove_zvcache_entry(pcache, index, ptemp);
-            }
-            else if(scavenger_removes(ptemp, ticks, idlettl))
-            {
+            } else if (scavenger_removes(ptemp, ticks, idlettl)) {
                 count++;
                 remove_zvcache_entry(pcache, index, ptemp);
-            }
-            else
-            {
+            } else {
                 continue;
             }
 
-            if(pcache->freecount == FREELIST_MAXIMUM)
-            {
+            if (pcache->freecount == FREELIST_MAXIMUM) {
                 reclaim_free(pcache);
             }
         }
@@ -3061,53 +2803,43 @@ static unsigned int reclaim_entries(zvcache_context * pcache, zend_long * pperce
 
     reclaim_free(pcache);
 
-    if(percent > 0)
-    {
+    if (percent > 0) {
         /* On the stack: see zvcache_run_scavenger() */
         alloc_getinfo(palloc, &info);
         percent = MIN(percent, 100);
-        target  = info.total_size / 100 * (size_t)percent;
+        target = info.total_size / 100 * (size_t)percent;
 
-        while(percent < 100 && ((target < minimum && info.free_size < minimum) || (count == 0 && info.free_size >= target)))
-        {
+        while (percent < 100 && ((target < minimum && info.free_size < minimum) || (count == 0 && info.free_size >= target))) {
             percent = MIN(percent * 2, 100);
-            target  = info.total_size / 100 * (size_t)percent;
+            target = info.total_size / 100 * (size_t)percent;
         }
 
-        if(info.free_size < target)
-        {
+        if (info.free_size < target) {
             missing = target - info.free_size;
 
             /* How many entries each idle group holds, to go over the table once per group that has some */
             memset(counts, 0, sizeof(counts));
-            for(index = 0; index < pheader->valuecount; index++)
-            {
-                for(pvalue = ZVCACHE_VALUE(palloc, pheader->values[index]); pvalue != NULL;
-                    pvalue = ZVCACHE_VALUE(palloc, pvalue->next_value))
-                {
+            for (index = 0; index < pheader->valuecount; index++) {
+                for (pvalue = ZVCACHE_VALUE(palloc, pheader->values[index]); pvalue != NULL;
+                    pvalue = ZVCACHE_VALUE(palloc, pvalue->next_value)) {
                     counts[eviction_group(entry_idle(pvalue, ticks))]++;
                 }
             }
 
             /* The groups unused the longest first, until enough is free */
-            for(group = EVICTION_GROUPS; group > 0 && !enough; )
-            {
+            for (group = EVICTION_GROUPS; group > 0 && !enough; ) {
                 group--;
-                if(counts[group] == 0)
-                {
+                if (counts[group] == 0) {
                     continue;
                 }
 
-                for(index = 0; index < pheader->valuecount && !enough; index++)
-                {
+                for (index = 0; index < pheader->valuecount && !enough; index++) {
                     pvalue = ZVCACHE_VALUE(palloc, pheader->values[index]);
-                    while(pvalue != NULL)
-                    {
-                        ptemp  = pvalue;
+                    while (pvalue != NULL) {
+                        ptemp = pvalue;
                         pvalue = ZVCACHE_VALUE(palloc, pvalue->next_value);
 
-                        if(eviction_group(entry_idle(ptemp, ticks)) != group)
-                        {
+                        if (eviction_group(entry_idle(ptemp, ticks)) != group) {
                             continue;
                         }
 
@@ -3118,22 +2850,18 @@ static unsigned int reclaim_entries(zvcache_context * pcache, zend_long * pperce
 
                         /* What the entries took is less than what freeing them gives back (block */
                         /* headers, the end of blocks): read the free memory once it could be enough */
-                        if(freeing >= missing || ++batch == RECLAIM_EVICT_BATCH)
-                        {
+                        if (freeing >= missing || ++batch == RECLAIM_EVICT_BATCH) {
                             reclaim_free(pcache);
                             alloc_getinfo(palloc, &info);
-                            if(info.free_size >= target)
-                            {
+                            if (info.free_size >= target) {
                                 enough = 1;
                                 break;
                             }
 
                             missing = target - info.free_size;
                             freeing = 0;
-                            batch   = 0;
-                        }
-                        else if(pcache->freecount == FREELIST_MAXIMUM)
-                        {
+                            batch = 0;
+                        } else if (pcache->freecount == FREELIST_MAXIMUM) {
                             reclaim_free(pcache);
                         }
                     }
@@ -3186,29 +2914,28 @@ static unsigned int reclaim_entries(zvcache_context * pcache, zend_long * pperce
  * buckets, or fewer when it reaches SCAVENGER_STEP_BUDGET_US, and removes what scavenger_removes()
  * says; the memory comes back in free_pending_entries().
  */
-int zvcache_run_scavenger(zvcache_context * pcache, unsigned int force)
-{
-    int count   = 0;
+int zvcache_run_scavenger(zvcache_context* pcache, unsigned int force) {
+    int count = 0;
     int counted = 0;
 
     alloc_info   info;
 
     unsigned int  threshold = 0;
-    unsigned int  sindex    = 0;
-    unsigned int  eindex    = 0;
-    unsigned int  scanned   = 0;
-    ULONGLONG     ticks     = GetTickCount64();
-    ULONGLONG     wait      = 0;
-    unsigned int  step      = 0;
-    unsigned char urgent    = 0;
-    size_t        cleared   = 0;
-    zend_long     ttl       = UCG(ucgc_ttl);
-    zend_long     limit     = MIN(MAX(UCG(ucgc_threshold), 0), 100);
+    unsigned int  sindex = 0;
+    unsigned int  eindex = 0;
+    unsigned int  scanned = 0;
+    ULONGLONG     ticks = GetTickCount64();
+    ULONGLONG     wait = 0;
+    unsigned int  step = 0;
+    unsigned char urgent = 0;
+    size_t        cleared = 0;
+    zend_long     ttl = UCG(ucgc_ttl);
+    zend_long     limit = MIN(MAX(UCG(ucgc_threshold), 0), 100);
 
-    zvcache_header * pheader = NULL;
-    alloc_context *  palloc  = NULL;
-    zvcache_value *  pvalue  = NULL;
-    zvcache_value *  ptemp   = NULL;
+    zvcache_header*  pheader = NULL;
+    alloc_context*   palloc = NULL;
+    zvcache_value*   pvalue = NULL;
+    zvcache_value*   ptemp = NULL;
     LARGE_INTEGER    started;
 
     _ASSERT(pcache != NULL);
@@ -3216,37 +2943,30 @@ int zvcache_run_scavenger(zvcache_context * pcache, unsigned int force)
     dprintverbose("start zvcache_run_scavenger");
 
     pheader = pcache->zvheader;
-    palloc  = pcache->zvalloc;
+    palloc = pcache->zvalloc;
 
-    if(!force)
-    {
+    if (!force) {
         /* Writes run steps only with ucache.gc.threshold (a negative one is 0) */
-        if(limit == 0)
-        {
+        if (limit == 0) {
             goto Finished;
         }
 
         wait = pheader->scwait;
-    }
-    else
-    {
+    } else {
         wait = scavenger_interval_ms();
     }
 
-    if(utils_ticksdiff(ticks, pheader->lscavenge) < wait)
-    {
+    if (utils_ticksdiff(ticks, pheader->lscavenge) < wait) {
         goto Finished;
     }
 
-    if(limit > 0)
-    {
+    if (limit > 0) {
         /* On the stack: see above */
         alloc_getinfo(palloc, &info);
 
         threshold = (unsigned int)((100 * info.free_size) / info.total_size);
 
-        if(threshold > (unsigned int)limit)
-        {
+        if (threshold > (unsigned int)limit) {
             /* Counts as a step for the waits above, for writes as for the end of requests (one update, */
             /* see ZVCACHE_SET) */
             ZVCACHE_SET(pcache, pheader->lscavenge, ticks);
@@ -3262,7 +2982,7 @@ int zvcache_run_scavenger(zvcache_context * pcache, unsigned int force)
 
     /* Run scavenger starting from where the last step stopped */
 
-    step   = scavenger_step(pheader);
+    step = scavenger_step(pheader);
     sindex = (pheader->scstart < pheader->valuecount) ? pheader->scstart : 0;
     eindex = MIN(sindex + step, pheader->valuecount);
 
@@ -3270,42 +2990,34 @@ int zvcache_run_scavenger(zvcache_context * pcache, unsigned int force)
 
     QueryPerformanceCounter(&started);
 
-    for( ;sindex < eindex; sindex++)
-    {
+    for (;sindex < eindex; sindex++) {
         /* About SCAVENGER_STEP_BUDGET_US of work under the lock: the next step goes on from here */
-        if(scanned != 0 && ((scanned % SCAVENGER_CLOCK_EVERY) == 0 || count != counted)
-            && scavenger_elapsed_us(&started) > SCAVENGER_STEP_BUDGET_US)
-        {
+        if (scanned != 0 && ((scanned % SCAVENGER_CLOCK_EVERY) == 0 || count != counted)
+            && scavenger_elapsed_us(&started) > SCAVENGER_STEP_BUDGET_US) {
             break;
         }
 
         scanned++;
         counted = count;
 
-        if(pheader->values[sindex] == 0)
-        {
+        if (pheader->values[sindex] == 0) {
             continue;
         }
 
         pvalue = ZVCACHE_VALUE(palloc, pheader->values[sindex]);
-        while(pvalue != NULL)
-        {
+        while (pvalue != NULL) {
             ptemp = pvalue;
             pvalue = ZVCACHE_VALUE(palloc, pvalue->next_value);
 
             /* Left by a ucache_clear(): removed, not counted, as many as the batches of its sweep */
             /* take, so that the step frees none of them under the lock (the sweep does the rest) */
-            if(entry_cleared(pheader, ptemp))
-            {
-                if(pcache->freecount < FREELIST_MAXIMUM && cleared < CLEAR_SWEEP_BYTES)
-                {
+            if (entry_cleared(pheader, ptemp)) {
+                if (pcache->freecount < FREELIST_MAXIMUM && cleared < CLEAR_SWEEP_BYTES) {
                     cleared += ptemp->sizeb;
                     remove_zvcache_entry(pcache, sindex, ptemp);
                 }
                 ptemp = NULL;
-            }
-            else if(scavenger_removes(ptemp, ticks, ttl))
-            {
+            } else if (scavenger_removes(ptemp, ticks, ttl)) {
                 count++;
                 remove_zvcache_entry(pcache, sindex, ptemp);
                 ptemp = NULL;
@@ -3341,22 +3053,18 @@ Finished:
  * them for about SCAVENGER_STEP_BUDGET_US: that helps the process that sweeps them, and finishes the
  * sweep of a process that was killed in the middle of it.
  */
-void zvcache_scavenge_periodic(zvcache_context * pcache)
-{
+void zvcache_scavenge_periodic(zvcache_context* pcache) {
     _ASSERT(pcache != NULL);
 
-    if(clear_pending(pcache->zvheader))
-    {
+    if (clear_pending(pcache->zvheader)) {
         sweep_cleared_entries(pcache, SCAVENGER_STEP_BUDGET_US, 0);
     }
 
-    if(utils_ticksdiff(GetTickCount64(), pcache->zvheader->lscavenge) < scavenger_interval_ms())
-    {
+    if (utils_ticksdiff(GetTickCount64(), pcache->zvheader->lscavenge) < scavenger_interval_ms()) {
         return;
     }
 
-    if(SUCCEEDED(zvcache_lock(pcache)))
-    {
+    if (SUCCEEDED(zvcache_lock(pcache))) {
         zvcache_run_scavenger(pcache, 1);
         lock_unlock(pcache->zvlock);
     }
@@ -3364,46 +3072,43 @@ void zvcache_scavenge_periodic(zvcache_context * pcache)
     free_pending_entries(pcache);
 }
 
-int zvcache_create(zvcache_context ** ppcache)
-{
+int zvcache_create(zvcache_context** ppcache) {
     int               result = NONFATAL;
-    zvcache_context * pcache = NULL;
+    zvcache_context*  pcache = NULL;
 
     dprintverbose("start zvcache_create");
 
     _ASSERT(ppcache != NULL);
     *ppcache = NULL;
 
-    pcache = (zvcache_context *)alloc_pemalloc(sizeof(zvcache_context));
-    if(pcache == NULL)
-    {
+    pcache = (zvcache_context*)alloc_pemalloc(sizeof(zvcache_context));
+    if (pcache == NULL) {
         result = FATAL_OUT_OF_LMEMORY;
         goto Finished;
     }
 
-    pcache->id          = gzvcacheid++;
-    pcache->cachekey    = 0;
-    pcache->hinitdone   = NULL;
+    pcache->id = gzvcacheid++;
+    pcache->cachekey = 0;
+    pcache->hinitdone = NULL;
 
-    pcache->incopy      = NULL;
-    pcache->outcopy     = NULL;
+    pcache->incopy = NULL;
+    pcache->outcopy = NULL;
 
-    pcache->zvmemaddr   = NULL;
-    pcache->zvheader    = NULL;
-    pcache->zvfilemap   = NULL;
-    pcache->zvlock      = NULL;
-    pcache->zvalloc     = NULL;
-    pcache->freelist    = 0;
-    pcache->freecount   = 0;
-    pcache->maxfree     = 0;
+    pcache->zvmemaddr = NULL;
+    pcache->zvheader = NULL;
+    pcache->zvfilemap = NULL;
+    pcache->zvlock = NULL;
+    pcache->zvalloc = NULL;
+    pcache->freelist = 0;
+    pcache->freecount = 0;
+    pcache->maxfree = 0;
     memset(&pcache->undo, 0, sizeof(pcache->undo));
 
     *ppcache = pcache;
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in zvcache_create", result);
     }
 
@@ -3412,12 +3117,10 @@ Finished:
     return result;
 }
 
-void zvcache_destroy(zvcache_context * pcache)
-{
+void zvcache_destroy(zvcache_context* pcache) {
     dprintverbose("start zvcache_destroy %p", pcache);
 
-    if(pcache != NULL)
-    {
+    if (pcache != NULL) {
         alloc_pefree(pcache);
         pcache = NULL;
     }
@@ -3427,31 +3130,29 @@ void zvcache_destroy(zvcache_context * pcache)
     return;
 }
 
-int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsigned int cachesize)
-{
-    int              result    = NONFATAL;
-    size_t           segsize   = 0;
-    zvcache_header * header    = NULL;
-    unsigned int     msize     = 0;
+int zvcache_initialize(zvcache_context* pcache, unsigned short cachekey, unsigned int cachesize) {
+    int              result = NONFATAL;
+    size_t           segsize = 0;
+    zvcache_header*  header = NULL;
+    unsigned int     msize = 0;
 
-    unsigned int    zvcount    = 256;
-    ULONGLONG       cticks     = 0;
-    unsigned char   isfirst    = 0;
-    unsigned char   islocked   = 0;
+    unsigned int    zvcount = 256;
+    ULONGLONG       cticks = 0;
+    unsigned char   isfirst = 0;
+    unsigned char   islocked = 0;
     unsigned char   initmemory = 0;
-    char *          lockname   = "USERZVALS_CACHE";
-    char *          prefix     = NULL;
-    size_t          cchprefix  = 0;
+    char*           lockname = "USERZVALS_CACHE";
+    char*           prefix = NULL;
+    size_t          cchprefix = 0;
 
     dprintverbose("start zvcache_initialize %p", pcache);
 
-    _ASSERT(pcache    != NULL);
-    _ASSERT(cachesize >= 2   && cachesize <= 1024);
+    _ASSERT(pcache != NULL);
+    _ASSERT(cachesize >= 2 && cachesize <= 1024);
 
     /* Initialize memory map to store the user cache */
     result = filemap_create(&pcache->zvfilemap);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -3459,14 +3160,12 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
 
     /* get object name prefix */
     result = lock_get_nameprefix(lockname, cachekey, LOCK_TYPE_SHARED, &prefix, &cchprefix);
-    if (FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
     result = utils_create_init_event(prefix, "ZVCACHE_INIT", &pcache->hinitdone, &isfirst);
-    if (FAILED(result))
-    {
+    if (FAILED(result)) {
         result = FATAL_ZVCACHE_INIT_EVENT;
         goto Finished;
     }
@@ -3480,12 +3179,11 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
     /* process died owning the mutex, finds the mutex with a new segment, or with the segment of the */
     /* process that is closing it, or of the one that died */
     result = filemap_initialize(pcache->zvfilemap, FILEMAP_TYPE_USERZVALS, cachekey, cachesize, isfirst);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
-    pcache->zvmemaddr = (char *)pcache->zvfilemap->mapaddr;
+    pcache->zvmemaddr = (char*)pcache->zvfilemap->mapaddr;
     segsize = filemap_getsize(pcache->zvfilemap);
     _ASSERT(segsize != 0);
 
@@ -3495,23 +3193,20 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
 
     /* Create allocator for zvcache segment */
     result = alloc_create(&pcache->zvalloc);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
     result = alloc_initialize(pcache->zvalloc, "USERZVALS_SEGMENT", cachekey, pcache->zvfilemap->mapaddr, segsize, &initmemory);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
     /* Get memory for cache header */
     zvcount = utils_get_prime_less_than(segsize / ZVCACHE_BUCKET_BYTES);
     msize = sizeof(zvcache_header) + ((zvcount - 1) * sizeof(size_t));
-    pcache->zvheader = (zvcache_header *)alloc_get_cacheheader(pcache->zvalloc, msize, CACHE_TYPE_USERZVALS);
-    if(pcache->zvheader == NULL)
-    {
+    pcache->zvheader = (zvcache_header*)alloc_get_cacheheader(pcache->zvalloc, msize, CACHE_TYPE_USERZVALS);
+    if (pcache->zvheader == NULL) {
         result = FATAL_ZVCACHE_INITIALIZE;
         goto Finished;
     }
@@ -3526,143 +3221,129 @@ int zvcache_initialize(zvcache_context * pcache, unsigned short cachekey, unsign
 
     /* Create reader writer locks for the zvcache */
     result = lock_create(&pcache->zvlock);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
     result = lock_initialize(pcache->zvlock, lockname, cachekey, LOCK_TYPE_SHARED, &header->last_owner);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
     /* Initialize the zvcache_header if alloc_initialize initialized the segment */
-    if(initmemory)
-    {
+    if (initmemory) {
         cticks = GetTickCount64();
 
         /* No need to get a write lock: the other processes wait for */
         /* the init mutex, and none uses a segment that is not marked */
-        header->hitcount     = 0;
-        header->misscount    = 0;
-        header->abandoned    = 0;
-        header->last_owner   = 0;
-        header->undocount    = 0;
+        header->hitcount = 0;
+        header->misscount = 0;
+        header->abandoned = 0;
+        header->last_owner = 0;
+        header->undocount = 0;
 
-        header->lscavenge    = cticks;
-        header->scwait       = SCAVENGER_WRITE_GAP_MS;
-        header->scstart      = 0;
-        header->itemcount    = 0;
-        header->valuecount   = zvcount;
-        header->scticks      = 0;
-        header->sccount      = 0;
-        header->scruns       = 0;
-        header->scremoved    = 0;
-        header->scevicted    = 0;
-        header->rcticks      = 0;
-        header->rcfutile     = 0;
-        header->rcwait       = 0;
-        header->rcgen        = 0;
-        header->cleargen     = 0;
-        header->clearitems   = 0;
-        header->clearnext    = zvcount;
-        header->sweeper      = 0;
-        header->sweepticks   = 0;
+        header->lscavenge = cticks;
+        header->scwait = SCAVENGER_WRITE_GAP_MS;
+        header->scstart = 0;
+        header->itemcount = 0;
+        header->valuecount = zvcount;
+        header->scticks = 0;
+        header->sccount = 0;
+        header->scruns = 0;
+        header->scremoved = 0;
+        header->scevicted = 0;
+        header->rcticks = 0;
+        header->rcfutile = 0;
+        header->rcwait = 0;
+        header->rcgen = 0;
+        header->cleargen = 0;
+        header->clearitems = 0;
+        header->clearnext = zvcount;
+        header->sweeper = 0;
+        header->sweepticks = 0;
 
-        memset((void *)header->values, 0, sizeof(size_t) * zvcount);
+        memset((void*)header->values, 0, sizeof(size_t) * zvcount);
 
         header->init_ticks = cticks;
-        header->mapcount   = 1;
+        header->mapcount = 1;
 
         /* Every field of zvcache_header, fields added later included, must be set above: the mark */
         /* comes last, and the processes that open the segment from then on use it as it is */
         alloc_initdone(pcache->zvalloc);
-    }
-    else
-    {
+    } else {
         /* Increment the mapcount */
         InterlockedIncrement(&header->mapcount);
     }
 
     /* Create incopy and outcopy zvcopy contexts */
-    pcache->incopy = (zvcopy_context *)alloc_pemalloc(sizeof(zvcopy_context));
-    if(pcache->incopy == NULL)
-    {
+    pcache->incopy = (zvcopy_context*)alloc_pemalloc(sizeof(zvcopy_context));
+    if (pcache->incopy == NULL) {
         result = FATAL_OUT_OF_LMEMORY;
         goto Finished;
     }
 
     /* The copy-in fields (pprepared, ...) are only set in create_zvcache_data's private copy */
     memset(pcache->incopy, 0, sizeof(zvcopy_context));
-    pcache->incopy->oomcode   = FATAL_OUT_OF_SMEMORY;
-    pcache->incopy->palloc    = pcache->zvalloc;
-    pcache->incopy->pbaseadr  = pcache->zvmemaddr;
-    pcache->incopy->hoffset   = 0;
+    pcache->incopy->oomcode = FATAL_OUT_OF_SMEMORY;
+    pcache->incopy->palloc = pcache->zvalloc;
+    pcache->incopy->pbaseadr = pcache->zvmemaddr;
+    pcache->incopy->hoffset = 0;
     pcache->incopy->allocsize = 0;
-    pcache->incopy->fnmalloc  = alloc_osmalloc;
-    pcache->incopy->fnfree    = alloc_osfree;
+    pcache->incopy->fnmalloc = alloc_osmalloc;
+    pcache->incopy->fnfree = alloc_osfree;
 
-    pcache->outcopy = (zvcopy_context *)alloc_pemalloc(sizeof(zvcopy_context));
-    if(pcache->outcopy == NULL)
-    {
+    pcache->outcopy = (zvcopy_context*)alloc_pemalloc(sizeof(zvcopy_context));
+    if (pcache->outcopy == NULL) {
         result = FATAL_OUT_OF_LMEMORY;
         goto Finished;
     }
 
     memset(pcache->outcopy, 0, sizeof(zvcopy_context));
-    pcache->outcopy->oomcode   = FATAL_OUT_OF_LMEMORY;
-    pcache->outcopy->palloc    = NULL;
-    pcache->outcopy->pbaseadr  = pcache->zvmemaddr;
-    pcache->outcopy->hoffset   = 0;
+    pcache->outcopy->oomcode = FATAL_OUT_OF_LMEMORY;
+    pcache->outcopy->palloc = NULL;
+    pcache->outcopy->pbaseadr = pcache->zvmemaddr;
+    pcache->outcopy->hoffset = 0;
     pcache->outcopy->allocsize = 0;
-    pcache->outcopy->fnmalloc  = alloc_oemalloc;
-    pcache->outcopy->fnfree    = alloc_oefree;
+    pcache->outcopy->fnmalloc = alloc_oemalloc;
+    pcache->outcopy->fnfree = alloc_oefree;
 
 Finished:
 
-    if (islocked)
-    {
+    if (islocked) {
         ReleaseMutex(pcache->hinitdone);
         islocked = 0;
     }
 
-    if (prefix != NULL)
-    {
+    if (prefix != NULL) {
         alloc_pefree(prefix);
         prefix = NULL;
     }
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in zvcache_initialize", result);
 
-        if(pcache->zvalloc != NULL)
-        {
+        if (pcache->zvalloc != NULL) {
             alloc_terminate(pcache->zvalloc);
             alloc_destroy(pcache->zvalloc);
 
             pcache->zvalloc = NULL;
         }
 
-        if(pcache->zvfilemap != NULL)
-        {
+        if (pcache->zvfilemap != NULL) {
             filemap_terminate(pcache->zvfilemap);
             filemap_destroy(pcache->zvfilemap);
 
             pcache->zvfilemap = NULL;
         }
 
-        if(pcache->zvlock != NULL)
-        {
+        if (pcache->zvlock != NULL) {
             lock_terminate(pcache->zvlock);
             lock_destroy(pcache->zvlock);
 
             pcache->zvlock = NULL;
         }
 
-        if(pcache->hinitdone != NULL)
-        {
+        if (pcache->hinitdone != NULL) {
             CloseHandle(pcache->hinitdone);
             pcache->hinitdone = NULL;
         }
@@ -3675,64 +3356,54 @@ Finished:
     return result;
 }
 
-void zvcache_terminate(zvcache_context * pcache)
-{
+void zvcache_terminate(zvcache_context* pcache) {
     dprintverbose("start zvcache_terminate %p", pcache);
 
-    if(pcache != NULL)
-    {
+    if (pcache != NULL) {
         /* Every call frees what it removed before it returns, so this finds nothing to free */
         _ASSERT(pcache->freelist == 0);
-        if(pcache->zvalloc != NULL && pcache->incopy != NULL)
-        {
+        if (pcache->zvalloc != NULL && pcache->incopy != NULL) {
             free_pending_entries(pcache);
         }
 
         /* After free_pending_entries(), which frees through incopy */
-        if(pcache->incopy != NULL)
-        {
+        if (pcache->incopy != NULL) {
             alloc_pefree(pcache->incopy);
             pcache->incopy = NULL;
         }
 
-        if(pcache->outcopy != NULL)
-        {
+        if (pcache->outcopy != NULL) {
             alloc_pefree(pcache->outcopy);
             pcache->outcopy = NULL;
         }
 
-        if(pcache->zvheader != NULL)
-        {
+        if (pcache->zvheader != NULL) {
             InterlockedDecrement(&pcache->zvheader->mapcount);
             pcache->zvheader = NULL;
         }
 
-        if(pcache->zvalloc != NULL)
-        {
+        if (pcache->zvalloc != NULL) {
             alloc_terminate(pcache->zvalloc);
             alloc_destroy(pcache->zvalloc);
 
             pcache->zvalloc = NULL;
         }
 
-        if(pcache->zvfilemap != NULL)
-        {
+        if (pcache->zvfilemap != NULL) {
             filemap_terminate(pcache->zvfilemap);
             filemap_destroy(pcache->zvfilemap);
 
             pcache->zvfilemap = NULL;
         }
 
-        if(pcache->zvlock != NULL)
-        {
+        if (pcache->zvlock != NULL) {
             lock_terminate(pcache->zvlock);
             lock_destroy(pcache->zvlock);
 
             pcache->zvlock = NULL;
         }
 
-        if(pcache->hinitdone != NULL)
-        {
+        if (pcache->hinitdone != NULL) {
             CloseHandle(pcache->hinitdone);
             pcache->hinitdone = NULL;
         }
@@ -3743,24 +3414,23 @@ void zvcache_terminate(zvcache_context * pcache)
     return;
 }
 
-int zvcache_get(zvcache_context * pcache, const char * key, zval ** pvalue)
-{
-    int              result  = NONFATAL;
-    unsigned int     index   = 0;
-    unsigned char    flock   = 0;
-    zvcache_value *  pentry  = NULL;
-    zvcache_header * header  = NULL;
-    zval *           pcached = NULL;
-    zend_llist       pending;
-    zvcopy_context   outcopy;
-    zvcopy_stack     stack;
-    zval             released;
+int zvcache_get(zvcache_context* pcache, const char* key, zval** pvalue) {
+    int                    result = NONFATAL;
+    unsigned int           index = 0;
+    unsigned char          flock = 0;
+    zvcache_value*         pentry = NULL;
+    zvcache_header*        header = NULL;
+    zval*                  pcached = NULL;
+    zend_llist             pending;
+    zvcopy_context         outcopy;
+    zvcopy_stack           stack;
+    zval                   released;
     volatile unsigned char bailout = 0;
 
     dprintverbose("start zvcache_get");
 
     _ASSERT(pcache != NULL);
-    _ASSERT(key    != NULL);
+    _ASSERT(key != NULL);
     _ASSERT(pvalue != NULL);
 
     /* NULL until the copy fills it: whatever happens, *pvalue can be released below */
@@ -3773,8 +3443,7 @@ int zvcache_get(zvcache_context * pcache, const char * key, zval ** pvalue)
     index = utils_getindex(key, pcache->zvheader->valuecount);
 
     result = zvcache_lock(pcache);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -3783,26 +3452,23 @@ int zvcache_get(zvcache_context * pcache, const char * key, zval ** pvalue)
     pentry = find_zvcache_entry(pcache, key, index, 1);
 
     /* Adjust overall cache hitcount/misscount and entry hitcount */
-    if(pentry == NULL)
-    {
+    if (pentry == NULL) {
         InterlockedIncrement(&header->misscount);
 
         result = WARNING_ZVCACHE_EMISSING;
         goto Finished;
-    }
-    else
-    {
+    } else {
         InterlockedIncrement(&pentry->hitcount);
         InterlockedIncrement(&header->hitcount);
     }
 
     /* Entry found. copyout to local memory */
-    _ASSERT(pentry->zvalue  != 0);
+    _ASSERT(pentry->zvalue != 0);
     _ASSERT(pcache->outcopy != NULL);
 
     /* A plain store: use_ticks of an entry in the cache is only written and read under the cache lock */
     pentry->use_ticks = GetTickCount64();
-    pcached = (zval *)ZVALUE(pcache->incopy, pentry->zvalue);
+    pcached = (zval*)ZVALUE(pcache->incopy, pentry->zvalue);
 
     /* Private copy of the context, with the C stack of this copy (see ucache_stack_exhausted) */
     outcopy = *pcache->outcopy;
@@ -3820,22 +3486,20 @@ int zvcache_get(zvcache_context * pcache, const char * key, zval ** pvalue)
     {
         result = copyout_zval(pcache, &outcopy, NULL, &pending, pcached, pvalue);
     }
-    zend_catch
+        zend_catch
     {
         bailout = 1;
     }
     zend_end_try();
 
-    if(bailout)
-    {
+    if (bailout) {
         lock_unlock(pcache->zvlock);
         flock = 0;
         free_pending_entries(pcache);
         zend_bailout();
     }
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -3843,8 +3507,7 @@ int zvcache_get(zvcache_context * pcache, const char * key, zval ** pvalue)
 
 Finished:
 
-    if(flock)
-    {
+    if (flock) {
         lock_unlock(pcache->zvlock);
         flock = 0;
     }
@@ -3856,8 +3519,7 @@ Finished:
      * The shared memory is not touched any more: user code may run now.  After a failed copy
      * the placeholders stay NULL: only the serialized strings are released.
      */
-    if(!unserialize_pending_objects(&pending, SUCCEEDED(result)) && SUCCEEDED(result))
-    {
+    if (!unserialize_pending_objects(&pending, SUCCEEDED(result)) && SUCCEEDED(result)) {
         /* An object of the value could not be unserialized: return nothing rather than a NULL in
          * its place, as unserialize() returns false (the entry stays, for processes that can) */
         result = FATAL_ZVCACHE_INVALID_ZVAL;
@@ -3871,8 +3533,7 @@ Finished:
      * release starts, so that it never points into a value being destroyed, even if a destructor
      * raises a fatal error.
      */
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in zvcache_get", result);
 
         ZVAL_COPY_VALUE(&released, *pvalue);
@@ -3905,37 +3566,30 @@ Finished:
  * still does not fit fails as in a full cache.  Phase 2 can run again: a failure gave back what it
  * had taken, and the value and its serialized objects are still held by pprep.
  */
-static int make_room(zvcache_context * pcache, const char * key, zvcopy_prepared * pprep, unsigned int ttl,
-                     unsigned int gen, size_t minimum, zvcache_value ** ppnewval)
-{
-    zvcache_header * header  = pcache->zvheader;
-    zend_long        evict   = MIN(MAX(UCG(ucgc_evict), 0), 100);
+static int make_room(zvcache_context* pcache, const char* key, zvcopy_prepared* pprep, unsigned int ttl,
+    unsigned int gen, size_t minimum, zvcache_value** ppnewval) {
+    zvcache_header*  header = pcache->zvheader;
+    zend_long        evict = MIN(MAX(UCG(ucgc_evict), 0), 100);
     zend_long        percent = evict;
-    int              result  = FATAL_OUT_OF_SMEMORY;
+    int              result = FATAL_OUT_OF_SMEMORY;
     unsigned int     removed = 0;
-    unsigned int     tries   = 0;
-    unsigned char    ran     = 0;
+    unsigned int     tries = 0;
+    unsigned char    ran = 0;
     unsigned char    pending = 0;
-    LONGLONG         spent   = 0;
+    LONGLONG         spent = 0;
     LARGE_INTEGER    started;
 
-    while(result == FATAL_OUT_OF_SMEMORY && tries++ < RECLAIM_TRIES_MAXIMUM)
-    {
-        if(clear_pending(header))
-        {
+    while (result == FATAL_OUT_OF_SMEMORY && tries++ < RECLAIM_TRIES_MAXIMUM) {
+        if (clear_pending(header)) {
             /* The entries that a ucache_clear() left: they free memory, a little at a time */
             sweep_cleared_entries(pcache, SCAVENGER_STEP_BUDGET_US, 0);
             ran = 0;
-        }
-        else
-        {
-            if(header->rcfutile && utils_ticksdiff(GetTickCount64(), header->rcticks) < header->rcwait)
-            {
+        } else {
+            if (header->rcfutile && utils_ticksdiff(GetTickCount64(), header->rcticks) < header->rcwait) {
                 break;
             }
 
-            if(FAILED(zvcache_lock(pcache)))
-            {
+            if (FAILED(zvcache_lock(pcache))) {
                 break;
             }
 
@@ -3944,15 +3598,12 @@ static int make_room(zvcache_context * pcache, const char * key, zvcopy_prepared
             /* pass would free them all under the cache lock, and with ucache.gc.evict also evict what was stored */
             /* since the clear (the cleared entries it frees are not counted) */
             pending = clear_pending(header);
-            if(pending || header->rcgen != gen)
-            {
+            if (pending || header->rcgen != gen) {
                 ran = 0;
-            }
-            else
-            {
+            } else {
                 QueryPerformanceCounter(&started);
                 removed = reclaim_entries(pcache, &percent, minimum);
-                spent   = scavenger_elapsed_us(&started) / 1000;
+                spent = scavenger_elapsed_us(&started) / 1000;
 
                 header->rcgen++;
                 ran = 1;
@@ -3963,35 +3614,30 @@ static int make_room(zvcache_context * pcache, const char * key, zvcopy_prepared
 
             free_pending_entries(pcache);
 
-            if(pending)
-            {
+            if (pending) {
                 sweep_cleared_entries(pcache, SCAVENGER_STEP_BUDGET_US, 0);
             }
         }
 
         result = create_zvcache_data(pcache, key, pprep, ttl, ppnewval);
-        if(result != FATAL_OUT_OF_SMEMORY)
-        {
+        if (result != FATAL_OUT_OF_SMEMORY) {
             header->rcfutile = 0;
             break;
         }
 
-        if(ran && removed == 0)
-        {
-            header->rcwait   = (ULONGLONG)MAX(RECLAIM_FUTILE_MS, MIN(spent * 20, 60000));
-            header->rcticks  = GetTickCount64();
+        if (ran && removed == 0) {
+            header->rcwait = (ULONGLONG)MAX(RECLAIM_FUTILE_MS, MIN(spent * 20, 60000));
+            header->rcticks = GetTickCount64();
             header->rcfutile = 1;
             break;
         }
 
-        if(ran && (evict == 0 || percent >= 100))
-        {
+        if (ran && (evict == 0 || percent >= 100)) {
             /* Nothing more can be removed: the value does not fit in the cache */
             break;
         }
 
-        if(ran)
-        {
+        if (ran) {
             /* The next round evicts until twice as much is free */
             percent = MIN(percent * 2, 100);
         }
@@ -4000,24 +3646,23 @@ static int make_room(zvcache_context * pcache, const char * key, zvcopy_prepared
     return result;
 }
 
-int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsigned int ttl, unsigned char isadd)
-{
-    int             result   = NONFATAL;
-    unsigned int    index    = 0;
-    unsigned char   flock    = 0;
+int zvcache_set(zvcache_context* pcache, const char* key, zval* pzval, unsigned int ttl, unsigned char isadd) {
+    int             result = NONFATAL;
+    unsigned int    index = 0;
+    unsigned char   flock = 0;
     unsigned char   prepared = 0;
-    size_t          peak0    = 0;
-    size_t          minimum  = 0;
-    unsigned int    gen      = 0;
-    zvcache_value * pentry   = NULL;
-    zvcache_value * pnewval  = NULL;
+    size_t          peak0 = 0;
+    size_t          minimum = 0;
+    unsigned int    gen = 0;
+    zvcache_value*  pentry = NULL;
+    zvcache_value*  pnewval = NULL;
     zvcopy_prepared prep;
 
     dprintverbose("start zvcache_set");
 
     _ASSERT(pcache != NULL);
-    _ASSERT(key    != NULL);
-    _ASSERT(pzval  != NULL);
+    _ASSERT(key != NULL);
+    _ASSERT(pzval != NULL);
 
     /* For zvcache_peak_over_memory_limit() */
     peak0 = zend_memory_peak_usage(1);
@@ -4029,8 +3674,7 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
     index = utils_getindex(key, pcache->zvheader->valuecount);
 
     result = zvcache_lock(pcache);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -4040,8 +3684,7 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
 
     /* If key already exists, throw error for add.  A set is a use of the entry only once it has */
     /* stored the new value (a new entry); a set that fails leaves the old entry as it was */
-    if(pentry != NULL && isadd == 1)
-    {
+    if (pentry != NULL && isadd == 1) {
         _ASSERT(pentry->zvalue != 0);
 
         result = WARNING_ZVCACHE_EXISTS;
@@ -4065,13 +3708,11 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
     /* Phase 1: hold the value and serialize its objects, before any shared memory is taken */
     prepared = 1;
     result = copyin_prepare(&prep, pzval);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
-    if(zvcache_peak_over_memory_limit(peak0))
-    {
+    if (zvcache_peak_over_memory_limit(peak0)) {
         result = FATAL_OUT_OF_LMEMORY;
         goto Finished;
     }
@@ -4083,8 +3724,7 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
      * and their full passes evict entries for nothing, and make_room() would evict every entry.
      */
     minimum = copyin_minimum_size(&prep, key);
-    if(pcache->maxfree != 0 && minimum > pcache->maxfree)
-    {
+    if (pcache->maxfree != 0 && minimum > pcache->maxfree) {
         dprintimportant("zvcache_set: the value takes at least %Iu bytes, the empty cache holds %Iu", minimum, pcache->maxfree);
         result = FATAL_OUT_OF_SMEMORY;
         goto Finished;
@@ -4096,54 +3736,45 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
     /* writers left a cleared cache of 512 MB in 11,648 free blocks, where 1 MB no longer fitted (with */
     /* ucache.gc.evict the first such value evicted every entry); with this wait a write waited about 0.1 s at */
     /* most (the budget is checked between batches), and the same clear left about 70 free blocks */
-    if(clear_pending(pcache->zvheader))
-    {
+    if (clear_pending(pcache->zvheader)) {
         sweep_cleared_entries(pcache, CLEAR_WRITE_HELP_US, 0);
     }
 
     /* Phase 2: if entry wasn't found or set was called, create new data */
-    gen    = pcache->zvheader->rcgen;
+    gen = pcache->zvheader->rcgen;
     result = create_zvcache_data(pcache, key, &prep, ttl, &pnewval);
-    if(result == FATAL_OUT_OF_SMEMORY)
-    {
+    if (result == FATAL_OUT_OF_SMEMORY) {
         /* The cache is full */
         result = make_room(pcache, key, &prep, ttl, gen, minimum, &pnewval);
     }
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
     /* Once more before the entry becomes visible, so that the check covers the whole call */
-    if(zvcache_peak_over_memory_limit(peak0))
-    {
+    if (zvcache_peak_over_memory_limit(peak0)) {
         result = FATAL_OUT_OF_LMEMORY;
         goto Finished;
     }
 
     result = zvcache_lock(pcache);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
     flock = 1;
 
-    zvcache_run_scavenger(pcache,0);
+    zvcache_run_scavenger(pcache, 0);
 
     /* Check again after scavenging */
     pentry = find_zvcache_entry(pcache, key, index, 1);
 
     /* some other process already added this entry, destroy cache data */
-    if(pentry != NULL)
-    {
-        if(isadd == 1)
-        {
+    if (pentry != NULL) {
+        if (isadd == 1) {
             result = WARNING_ZVCACHE_EXISTS;
             goto Finished;
-        }
-        else
-        {
+        } else {
             /* Delete the existing entry */
             remove_zvcache_entry(pcache, index, pentry);
             pentry = NULL;
@@ -4158,8 +3789,7 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
 
 Finished:
 
-    if(flock)
-    {
+    if (flock) {
         lock_unlock(pcache->zvlock);
         flock = 0;
     }
@@ -4167,21 +3797,18 @@ Finished:
     /* The entries removed under the lock: a replaced one, expired ones, a scavenger step's */
     free_pending_entries(pcache);
 
-    if(pnewval != NULL)
-    {
+    if (pnewval != NULL) {
         destroy_zvcache_data(pcache, pnewval);
         pnewval = NULL;
     }
 
     /* Last: this can run destructors (see copyin_release) */
-    if(prepared)
-    {
+    if (prepared) {
         copyin_release(&prep);
         prepared = 0;
     }
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in zvcache_set", result);
     }
 
@@ -4190,35 +3817,32 @@ Finished:
     return result;
 }
 
-int zvcache_delete(zvcache_context * pcache, const char * key)
-{
+int zvcache_delete(zvcache_context* pcache, const char* key) {
     int             result = NONFATAL;
-    unsigned int    index     = 0;
-    unsigned char   flock     = 0;
-    zvcache_value * pentry    = NULL;
+    unsigned int    index = 0;
+    unsigned char   flock = 0;
+    zvcache_value*  pentry = NULL;
 
     dprintverbose("start zvcache_delete");
 
     _ASSERT(pcache != NULL);
-    _ASSERT(key    != NULL);
+    _ASSERT(key != NULL);
 
     index = utils_getindex(key, pcache->zvheader->valuecount);
 
     result = zvcache_lock(pcache);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
     flock = 1;
 
-    zvcache_run_scavenger(pcache,0);
+    zvcache_run_scavenger(pcache, 0);
 
     /* An expired entry of key is missing for the caller, and removed on the way */
     pentry = find_zvcache_entry(pcache, key, index, 1);
 
-    if(pentry == NULL)
-    {
+    if (pentry == NULL) {
         result = WARNING_ZVCACHE_EMISSING;
         goto Finished;
     }
@@ -4229,16 +3853,14 @@ int zvcache_delete(zvcache_context * pcache, const char * key)
 
 Finished:
 
-    if(flock)
-    {
+    if (flock) {
         lock_unlock(pcache->zvlock);
         flock = 0;
     }
 
     free_pending_entries(pcache);
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in zvcache_delete", result);
     }
 
@@ -4260,13 +3882,12 @@ Finished:
  * and the scavenger steps that pass them, or by the next ucache_clear(), which takes the sweep over.  A
  * process killed in the middle of the update that clears leaves the cache as it was (see zvcache_lock).
  */
-int zvcache_clear(zvcache_context * pcache)
-{
-    int              result  = NONFATAL;
-    zvcache_header * header  = NULL;
-    ULONGLONG        ticks   = 0;
-    unsigned int     pid     = GetCurrentProcessId();
-    unsigned char    owner   = 0;
+int zvcache_clear(zvcache_context* pcache) {
+    int              result = NONFATAL;
+    zvcache_header*  header = NULL;
+    ULONGLONG        ticks = 0;
+    unsigned int     pid = GetCurrentProcessId();
+    unsigned char    owner = 0;
     unsigned char    pending = 0;
 
     dprintverbose("start zvcache_clear %p", pcache);
@@ -4276,8 +3897,7 @@ int zvcache_clear(zvcache_context * pcache)
     header = pcache->zvheader;
 
     result = zvcache_lock(pcache);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -4295,8 +3915,7 @@ int zvcache_clear(zvcache_context * pcache)
 
     /* This process sweeps, unless another one goes on with the sweep of an earlier clear */
     ticks = GetTickCount64();
-    if(clear_pending(header) && (!pending || header->sweeper == 0 || header->sweeper == pid || utils_ticksdiff(ticks, header->sweepticks) >= CLEAR_SWEEPER_STALE_MS))
-    {
+    if (clear_pending(header) && (!pending || header->sweeper == 0 || header->sweeper == pid || utils_ticksdiff(ticks, header->sweepticks) >= CLEAR_SWEEPER_STALE_MS)) {
         ZVCACHE_SET(pcache, header->sweeper, pid);
         ZVCACHE_SET(pcache, header->sweepticks, ticks);
         owner = 1;
@@ -4309,15 +3928,13 @@ int zvcache_clear(zvcache_context * pcache)
 
     lock_unlock(pcache->zvlock);
 
-    if(owner)
-    {
+    if (owner) {
         sweep_cleared_entries(pcache, 0, 1);
     }
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in zvcache_clear", result);
     }
 
@@ -4326,25 +3943,23 @@ Finished:
     return result;
 }
 
-int zvcache_exists(zvcache_context * pcache, const char * key, unsigned char * pexists)
-{
+int zvcache_exists(zvcache_context* pcache, const char* key, unsigned char* pexists) {
     int             result = NONFATAL;
-    unsigned int    index  = 0;
-    unsigned char   flock  = 0;
-    zvcache_value * pentry = NULL;
+    unsigned int    index = 0;
+    unsigned char   flock = 0;
+    zvcache_value*  pentry = NULL;
 
     dprintverbose("start zvcache_exists");
 
-    _ASSERT(pcache  != NULL);
-    _ASSERT(key     != NULL);
+    _ASSERT(pcache != NULL);
+    _ASSERT(key != NULL);
     _ASSERT(pexists != NULL);
 
     *pexists = 0;
     index = utils_getindex(key, pcache->zvheader->valuecount);
 
     result = zvcache_lock(pcache);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -4352,12 +3967,9 @@ int zvcache_exists(zvcache_context * pcache, const char * key, unsigned char * p
 
     pentry = find_zvcache_entry(pcache, key, index, 1);
 
-    if(pentry == NULL)
-    {
+    if (pentry == NULL) {
         *pexists = 0;
-    }
-    else
-    {
+    } else {
         *pexists = 1;
     }
 
@@ -4365,16 +3977,14 @@ int zvcache_exists(zvcache_context * pcache, const char * key, unsigned char * p
 
 Finished:
 
-    if(flock)
-    {
+    if (flock) {
         lock_unlock(pcache->zvlock);
         flock = 0;
     }
 
     free_pending_entries(pcache);
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in zvcache_exists", result);
     }
 
@@ -4383,15 +3993,13 @@ Finished:
     return result;
 }
 
-static void zvcache_info_entry_dtor(void * pvoid)
-{
-    zvcache_info_entry * pinfo = NULL;
+static void zvcache_info_entry_dtor(void* pvoid) {
+    zvcache_info_entry* pinfo = NULL;
 
     _ASSERT(pvoid != NULL);
-    pinfo = (zvcache_info_entry *)pvoid;
+    pinfo = (zvcache_info_entry*)pvoid;
 
-    if(pinfo->key != NULL)
-    {
+    if (pinfo->key != NULL) {
         alloc_efree(pinfo->key);
         pinfo->key = NULL;
     }
@@ -4404,93 +4012,79 @@ static void zvcache_info_entry_dtor(void * pvoid)
  * key, the entries in the order of the table: the first offset ones are skipped without copying
  * their keys, and at most limit ones are added (all of them with limit 0).
  */
-static int list_zvcache_entries(zvcache_context * pcache, zend_bool summaryonly, char * pkey, zend_ulong offset, zend_ulong limit, ULONGLONG cticks, zend_llist * plist)
-{
-    int                  result   = NONFATAL;
-    zvcache_header *     header   = pcache->zvheader;
-    alloc_context *      palloc   = pcache->zvalloc;
-    zvcache_value *      pvalue   = NULL;
-    unsigned int         index    = 0;
-    zvcache_info_entry   pinfo    = {0};
-    unsigned int         count    = 0;
+static int list_zvcache_entries(zvcache_context* pcache, zend_bool summaryonly, char* pkey, zend_ulong offset, zend_ulong limit, ULONGLONG cticks, zend_llist* plist) {
+    int                  result = NONFATAL;
+    zvcache_header*      header = pcache->zvheader;
+    alloc_context*       palloc = pcache->zvalloc;
+    zvcache_value*       pvalue = NULL;
+    unsigned int         index = 0;
+    zvcache_info_entry   pinfo = { 0 };
+    unsigned int         count = 0;
     zend_ulong           position = 0;
-    zend_ulong           listed   = 0;
+    zend_ulong           listed = 0;
 
-    if(pkey != NULL)
-    {
+    if (pkey != NULL) {
         index = utils_getindex(pkey, header->valuecount);
 
         /* ucache_info() removes nothing */
         pvalue = find_zvcache_entry(pcache, pkey, index, 0);
 
-        if(pvalue != NULL)
-        {
+        if (pvalue != NULL) {
             pinfo.key = alloc_estrdup(ZVCACHE_KEY(pvalue));
-            if(pinfo.key == NULL)
-            {
+            if (pinfo.key == NULL) {
                 result = FATAL_OUT_OF_LMEMORY;
                 goto Finished;
             }
 
-            pinfo.ttl      = pvalue->ttlive;
-            pinfo.age      = (unsigned int)(utils_ticksdiff(cticks, pvalue->add_ticks) / 1000);
-            pinfo.type     = Z_TYPE_P((zval *)ZVALUE(pcache->incopy, pvalue->zvalue));
-            pinfo.sizeb    = pvalue->sizeb;
+            pinfo.ttl = pvalue->ttlive;
+            pinfo.age = (unsigned int)(utils_ticksdiff(cticks, pvalue->add_ticks) / 1000);
+            pinfo.type = Z_TYPE_P((zval*)ZVALUE(pcache->incopy, pvalue->zvalue));
+            pinfo.sizeb = pvalue->sizeb;
             pinfo.hitcount = pvalue->hitcount;
 
             zend_llist_add_element(plist, &pinfo);
         }
-    }
-    else
-    {
+    } else {
         /* Leave count to 0 if only summary is needed */
-        if(!summaryonly)
-        {
+        if (!summaryonly) {
             count = header->valuecount;
         }
 
-        for(index = 0; index < count; index++)
-        {
-            if(header->values[index] == 0)
-            {
+        for (index = 0; index < count; index++) {
+            if (header->values[index] == 0) {
                 continue;
             }
 
             pvalue = ZVCACHE_VALUE(palloc, header->values[index]);
-            while(pvalue != NULL)
-            {
+            while (pvalue != NULL) {
                 /* Cleared entries are not listed, nor counted for offset */
-                if(entry_cleared(header, pvalue) || position++ < offset)
-                {
+                if (entry_cleared(header, pvalue) || position++ < offset) {
                     pvalue = ZVCACHE_VALUE(palloc, pvalue->next_value);
                     continue;
                 }
 
                 pinfo.key = alloc_estrdup(ZVCACHE_KEY(pvalue));
-                if(pinfo.key == NULL)
-                {
+                if (pinfo.key == NULL) {
                     result = FATAL_OUT_OF_LMEMORY;
                     goto Finished;
                 }
 
-                pinfo.ttl      = pvalue->ttlive;
-                pinfo.age      = (unsigned int)(utils_ticksdiff(cticks, pvalue->add_ticks) / 1000);
-                pinfo.type     = Z_TYPE_P((zval *)ZVALUE(pcache->incopy, pvalue->zvalue));
-                pinfo.sizeb    = pvalue->sizeb;
+                pinfo.ttl = pvalue->ttlive;
+                pinfo.age = (unsigned int)(utils_ticksdiff(cticks, pvalue->add_ticks) / 1000);
+                pinfo.type = Z_TYPE_P((zval*)ZVALUE(pcache->incopy, pvalue->zvalue));
+                pinfo.sizeb = pvalue->sizeb;
                 pinfo.hitcount = pvalue->hitcount;
 
                 zend_llist_add_element(plist, &pinfo);
                 pvalue = ZVCACHE_VALUE(palloc, pvalue->next_value);
 
                 /* Many long keys can pass memory_limit (see zvcache_over_memory_limit) */
-                if(zvcache_over_memory_limit())
-                {
+                if (zvcache_over_memory_limit()) {
                     result = FATAL_OUT_OF_LMEMORY;
                     goto Finished;
                 }
 
-                if(limit != 0 && ++listed == limit)
-                {
+                if (limit != 0 && ++listed == limit) {
                     goto Finished;
                 }
             }
@@ -4502,19 +4096,18 @@ Finished:
     return result;
 }
 
-int zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, zend_ulong offset, zend_ulong limit, zvcache_info * pcinfo, zend_llist * plist)
-{
-    int                  result   = NONFATAL;
-    unsigned char        flock    = 0;
-    zvcache_header *     header   = NULL;
-    ULONGLONG            cticks   = 0;
+int zvcache_list(zvcache_context* pcache, zend_bool summaryonly, char* pkey, zend_ulong offset, zend_ulong limit, zvcache_info* pcinfo, zend_llist* plist) {
+    int                    result = NONFATAL;
+    unsigned char          flock = 0;
+    zvcache_header*        header = NULL;
+    ULONGLONG              cticks = 0;
     volatile unsigned char bailout = 0;
 
     dprintverbose("start zvcache_list");
 
     _ASSERT(pcache != NULL);
     _ASSERT(pcinfo != NULL);
-    _ASSERT(plist  != NULL);
+    _ASSERT(plist != NULL);
 
     header = pcache->zvheader;
 
@@ -4522,8 +4115,7 @@ int zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, z
     zend_llist_init(plist, sizeof(zvcache_info_entry), zvcache_info_entry_dtor, 0);
 
     result = zvcache_lock(pcache);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
@@ -4531,15 +4123,15 @@ int zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, z
 
     /* Under the lock: an entry added or a scavenger step run before it was taken would be */
     /* newer than ticks read earlier, and its age would read 0 */
-    cticks  = GetTickCount64();
+    cticks = GetTickCount64();
 
-    pcinfo->hitcount  = header->hitcount;
+    pcinfo->hitcount = header->hitcount;
     pcinfo->misscount = header->misscount;
     pcinfo->itemcount = header->itemcount;
 
     pcinfo->scavenged = (header->scruns != 0);
-    pcinfo->scage     = pcinfo->scavenged ? (unsigned int)(utils_ticksdiff(cticks, header->scticks) / 1000) : 0;
-    pcinfo->sccount   = header->sccount;
+    pcinfo->scage = pcinfo->scavenged ? (unsigned int)(utils_ticksdiff(cticks, header->scticks) / 1000) : 0;
+    pcinfo->sccount = header->sccount;
     pcinfo->scremoved = header->scremoved;
     pcinfo->scevicted = header->scevicted;
     pcinfo->abandoned = header->abandoned;
@@ -4555,14 +4147,13 @@ int zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, z
     {
         result = list_zvcache_entries(pcache, summaryonly, pkey, offset, limit, cticks, plist);
     }
-    zend_catch
+        zend_catch
     {
         bailout = 1;
     }
     zend_end_try();
 
-    if(bailout)
-    {
+    if (bailout) {
         lock_unlock(pcache->zvlock);
         flock = 0;
         zend_bailout();
@@ -4570,14 +4161,12 @@ int zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, z
 
 Finished:
 
-    if(flock)
-    {
+    if (flock) {
         lock_unlock(pcache->zvlock);
         flock = 0;
     }
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in zvcache_list", result);
 
         zend_llist_destroy(plist);
@@ -4588,37 +4177,34 @@ Finished:
     return result;
 }
 
-int zvcache_change(zvcache_context * pcache, const char * key, zend_long delta, zend_long * newvalue)
-{
+int zvcache_change(zvcache_context* pcache, const char* key, zend_long delta, zend_long* newvalue) {
     int             result = NONFATAL;
-    unsigned char   flock  = 0;
-    unsigned int    index  = 0;
-    zvcache_value * pvalue = NULL;
-    zval *          pzval  = NULL;
+    unsigned char   flock = 0;
+    unsigned int    index = 0;
+    zvcache_value*  pvalue = NULL;
+    zval*           pzval = NULL;
 
     dprintverbose("start zvcache_change");
 
-    _ASSERT(pcache   != NULL);
-    _ASSERT(key      != NULL);
+    _ASSERT(pcache != NULL);
+    _ASSERT(key != NULL);
     _ASSERT(newvalue != NULL);
 
     *newvalue = 0;
     index = utils_getindex(key, pcache->zvheader->valuecount);
 
     result = zvcache_lock(pcache);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
     flock = 1;
 
-    zvcache_run_scavenger(pcache,0);
+    zvcache_run_scavenger(pcache, 0);
 
     pvalue = find_zvcache_entry(pcache, key, index, 1);
 
-    if(pvalue == NULL)
-    {
+    if (pvalue == NULL) {
         result = WARNING_ZVCACHE_EMISSING;
         goto Finished;
     }
@@ -4627,10 +4213,9 @@ int zvcache_change(zvcache_context * pcache, const char * key, zend_long delta, 
     pvalue->use_ticks = GetTickCount64();
 
     _ASSERT(pvalue->zvalue != 0);
-    pzval = (zval *)ZVALUE(pcache->incopy, pvalue->zvalue);
+    pzval = (zval*)ZVALUE(pcache->incopy, pvalue->zvalue);
 
-    if(Z_TYPE_P(pzval) != IS_LONG)
-    {
+    if (Z_TYPE_P(pzval) != IS_LONG) {
         result = WARNING_ZVCACHE_NOTLONG;
         goto Finished;
     }
@@ -4641,16 +4226,14 @@ int zvcache_change(zvcache_context * pcache, const char * key, zend_long delta, 
 
 Finished:
 
-    if(flock)
-    {
+    if (flock) {
         lock_unlock(pcache->zvlock);
         flock = 0;
     }
 
     free_pending_entries(pcache);
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in zvcache_change", result);
     }
 
@@ -4659,35 +4242,32 @@ Finished:
     return result;
 }
 
-int zvcache_compswitch(zvcache_context * pcache, const char * key, zend_long oldvalue, zend_long newvalue)
-{
+int zvcache_compswitch(zvcache_context* pcache, const char* key, zend_long oldvalue, zend_long newvalue) {
     int             result = NONFATAL;
-    unsigned char   flock  = 0;
-    unsigned int    index  = 0;
-    zvcache_value * pentry = NULL;
-    zval *          pzval  = NULL;
+    unsigned char   flock = 0;
+    unsigned int    index = 0;
+    zvcache_value*  pentry = NULL;
+    zval*           pzval = NULL;
 
     dprintverbose("start zvcache_compswitch");
 
     _ASSERT(pcache != NULL);
-    _ASSERT(key    != NULL);
+    _ASSERT(key != NULL);
 
     index = utils_getindex(key, pcache->zvheader->valuecount);
 
     result = zvcache_lock(pcache);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
     flock = 1;
 
-    zvcache_run_scavenger(pcache,0);
+    zvcache_run_scavenger(pcache, 0);
 
     pentry = find_zvcache_entry(pcache, key, index, 1);
 
-    if(pentry == NULL)
-    {
+    if (pentry == NULL) {
         result = WARNING_ZVCACHE_EMISSING;
         goto Finished;
     }
@@ -4696,20 +4276,16 @@ int zvcache_compswitch(zvcache_context * pcache, const char * key, zend_long old
     pentry->use_ticks = GetTickCount64();
 
     _ASSERT(pentry->zvalue != 0);
-    pzval = (zval *)ZVALUE(pcache->incopy, pentry->zvalue);
+    pzval = (zval*)ZVALUE(pcache->incopy, pentry->zvalue);
 
-    if(Z_TYPE_P(pzval) != IS_LONG)
-    {
+    if (Z_TYPE_P(pzval) != IS_LONG) {
         result = WARNING_ZVCACHE_NOTLONG;
         goto Finished;
     }
 
-    if(Z_LVAL_P(pzval) == oldvalue)
-    {
+    if (Z_LVAL_P(pzval) == oldvalue) {
         Z_LVAL_P(pzval) = newvalue;
-    }
-    else
-    {
+    } else {
         result = WARNING_ZVCACHE_CASNEQ;
         goto Finished;
     }
@@ -4718,16 +4294,14 @@ int zvcache_compswitch(zvcache_context * pcache, const char * key, zend_long old
 
 Finished:
 
-    if(flock)
-    {
+    if (flock) {
         lock_unlock(pcache->zvlock);
         flock = 0;
     }
 
     free_pending_entries(pcache);
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in zvcache_compswitch", result);
     }
 

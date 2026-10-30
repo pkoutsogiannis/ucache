@@ -38,8 +38,7 @@
 #define _UCACHE_ZVCACHE_H_
 
 typedef struct _zvcache_hashtable_pool_tracker zvcache_hashtable_pool_tracker;
-struct _zvcache_hashtable_pool_tracker
-{
+struct _zvcache_hashtable_pool_tracker {
     size_t        val;                   /* Hashtable *ht; Offset */
     size_t        hoff;                  /* Memory pool offset */
 };
@@ -49,8 +48,7 @@ struct _zvcache_hashtable_pool_tracker
  * ucache_zvcache.c).  Times are GetTickCount64() values, which do not wrap.
  */
 typedef struct zvcache_value zvcache_value;
-struct zvcache_value
-{
+struct zvcache_value {
     size_t            zvalue;            /* Offset of zval value stored */
     size_t            sizeb;             /* Memory allocated for zvalue in bytes */
 
@@ -65,38 +63,37 @@ struct zvcache_value
 };
 
 typedef struct zvcache_header zvcache_header;
-struct zvcache_header
-{
-    unsigned int      mapcount;          /* Number of processes using this zval cache */
-    unsigned int      hitcount;          /* Cache items cumulative hit count */
-    unsigned int      misscount;         /* Cache items cumulative miss count */
-    unsigned int      abandoned;         /* Times a process found the cache lock abandoned since the cache was created */
-    ULONGLONG         init_ticks;        /* GetTickCount64() when the cache was created */
-    unsigned int      last_owner;        /* PID of last owner for lock */
-    unsigned int      undocount;         /* Entries in undo: an update of the cache in progress, 0 between updates; in the 8 */
-                                         /* bytes of last_owner, which every lock_lock() writes (see zvcache_lock) */
+struct zvcache_header {
+    unsigned int      mapcount;                /* Number of processes using this zval cache */
+    unsigned int      hitcount;                /* Cache items cumulative hit count */
+    unsigned int      misscount;               /* Cache items cumulative miss count */
+    unsigned int      abandoned;               /* Times a process found the cache lock abandoned since the cache was created */
+    ULONGLONG         init_ticks;              /* GetTickCount64() when the cache was created */
+    unsigned int      last_owner;              /* PID of last owner for lock */
+    unsigned int      undocount;               /* Entries in undo: an update of the cache in progress, 0 between updates; in the 8 */
+                                               /* bytes of last_owner, which every lock_lock() writes (see zvcache_lock) */
 
-    ULONGLONG         lscavenge;         /* GetTickCount64() of the last scavenger step, or of a look at the free memory that skipped one (see zvcache_run_scavenger) */
-    ULONGLONG         scwait;            /* Milliseconds after lscavenge before a write runs the next step (see zvcache_run_scavenger) */
-    unsigned int      scstart;           /* Index from where scavenger should start */
-    unsigned int      itemcount;         /* Number of active items in zval cache */
-    unsigned int      valuecount;        /* Total values starting from last entry */
-    ULONGLONG         scticks;           /* GetTickCount64() when the last scavenger step ran */
-    unsigned int      sccount;           /* Entries the last scavenger step removed */
-    size_t            scruns;            /* Scavenger steps run since the cache was created */
-    size_t            scremoved;         /* Entries the scavenger removed since the cache was created */
-    size_t            scevicted;         /* Of those, entries evicted before their time (ucache.gc.evict) */
-    ULONGLONG         rcticks;           /* GetTickCount64() of the last full pass for a full cache that left no room */
-    unsigned int      rcfutile;          /* 1: that pass removed nothing and the write still did not fit */
-    ULONGLONG         rcwait;            /* Milliseconds the processes skip the full pass after such a pass */
-    unsigned int      rcgen;             /* Full passes run since the cache was created */
-    unsigned int      cleargen;          /* ucache_clear() calls since the cache was created: the entries added before the last one are cleared */
-    unsigned int      clearitems;        /* Cleared entries still in the table (see sweep_cleared_entries) */
-    unsigned int      clearnext;         /* Next bucket that the sweep of the cleared entries goes through, valuecount when none is left */
-    unsigned int      sweeper;           /* PID of the process that sweeps them to the end (its ucache_clear()), 0 if none */
-    ULONGLONG         sweepticks;        /* GetTickCount64() when that process last went on with it */
+    ULONGLONG         lscavenge;               /* GetTickCount64() of the last scavenger step, or of a look at the free memory that skipped one (see zvcache_run_scavenger) */
+    ULONGLONG         scwait;                  /* Milliseconds after lscavenge before a write runs the next step (see zvcache_run_scavenger) */
+    unsigned int      scstart;                 /* Index from where scavenger should start */
+    unsigned int      itemcount;               /* Number of active items in zval cache */
+    unsigned int      valuecount;              /* Total values starting from last entry */
+    ULONGLONG         scticks;                 /* GetTickCount64() when the last scavenger step ran */
+    unsigned int      sccount;                 /* Entries the last scavenger step removed */
+    size_t            scruns;                  /* Scavenger steps run since the cache was created */
+    size_t            scremoved;               /* Entries the scavenger removed since the cache was created */
+    size_t            scevicted;               /* Of those, entries evicted before their time (ucache.gc.evict) */
+    ULONGLONG         rcticks;                 /* GetTickCount64() of the last full pass for a full cache that left no room */
+    unsigned int      rcfutile;                /* 1: that pass removed nothing and the write still did not fit */
+    ULONGLONG         rcwait;                  /* Milliseconds the processes skip the full pass after such a pass */
+    unsigned int      rcgen;                   /* Full passes run since the cache was created */
+    unsigned int      cleargen;                /* ucache_clear() calls since the cache was created: the entries added before the last one are cleared */
+    unsigned int      clearitems;              /* Cleared entries still in the table (see sweep_cleared_entries) */
+    unsigned int      clearnext;               /* Next bucket that the sweep of the cleared entries goes through, valuecount when none is left */
+    unsigned int      sweeper;                 /* PID of the process that sweeps them to the end (its ucache_clear()), 0 if none */
+    ULONGLONG         sweepticks;              /* GetTickCount64() when that process last went on with it */
     lock_undo_entry   undo[LOCK_UNDO_MAXIMUM]; /* What the update of the cache in progress changed (see lock_undo_write) */
-    size_t            values[1];         /* valuecount zvcache_value offsets */
+    size_t            values[1];               /* valuecount zvcache_value offsets */
 };
 
 /* What phase 1 of a copy-in collected (see copyin_prepare in ucache_zvcache.c) */
@@ -106,47 +103,45 @@ typedef struct zvcopy_prepared zvcopy_prepared;
 typedef struct zvcopy_stack zvcopy_stack;
 
 typedef struct zvcopy_context zvcopy_context;
-struct zvcopy_context
-{
-    unsigned int      oomcode;           /* Out of memory error code to use */
-    void *            palloc;            /* Allocator for alloc_a* functions */
-    char *            pbaseadr;          /* Base address of the segment */
-    size_t            hoffset;           /* Offset of mpool_header */
-    size_t            allocsize;         /* Amount of memory allocated */
+struct zvcopy_context {
+    unsigned int                    oomcode;           /* Out of memory error code to use */
+    void*                           palloc;            /* Allocator for alloc_a* functions */
+    char*                           pbaseadr;          /* Base address of the segment */
+    size_t                          hoffset;           /* Offset of mpool_header */
+    size_t                          allocsize;         /* Amount of memory allocated */
 
-    fn_malloc         fnmalloc;          /* Function to use for malloc */
-    fn_free           fnfree;            /* Function to use for free */
+    fn_malloc                       fnmalloc;          /* Function to use for malloc */
+    fn_free                         fnfree;            /* Function to use for free */
 
     /* In the private copies of incopy and outcopy that create_zvcache_data() and zvcache_get() use */
-    zvcopy_stack *    pstack;            /* The C stack of the copy */
+    zvcopy_stack*                   pstack;            /* The C stack of the copy */
 
     /*
      * Copy-in only, in the private copy of incopy that create_zvcache_data() uses. The last four
      * record what the copy has allocated so far, so that a fatal error (zend_bailout) during the
      * copy can give it back (copyin_rollback).
      */
-    zvcopy_prepared * pprepared;         /* Serialized objects and reference values of the value */
-    zvcache_value *   pnewvalue;         /* The entry being created */
-    zval *            pnewzval;          /* Its top-level zval */
-    zvcache_hashtable_pool_tracker * ptracker; /* Pool tracker of a top-level array */
-    size_t            mpool;             /* Memory pool of a top-level array (offset) */
+    zvcopy_prepared*                pprepared;         /* Serialized objects and reference values of the value */
+    zvcache_value*                  pnewvalue;         /* The entry being created */
+    zval*                           pnewzval;          /* Its top-level zval */
+    zvcache_hashtable_pool_tracker* ptracker;          /* Pool tracker of a top-level array */
+    size_t                          mpool;             /* Memory pool of a top-level array (offset) */
 };
 
 typedef struct zvcache_context zvcache_context;
-struct zvcache_context
-{
+struct zvcache_context {
     unsigned int      id;                /* unique identifier for cache */
     unsigned short    cachekey;          /* unique cache key used in names */
     HANDLE            hinitdone;         /* init mutex (ZVCACHE_INIT), owned while the process creates or opens the cache */
 
-    zvcopy_context *  incopy;            /* zvcopy context to use for non-array copyin */
-    zvcopy_context *  outcopy;           /* zvcopy context to use for all copyout */
+    zvcopy_context*   incopy;            /* zvcopy context to use for non-array copyin */
+    zvcopy_context*   outcopy;           /* zvcopy context to use for all copyout */
 
-    char *            zvmemaddr;         /* base addr of memory segment */
-    zvcache_header *  zvheader;          /* zvcache cache header */
-    filemap_context * zvfilemap;         /* filemap where zvcache is kept */
-    lock_context *    zvlock;            /* lock for zvcache header */
-    alloc_context *   zvalloc;           /* alloc context for zvcache segment */
+    char*             zvmemaddr;         /* base addr of memory segment */
+    zvcache_header*   zvheader;          /* zvcache cache header */
+    filemap_context*  zvfilemap;         /* filemap where zvcache is kept */
+    lock_context*     zvlock;            /* lock for zvcache header */
+    alloc_context*    zvalloc;           /* alloc context for zvcache segment */
     size_t            freelist;          /* Entries unlinked under the lock, freed once it is released (chained by next_value) */
     unsigned int      freecount;         /* How many entries freelist holds */
     size_t            maxfree;           /* The most the cache holds, its free memory when it is empty (alloc_capacity); 0 if not known */
@@ -154,8 +149,7 @@ struct zvcache_context
 };
 
 typedef struct zvcache_info zvcache_info;
-struct zvcache_info
-{
+struct zvcache_info {
     unsigned int      initage;           /* Seconds elapsed after cache init */
     unsigned int      hitcount;          /* Cumulative hitcount of zvcache */
     unsigned int      misscount;         /* Cumulative misscount of zvcache */
@@ -169,9 +163,8 @@ struct zvcache_info
 };
 
 typedef struct zvcache_info_entry zvcache_info_entry;
-struct zvcache_info_entry
-{
-    char *            key;               /* cache item key */
+struct zvcache_info_entry {
+    char*             key;               /* cache item key */
     unsigned int      ttl;               /* ttl of this entry */
     unsigned int      age;               /* Age in seconds */
     zend_uchar        type;              /* type of zval which is stored as value */
@@ -179,27 +172,27 @@ struct zvcache_info_entry
     unsigned int      hitcount;          /* hitcount for this entry */
 };
 
-extern int  zvcache_create(zvcache_context ** ppcache);
-extern void zvcache_destroy(zvcache_context * pcache);
+extern int  zvcache_create(zvcache_context** ppcache);
+extern void zvcache_destroy(zvcache_context* pcache);
 
 extern int  zvcache_initialize(
-    zvcache_context * pcache,
+    zvcache_context* pcache,
     unsigned short cachekey,
     unsigned int cachesize
-    );
+);
 
-extern void zvcache_terminate(zvcache_context * pcache);
+extern void zvcache_terminate(zvcache_context* pcache);
 
-extern int  zvcache_get(zvcache_context * pcache, const char * key, zval ** pvalue);
-extern int  zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsigned int ttl, unsigned char isadd);
-extern int  zvcache_delete(zvcache_context * pcache, const char * key);
-extern int  zvcache_clear(zvcache_context * pcache);
-extern int  zvcache_exists(zvcache_context * pcache, const char * key, unsigned char * pexists);
-extern int  zvcache_list(zvcache_context * pcache, zend_bool summaryonly, char * pkey, zend_ulong offset, zend_ulong limit, zvcache_info * pcinfo, zend_llist * plist);
-extern int  zvcache_change(zvcache_context * pcache, const char * key, zend_long delta, zend_long * newvalue);
-extern int  zvcache_compswitch(zvcache_context * pcache, const char * key, zend_long oldvalue, zend_long newvalue);
-extern int  zvcache_run_scavenger(zvcache_context * pcache, unsigned int force);
-extern void zvcache_scavenge_periodic(zvcache_context * pcache);
+extern int       zvcache_get(zvcache_context* pcache, const char* key, zval** pvalue);
+extern int       zvcache_set(zvcache_context* pcache, const char* key, zval* pzval, unsigned int ttl, unsigned char isadd);
+extern int       zvcache_delete(zvcache_context* pcache, const char* key);
+extern int       zvcache_clear(zvcache_context* pcache);
+extern int       zvcache_exists(zvcache_context* pcache, const char* key, unsigned char* pexists);
+extern int       zvcache_list(zvcache_context* pcache, zend_bool summaryonly, char* pkey, zend_ulong offset, zend_ulong limit, zvcache_info* pcinfo, zend_llist* plist);
+extern int       zvcache_change(zvcache_context* pcache, const char* key, zend_long delta, zend_long* newvalue);
+extern int       zvcache_compswitch(zvcache_context* pcache, const char* key, zend_long oldvalue, zend_long newvalue);
+extern int       zvcache_run_scavenger(zvcache_context* pcache, unsigned int force);
+extern void      zvcache_scavenge_periodic(zvcache_context* pcache);
 extern zend_bool zvcache_over_memory_limit(void);
 extern zend_bool zvcache_peak_over_memory_limit(size_t peak0);
 

@@ -45,17 +45,17 @@
 /* #define UCACHE_DEBUG */
 
 #ifdef PHP_WIN32
- #define PHP_UCACHE_API __declspec(dllexport)
+#define PHP_UCACHE_API __declspec(dllexport)
 #else
- #define PHP_UCACHE_API
+#define PHP_UCACHE_API
 #endif
 
 #ifdef HAVE_CONFIG_H
- #include "config.h"
+#include "config.h"
 #endif
 
 #ifdef ZTS
- #include "TSRM.h"
+#include "TSRM.h"
 #endif
 
 #include "php.h"
@@ -87,7 +87,7 @@
 #define STRVER2(maj, min)              XSTRVER2(maj, min)
 
 #ifdef _ASSERT
- #undef _ASSERT
+#undef _ASSERT
 #endif
 
 #ifdef UCACHE_DEBUG
