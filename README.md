@@ -183,10 +183,11 @@ way).
 
 Defines the folder of a file that backs the shared memory instead of the paging file. Only used for the cache of an
 IIS application pool: when `ucache.apppoolid` or `APP_POOL_ID` groups the processes and names an application pool,
-whose account (`IIS APPPOOL\<name>`) is given access to the file. The caches of other pool ids, and of processes
-grouped by their parent process, stay in the paging file. An empty value is the same as not setting it. If the file
-cannot be created or opened in the folder (it does not exist, or the pool's account cannot write to it), the cache is
-not created, with a startup warning that names the setting.
+whose account (`IIS APPPOOL\<name>`) is given access to the file. The caches of processes grouped by their parent
+process stay in the paging file; so do those of other pool ids, but only once their file could be created in the folder
+(it is then deleted, since no IIS APPPOOL account of that name can be given access to it). An empty value is the same as
+not setting it. If the file cannot be created or opened in the folder (it does not exist, or the account of the process
+cannot write to it), the cache is not created, whatever the pool id, with a startup warning that names the setting.
 
 `ucache.debuglevel` *int*
 
@@ -290,9 +291,10 @@ The processes that share a cache must use the same `ucache.*` settings. Two site
 applications still share the pool's cache: give them different `ucache.namesalt` values if their settings differ.
 php-cgi reads the settings when it starts: after changing them, recycle the pool. After changing `ucache.size`, stop the
 pool and, once its php-cgi processes have exited, start it again instead: an overlapped recycle (the IIS default) starts
-the new processes while the old ones still run, and the new processes would open the cache of the old ones, at its old
-size, for as long as old and new processes overlap (see [Installation](#installation)). `phpinfo()` on a site shows the
-settings its processes use.
+the new processes while the old ones still run, and the new processes would open the cache of the old ones and keep its
+old size, also after the old ones have exited: a cache keeps the size it was created with for as long as any process of
+the pool has it open, which under steady traffic can be until the pool is stopped (see [Installation](#installation)).
+`phpinfo()` on a site shows the settings its processes use.
 
 ### Resource Types
 
@@ -450,6 +452,10 @@ holds the cache lock: the next process takes the lock, which the end of its owne
 unserializes each object as a top-level `serialize()` or `unserialize()` would, independently of any `serialize()` or
 `unserialize()` that the caller is in the middle of.
 
+Every call takes the cache lock for its lookup, so processes that call the cache back to back take turns and together
+make no more calls than one process alone (on PHP 7.2, 4 or 8 processes calling `ucache_get()` back to back made about a
+third as many calls, together, as one), while at a thousand calls a second the lock is busy about 0.1% of the time.
+
 ### memory_limit
 
 `ucache_set()` and `ucache_add()` serialize every object of the value before they copy anything into the cache. Each
@@ -562,9 +568,9 @@ tries again. When a full pass removed nothing (with `ucache.gc.evict`, the cache
 still did not fit, the processes that share the cache skip the pass for a while, at least a second and 20 times as
 long as the pass took (at most a minute): their writes that run out of memory meanwhile fail at once (so do the
 following keys of an array form), and an entry that expires meanwhile is removed by the next pass. While a
-`ucache_clear()` is freeing the entries of the cache (see [Freeing memory](#freeing-memory)), a write that runs out of
-memory helps it free them for about a millisecond and tries again, instead of running a full pass, up to 16 times; if
-the value still does not fit, the call fails.
+`ucache_clear()` is freeing the entries of the cache, a write first helps it for up to 0.1 second (see
+[Freeing memory](#freeing-memory)); one that then runs out of memory helps it for about a millisecond at a time and
+tries again, instead of running a full pass, up to 16 times; if the value still does not fit, the call fails.
 
 The memory a value takes is counted before anything is copied: its strings, arrays and references and the
 serializations of its objects, each once however often it occurs, but not the cache's own overheads (about 40 bytes
@@ -603,19 +609,27 @@ while the last process of the pool exits), which is not counted.
 
 `ucache_clear()` clears the cache at once, under the cache lock: from then on no process sees the entries that were in
 it (the calls miss them, the listing and `total_item_count` leave them out), and an entry stored afterwards is kept.
-Then it removes them and frees their memory in batches: each batch takes the cache lock for at most 32 entries (fewer
-if their values took 256 KB) or 4096 hash buckets, and frees its entries once the lock is released, taking the lock of
-the allocator once for the batch. So the other processes go on reading and writing meanwhile, and wait for one batch at
-most. The call returns once the batches are done. A `ucache_clear()` while another process is still freeing the
-entries of an earlier one clears the cache at once in the same way and returns: that process goes on, through the
-whole table again. Meanwhile, a write that runs out of memory helps for about a millisecond at a time (see
+Then it removes them and frees their memory in batches: each batch takes the cache lock for at most 32 entries (fewer if
+their values took 256 KB) or 4096 hash buckets, and frees its entries once the lock is released, taking the lock of the
+allocator once for the batch. So the other processes go on reading and writing meanwhile: a read waits for one batch at
+most, or a few milliseconds while several processes free entries at once, and a `ucache_set()` or `ucache_add()` first
+runs batches itself, for about 0.1 second at most, before it stores its value (each key of the array forms does, so that
+an array form of many keys can wait until the entries are all freed). A value stored while entries are still being
+freed goes in the hole of one of them and stays there, between free blocks that would otherwise be joined, so that
+values larger than the gaps between such values would not fit afterwards, however much of the cache is free: the wait
+keeps such values few. `ucache_clear()` returns once the batches are done. A `ucache_clear()` while another process is
+still freeing the entries of an earlier one clears the cache at once in the same way and returns: that process goes on,
+through the whole table again. Meanwhile, a write that runs out of memory helps for about a millisecond at a time (see
 [A full cache](#a-full-cache)), and so does the end of every request while `ucache.gc.interval` > 0. Measured on PHP 7.2
 with a full cache of 512 MB (2.5 million entries of about 200 bytes): the clear took 1.5 to 2.1 seconds; meanwhile a
-read in another process waited at most 0.6 ms, a small write 2 ms, and a write of 1000 bytes, which needed memory,
-at most 19 ms (35 of 15,608 such writes failed), and a second `ucache_clear()` took less than 0.1 ms. If the process
-that frees the entries is killed, the cache stays cleared, and the entries left are freed by those helpers, by the
-lookups and steps that pass them, or by the next `ucache_clear()`, which takes over once that process has done nothing
-for a second.
+read in another process waited at most 0.6 ms; a write of 10 bytes, about 0.1 second at most; a write of 1000 bytes,
+which needed memory, at most 0.12 second, and such writes failed until the freed memory formed blocks large enough for
+them (7 of the 27 made during the clear); and a second `ucache_clear()` took less than 0.1 ms. With 4 processes storing
+small values during the clear of a full cache of 512 MB (1.4 million entries), a read in another process waited about
+4 ms at most, and the clear left the memory in about 70 free blocks, where a value of 8 MB fitted. If the process that
+frees the entries is killed, the cache stays cleared, and the entries left are freed by those helpers, by the lookups
+and steps that pass them, or by the next `ucache_clear()`, which takes over once that process has done nothing for a
+second.
 
 ### What ucache_info() reports
 
@@ -1830,8 +1844,9 @@ with opcache (`-d zend_extension=%PHP_DIR%\ext\php_opcache.dll -d opcache.enable
 values into shared memory and back (nested, packed and sparse arrays, references, objects and their serialization
 methods, the enums, readonly properties and weak references of the versions that have them), request and shared
 memory leaks, argument errors, the scavenger, named arguments (PHP 8), typed `$success` properties (PHP 7.4 and
-later) and deep values in a Fiber (PHP 8.1 and later). It prints one `OK`/`FAIL` line per check (`SKIP` for a section
-it cannot run) and exits with 1 if a check failed. It clears the cache it runs against, and needs:
+later) and deep values in a Fiber (PHP 8.1 and later). It prints one `OK`/`FAIL` line per check (`SKIP` for a section it
+cannot run, and a `NOTE` line in place of a check of times none of whose 3 attempts ran on time, as on a loaded machine)
+and exits with 1 if a check failed. It clears the cache it runs against, and needs:
 
 - `-n` (no php.ini), so that it can check the defaults of the `ucache.*` settings; settings given with `-d` are not
   checked, so `-d ucache.apppoolid=...` or `-d ucache.namesalt=...` can keep it away from another cache;
@@ -1875,9 +1890,10 @@ Builds compiled with `UCACHE_DEBUG` (which defines `UCACHE_TEST`) also have `uca
 error code of the user cache in this process, and check their internal assertions: a failed one is written to the debug
 trace (with `ucache.debuglevel` 101 or more) and breaks into a debugger that is attached.
 
-To debug the DLL with symbols, set `GenerateDebugInformation` to `true` in the `Link` settings of
-`php_ucache.vcxproj` on your machine: the build then writes a PDB file next to the DLL and puts its path in the DLL,
-so the check of `test-build.php` that the DLL holds no path of the build machine fails for that build.
+To debug the DLL with symbols, set `GenerateDebugInformation` to `true` in the `Link` settings of `php_ucache.vcxproj`
+on your machine and build with MSBuild, as in the commands of [Compiling and building](#compiling-and-building)
+(`build.bat` deletes the PDB files next to the DLL): the build then writes a PDB file next to the DLL and puts its path
+in the DLL, so the check of `test-build.php` that the DLL holds no path of the build machine fails for that build.
 
 ## Migrating from WinCache
 
@@ -1945,13 +1961,14 @@ Several of these change what existing code sees.
 - Deleting, replacing or scavenging an entry, and storing a value, take the same time however many entries and free
   blocks the cache holds: free blocks are kept in lists by size, and a block is split only when the rest can hold the
   smallest block the cache asks for (16 bytes). Deleting every second one of 100,000 entries takes about 0.1 second, and
-  with 125,000 free blocks too small for them, 2000 sets of a 1000-byte string take about 0.01 second. WinCache 2.0.0.8
-  walked the blocks that follow a freed block in shared memory to find the next free one, and kept its free blocks in
-  one list in address order, from which it took the first one large enough, so a delete took time in proportion to the
-  number of entries and a write in proportion to the free blocks before the one it took: deleting every second one of
-  10,000 entries took 0.8 seconds, of 100,000 entries minutes, with every process of the pool waiting for the allocator
-  meanwhile. It also split a block when 4 bytes or more were left, leaving free blocks that nothing could use, which
-  every search then went past.
+  with 125,000 free blocks too small for them, 2000 sets of a 1000-byte string take about 0.01 second. Only a value
+  whose list holds many free blocks a little too small for it, while the lists of larger sizes are empty, goes through
+  its list (about 0.2 ms with 50,000 such blocks). WinCache 2.0.0.8 walked the blocks that follow a freed block in
+  shared memory to find the next free one, and kept its free blocks in one list in address order, from which it took the
+  first one large enough, so a delete took time in proportion to the number of entries and a write in proportion to the
+  free blocks before the one it took: deleting every second one of 10,000 entries took about 0.08 second, of 100,000
+  entries about 8 seconds, with every process of the pool waiting for the allocator meanwhile. It also split a block
+  when 4 bytes or more were left, leaving free blocks that nothing could use, which every search then went past.
 - A stored array takes the memory it holds: its tables and strings are counted before they are copied and go in one
   block of that size, each string once however often it occurs. A row of 14 short strings takes about 2.1 KB with the
   entry, an array of 100 such rows about 100 KB, and deleting, replacing, clearing or expiring an entry frees a few
@@ -1959,20 +1976,22 @@ Several of these change what existing code sees.
   of an array in chunks of 512 bytes, 1 KB or 4 KB, by the size of the part, which a small table left mostly empty, and
   it freed a large entry in time quadratic in its size, while the cache lock was held: for an entry of 100,000 small
   arrays it took 14-21 s, and every other process waited.
-- `ucache_clear()` holds the cache lock only for a moment: the cache is empty for every process at once, and its
-  entries are then freed in batches of at most 32, the lock released between them, so the other processes go on
-  reading and writing (with a full cache of 512 MB, a read in another process waited at most 0.6 ms during a clear of
-  1.5 to 2.1 seconds); a `ucache_clear()` while the entries of an earlier one are being freed returns at once; and a
+- `ucache_clear()` holds the cache lock only for a moment: the cache is empty for every process at once, and its entries
+  are then freed in batches of at most 32, the lock released between them, so the other processes go on reading and
+  writing (with a full cache of 512 MB, a read in another process waited at most 0.6 ms during a clear of 1.5 to
+  2.1 seconds (about 4 ms with 4 processes writing meanwhile), and a write about 0.1 second at most, while it helped
+  free the entries); a `ucache_clear()` while the entries of an earlier one are being freed returns at once; and a
   process killed during the clear leaves the cache cleared (see [Freeing memory](#freeing-memory)). WinCache 2.0.0.8
-  freed every entry under the cache lock, so every other process of the pool waited until the clear ended, and a
-  process killed during the clear left the entries it had not reached in the cache.
+  freed every entry under the cache lock, so every other process of the pool waited until the clear ended, and a process
+  killed during the clear left the entries it had not reached in the cache.
 - Lookups stay fast as the cache fills: the hash table has one bucket per 512 bytes of `ucache.size` (16381 for the
   default 8 MB, 262139 for 128 MB), so its chains hold 2 to 3 entries on average even in a cache full of the smallest
-  entries, and the whole key is hashed. WinCache 2.0.0.8 had one bucket per 32 to 64 KB (197 for 8 MB, 3203 for
-  128 MB) and put every key longer than 260 characters into the same bucket. With 500,000 entries of 40-character
-  keys in 128 MB, its chains would hold about 156 entries: a read through chains that long takes about 8
-  microseconds, 16 for a missing key, against about 1 with UCache's table. 5,000 keys of 300 characters in one chain
-  make a read take about 8 microseconds and a miss 14, against 1.5 when they are spread.
+  entries, and the whole key is hashed. WinCache 2.0.0.8 had one bucket per 32 to 64 KB (197 for 8 MB, 3203 for 128 MB)
+  and put every key longer than 260 characters into the same bucket. With 500,000 entries of 40-character keys in
+  128 MB, its chains held about 156 entries, and a read compared its key with theirs one by one: it took about
+  9 microseconds, 17 for a missing key, with keys that differ from their first characters, and about 10 and 20 with keys
+  that share their first 33, against about 1 with UCache's table. 5,000 keys of 300 characters in one chain made a read
+  take about 13 microseconds and a miss 26, against about 1.3 when they are spread.
 - A `ttl` is taken as given up to 4294967295 seconds, and as 4294967295 above. WinCache 2.0.0.8 cut it to 32 bits:
   2147483648 to 4294967295 were refused as negative ttls, 4294967296 meant no expiry and 4294967297 one second.
 - UCache measures times with the 64-bit millisecond tick count of Windows, which does not wrap: an entry expires on
@@ -2068,9 +2087,9 @@ Several of these change what existing code sees.
   `__sleep()`, `__serialize()`, `__wakeup()`, `__unserialize()`, `Serializable::serialize()` and
   `Serializable::unserialize()` do not run under the lock, and readers do not wait while a value is copied in.
   WinCache 2.0.0.8 did both under the lock. The cost: with several processes writing small values at once, aggregate
-  `ucache_set()` throughput is lower than with WinCache 2.0.0.8 (about 1.4 to 1.7 times lower for `[1, 2, 3]` with 2
+  `ucache_set()` throughput is lower than with WinCache 2.0.0.8 (about 1.3 to 1.7 times lower for `[1, 2, 3]` with 2
   to 6 writers on PHP 7.2), because concurrent copies take turns on the allocator's lock for each allocation. The parts
-  of an array take one allocation, so for nested arrays it is higher (about 1.2 to 2 times higher with 2 to 6
+  of an array take one allocation, so for nested arrays it is higher (about 1.2 to 1.9 times higher with 2 to 6
   writers). A single writer is faster.
 - The UCache functions work inside `Serializable::serialize()` and `Serializable::unserialize()`: UCache serializes
   and unserializes each object independently of the caller's `serialize()` or `unserialize()` (see

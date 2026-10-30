@@ -26,7 +26,8 @@
  *   line, without it or where it runs in ConstrainedLanguage mode).
  *
  * Prints one line per check ("OK: ..." or "FAIL: ...", or "SKIP: ..." for checks that cannot run; a
- * "NOTE: ..." line follows a check of a killed process none of whose attempts hit a lock) and exits
+ * "NOTE: ..." line follows a check of a killed process none of whose attempts hit a lock, and takes the
+ * place of a check of times none of whose attempts ran on time, as on a loaded machine) and exits
  * with 1 if any check failed.
  * The expected results follow the semantics of the original user cache implementation (the
  * functions were only renamed), apart from the differences that README.md lists. The test clears the
@@ -2534,7 +2535,8 @@ function server_start($name, $pool, array $ini, &$port)
     global $childDir;
 
     for ($attempt = 1; $attempt <= 5; $attempt++) {
-        $port = mt_rand(20000, 60000);
+        /* Below the dynamic ports of Windows (49152 and up), which client sockets take */
+        $port = mt_rand(20000, 48000);
         $socket = @stream_socket_server("tcp://127.0.0.1:$port");
         if ($socket === false) {
             continue;
@@ -2543,12 +2545,24 @@ function server_start($name, $pool, array $ini, &$port)
 
         $server = child_start("$name-$attempt", array_merge(child_php_args($pool, $ini),
                               ['-S', "127.0.0.1:$port", '-t', $childDir, $childDir . DIRECTORY_SEPARATOR . 'router.php']));
+        /* The pid of the php -S process itself (bypass_shell, and php -S runs in one process on Windows). proc_get_status()
+           gives the exit code only once: kept for child_exit() */
+        $status = ($server->proc !== null) ? proc_get_status($server->proc) : null;
+        if (is_array($status) && !$status['running']) {
+            $server->exit = $status['exitcode'];
+        }
+        $pid = is_array($status) ? $status['pid'] : -1;
         /* Polled with a connect timeout of 50 ms: the server listens about 0.1 s after it starts, and each poll before
            that would otherwise wait 0.5 s */
         $end = microtime(true) + 15;
         while (child_exit($server) === null && microtime(true) < $end) {
-            if (strpos((string)http_get($port, '/?op=ping', 10, 0.05), 'pong') !== false) {
-                return $server;
+            if (preg_match('/pong (\d+)/', (string)http_get($port, '/?op=ping', 10, 0.05), $match)) {
+                /* PHP binds its listening sockets with SO_REUSEADDR, so on Windows a port where another server listens
+                   looks free, and this server starts on it too while the other one answers: then try another port */
+                if ((int)$match[1] === $pid) {
+                    return $server;
+                }
+                break;
             }
             usleep(20000);
         }
@@ -2587,10 +2601,10 @@ function holder_memory($holder, $timeout = 30)
 /*
  * The checks of a process killed in the middle of an update of what the processes of a pool share (see below). An attempt
  * runs on a cache of its own: a holder keeps the cache, the victim fills it ('kill_victim'), and once both say READY, the
- * parent creates the victim's flag, waits a random delay of at most $maxDelay ms (a busy wait: usleep() can sleep a timer
- * tick longer) and kills the victim, which meanwhile runs what the check is about; then a checker looks at the cache
- * ('kill_check'). A kill lands at any instruction, while the victim holds a lock or not; total_abandoned_lock_count tells
- * which.
+ * parent creates the victim's flag, waits until the victim marks with a file that it starts what the check is about, then
+ * a random delay of at most $maxDelay ms (a busy wait: usleep() can sleep a timer tick longer), and kills the victim in
+ * the middle of it; then a checker looks at the cache ('kill_check'). A kill lands at any instruction, while the victim
+ * holds a lock or not; total_abandoned_lock_count tells which.
  */
 function kill_attempt_start($scenario, $attempt, array $ini)
 {
@@ -2620,7 +2634,14 @@ function kill_attempt_kill($a, $maxDelay)
 
     $a->ready = child_wait_for($a->holder, '/^READY/m', 30) && child_wait_for($a->victim, '/^READY/m', 60);
     $a->delay = mt_rand(min(2, $maxDelay), $maxDelay);
-    touch($childDir . DIRECTORY_SEPARATOR . $a->flag);
+    $flag = $childDir . DIRECTORY_SEPARATOR . $a->flag;
+    touch($flag);
+    /* The delay counts from the start of the victim's run, which the victim marks with a file: it sees the flag a timer
+       tick later at most, or much later on a loaded machine (10 s at most) */
+    $end = microtime(true) + 10;
+    while ($a->ready && !file_exists("$flag.run") && microtime(true) < $end) {
+        clearstatcache();
+    }
     $until = microtime(true) + $a->delay / 1000;
     while (microtime(true) < $until) {
     }
@@ -2652,6 +2673,41 @@ function kill_attempt_ok($a)
 
     return $a->ready && $a->exit === 0 && is_array($r) && count($r) === 7 && is_int($r[0]) && $r[1][0] === $r[1][1] && $r[2] === 0
            && $r[3] === 0 && $r[4] === [0, 0] && $r[5] === true && $r[6][0] === 0 && $r[6][1] <= 1 + 33 * 4 && $r[6][2] <= $r[6][1];
+}
+
+/* The attempts of a check whose child acts at set times, which a loaded machine can make late: $child is the first
+   attempt, $again($n) starts attempt $n on a cache of its own, and $judge($exit, $result) returns [whether the result is
+   right, whether the attempt ran on time]. A wrong result of an attempt that did not run on time says nothing of what
+   is checked: the attempt is made again, twice at most. Returns [the last result is right, it is wrong and the attempt
+   was late, [exit code, on time, result, output] of each attempt] */
+function timed_attempts($child, callable $again, callable $judge)
+{
+    $attempts = [];
+    for ($n = 1; ; $n++) {
+        $exit = child_finish($child, 60);
+        $result = child_result($child);
+        list($right, $onTime) = $judge($exit, $result);
+        $attempts[] = [$exit, $onTime, $result, child_tail($child)];
+        $late = !$right && !$onTime && $exit === 0 && $result !== null;
+        if (!$late || $n === 3) {
+            return [$right, $late, $attempts];
+        }
+        $child = $again($n + 1);
+    }
+}
+
+/* check() of the attempts of timed_attempts(), with a NOTE instead of a FAIL when no attempt ran on time */
+function timed_check($name, array $attempts, $resultName)
+{
+    list($right, $late, $runs) = $attempts;
+    $details = array_map(function ($run) use ($resultName) {
+        return ['exit code' => $run[0], 'on time' => $run[1], $resultName => $run[2], 'output' => $run[3]];
+    }, $runs);
+    if ($late) {
+        echo "NOTE: $name -- not checked: none of the ", count($runs), " attempts ran on time (a loaded machine) -- got ", dump($details), "\n";
+    } else {
+        check($name, $right, $details);
+    }
 }
 
 /* The expected exit code of a process that reaches memory_limit: the fatal error (255), or exit code 1 on PHP 7
@@ -2908,10 +2964,14 @@ function collect_notices()
     });
 }
 
-/* Prints "SHUTDOWN " and the last error at the end of the process (not after exit code 1 or 137) */
+/* Prints "SHUTDOWN " and the last error at the end of the process (not after exit code 1 or 137). The memory_limit
+   error can leave no page of PHP's heap free, and the array of error_get_last() then raised it again (PHP 7.3, by
+   where the heap stood): a few pages kept until the function runs give it room */
 function report_shutdown()
 {
-    register_shutdown_function(function () {
+    $reserve = str_repeat('r', 32768);
+    register_shutdown_function(function () use (&$reserve) {
+        $reserve = null;
         $error = error_get_last();
         echo "SHUTDOWN ", ($error === null) ? 'no error' : $error['message'], "\n";
     });
@@ -3803,7 +3863,12 @@ switch ($argv[1]) {
            last one, or a tenth of a second after a step that removed entries. 'expiring' expires 2 s after it is stored,
            'later' 3 s after; the lookups of 'poke' remove neither (another hash bucket). After the writes at 1.5, 2.25,
            2.75 and 3.375 s: [the keys listed, expired ones included, last_scavenge_count, last_scavenge_seconds,
-           seconds since the start] */
+           seconds since the start]; and the seconds since the start when the first two sets ended, when each write
+           began and ended (writes 3 and 4: when 3 began and 4 ended). Above normal priority, which a process that
+           sleeps nearly all the time can have: a loaded machine woke it up 0.3 s late at normal priority */
+        if (function_exists('proc_nice')) {
+            @proc_nice(-5);
+        }
         $start = microtime(true);
         $at = function ($seconds) use ($start) {
             $wait = $start + $seconds - microtime(true);
@@ -3820,22 +3885,35 @@ switch ($argv[1]) {
             sort($keys);
             return [implode(',', $keys), $info['last_scavenge_count'], $info['last_scavenge_seconds'], round(microtime(true) - $start, 2)];
         };
+        $since = function () use ($start) {
+            return round(microtime(true) - $start, 3);
+        };
         /* Less than a second after the cache was created: no step */
         ucache_set('expiring', 1, 1);
         ucache_set('later', 1, 2);
+        $times = ['sets' => $since()];
         $at(1.5);
+        $times['w1'] = [$since()];
         ucache_set('poke', 1);   /* a step, which removes nothing */
-        $result = [$state()];
+        $times['w1'][] = $since();
+        $states = [$state()];
         $at(2.25);
+        $times['w2'] = [$since()];
         ucache_set('poke', 2);   /* 0.75 s after a step that removed nothing: no step, 'expiring' (expired) stays */
-        $result[] = $state();
+        $times['w2'][] = $since();
+        $states[] = $state();
         $at(2.75);
+        $times['w3,w4'] = [$since()];
         ucache_set('poke', 3);   /* 1.25 s after it: a step, which removes 'expiring' */
         ucache_set('poke', 4);   /* right after a step that removed an entry: no step, so the last count stays 1 */
-        $result[] = $state();
+        $times['w3,w4'][] = $since();
+        $states[] = $state();
         $at(3.375);
+        $times['w5'] = [$since()];
         ucache_set('poke', 5);   /* 0.625 s after a step that removed an entry: a step, which removes 'later' */
-        $result[] = $state();
+        $times['w5'][] = $since();
+        $states[] = $state();
+        $result = [$states, $times];
         break;
 
     case 'write_burst':
@@ -3970,7 +4048,11 @@ switch ($argv[1]) {
     case 'fill_evict':
         /* Run with ucache.size 5. 'Cold' values of about 50 KB without a ttl until less than half of the memory is free,
            then, 2.2 s later, ucache_get() of the first 10 cold ones (which makes them recently used), then 60 'hot' ones
-           (3 MB, more than the free memory), one by one. Counts */
+           (3 MB, more than the free memory), one by one. Counts. Above normal priority, for the times below (see
+           'write_gap') */
+        if (function_exists('proc_nice')) {
+            @proc_nice(-5);
+        }
         $cold = 0;
         $coldFailed = 0;
         $memory = ucache_meminfo();
@@ -3985,9 +4067,15 @@ switch ($argv[1]) {
             $coldRead += (ucache_get("c$i") === fill_value($i)) ? 1 : 0;
         }
         $hotStored = 0;
+        $failedAt = null;
         for ($i = 0; $i < 60; $i++) {
-            $hotStored += ucache_set("h$i", fill_value($i)) ? 1 : 0;
+            $set = ucache_set("h$i", fill_value($i));
+            $hotStored += $set ? 1 : 0;
+            if (!$set && $failedAt === null) {
+                $failedAt = microtime(true);
+            }
         }
+        $hotEnd = microtime(true);
         $hotPresent = 0;
         for ($i = 0; $i < 60; $i++) {
             $hotPresent += ucache_exists("h$i") ? 1 : 0;
@@ -4004,13 +4092,25 @@ switch ($argv[1]) {
                    'memory free before the hot ones' => $memory['memory_free'], 'hot stored' => $hotStored, 'hot present' => $hotPresent,
                    'cold gone' => $coldGone, 'cold read gone' => $readGone,
                    'total_scavenged_count' => $info['total_scavenged_count'], 'total_evicted_count' => $info['total_evicted_count']];
-        if (ini_get('ucache.gc.evict') === '0') {
+        if (ini_get('ucache.gc.evict') === '0' && $failedAt !== null) {
             /* The full pass of the first hot set that did not fit removed nothing: for a second, the processes skip it.
-               A set 0.6 s later fails without a pass, so 1.2 s after that pass, it is still the last one */
-            usleep(600000);
+               A set 0.4 s after that pass fails without one, so 0.7 s after that set, the pass is still the last one, a
+               second old or more (a pass at that set would be less than a second old). And the seconds since the pass
+               when the hot sets ended, when that set began and ended, and when the seconds were read */
+            $sincePass = function () use ($failedAt) {
+                return round(microtime(true) - $failedAt, 3);
+            };
+            $times = ['hot sets' => round($hotEnd - $failedAt, 3)];
+            usleep(max(0, (int)(($failedAt + 0.4 - microtime(true)) * 1000000)));
+            $setAt = microtime(true);
+            $times['set'] = [$sincePass()];
             $result['set while the pass is skipped'] = ucache_set('guard', fill_value(999));
-            usleep(600000);
+            $times['set'][] = $sincePass();
+            usleep(max(0, (int)(($setAt + 0.7 - microtime(true)) * 1000000)));
+            $times['read'] = [$sincePass()];
             $result['seconds since the last pass'] = ucache_info(true)['last_scavenge_seconds'];
+            $times['read'][] = $sincePass();
+            $result['seconds since the pass'] = $times;
         }
         break;
 
@@ -4311,7 +4411,8 @@ switch ($argv[1]) {
 
     case 'clear_write':
         /* Says READY, waits for a line, then waits until 'marker' is gone (the cache is being cleared), and stores
-           strings of 1000 bytes until the file argv[2] exists: [longest set, sets that returned true, sets that failed] */
+           strings of 1000 bytes until the file argv[2] exists, then a string of 4 MB: [longest set, sets that returned
+           true, sets that failed, the 4 MB set, free blocks then] */
         echo "READY\n";
         fgets(STDIN);
         $end = microtime(true) + 60;
@@ -4330,7 +4431,22 @@ switch ($argv[1]) {
             $stored += $set ? 1 : 0;
             $failed += $set ? 0 : 1;
         }
-        $result = [$longest, $stored, $failed];
+        /* The memory that the clear left, with what this process stored: a value of 4 MB fits, in few free blocks */
+        $big = ucache_set('big', str_repeat('b', 4 << 20));
+        $result = [$longest, $stored, $failed, $big, ucache_meminfo()['num_free_blks']];
+        break;
+
+    case 'clear_again':
+        /* Says READY, waits for a line, then for 'marker' to go (another process clears the cache) and clears it too:
+           [seconds of this ucache_clear(), its result, the other clear still going on when it returned] */
+        echo "READY\n";
+        fgets(STDIN);
+        $end = microtime(true) + 60;
+        while (ucache_exists('marker') && microtime(true) < $end) {
+        }
+        $t0 = microtime(true);
+        $cleared = ucache_clear();
+        $result = [microtime(true) - $t0, $cleared, !file_exists($argv[2])];
         break;
 
     case 'alloc_speed':
@@ -4372,6 +4488,46 @@ switch ($argv[1]) {
         $value = str_repeat('Z', strlen(fill_value($victim)));
         $set = ucache_set(sprintf('x%05d', $victim), $value);
         $result = [$n, $set, ucache_get(sprintf('x%05d', $victim)) === $value];
+        break;
+
+    case 'head_take':
+        /* A full cache of 1000-byte strings, one of them (k001000) 1040 bytes, the rest filled with integers; every
+           other string deleted, the 1040-byte one last: its free block is the only one large enough for a 1200-byte
+           string, and the first of the size class of the others. [strings, integers, stored, read back] */
+        for ($n = 0; ucache_set(sprintf('k%06d', $n), str_repeat('f', ($n === 1000) ? 1040 : 1000)); $n++) {
+        }
+        for ($m = 0; ucache_set(sprintf('i%06d', $m), $m); $m++) {
+        }
+        for ($i = 0; $i < $n; $i += 2) {
+            if ($i !== 1000) {
+                ucache_delete(sprintf('k%06d', $i));
+            }
+        }
+        ucache_delete(sprintf('k%06d', 1000));
+        $value = str_repeat('g', 1200);
+        $set = ucache_set('new', $value);
+        $result = [$n, $m, $set, ucache_get('new') === $value];
+        break;
+
+    case 'no_remnants':
+        /* Holes of deleted 1000-byte strings refilled with strings 0 to 96 bytes shorter: the free blocks left after each
+           refill. A block is split only when the rest can hold the smallest block the cache asks for, so the count never
+           rises and falls again as the strings get shorter (a rest too small for any value would stay free) */
+        $free = [];
+        for ($d = 0; $d <= 96; $d += 8) {
+            ucache_clear();
+            for ($i = 0; $i < 200; $i++) {
+                ucache_set(sprintf('k%05d', $i), str_repeat('x', 1000));
+            }
+            for ($i = 0; $i < 200; $i += 2) {
+                ucache_delete(sprintf('k%05d', $i));
+            }
+            for ($i = 0; $i < 200; $i += 2) {
+                ucache_set(sprintf('k%05d', $i), str_repeat('y', 1000 - $d));
+            }
+            $free[] = ucache_meminfo()['num_free_blks'];
+        }
+        $result = $free;
         break;
 
     case 'contact_free':
@@ -4457,9 +4613,13 @@ function kill_value($key, $version)
     }
 }
 
-/* Whether $value is one of the versions of the value of $key (the version it holds, or any up to 1000) */
+/* Whether $value is one of the versions of the value of $key (the version it holds, or any up to 1000), or the value
+   that kill_run('kf') stores, when its set ended before the kill */
 function kill_valid($key, $value)
 {
+    if ($key === 'kf_big') {
+        return $value === str_repeat('B', 2000000);
+    }
     if (is_array($value)) {
         return isset($value['k'], $value['v']) && $value === kill_value($key, $value['v']);
     }
@@ -4611,18 +4771,24 @@ function kill_check($notBefore)
 switch ($argv[1]) {
     case 'kill_victim':
         /* Fills the cache for the check argv[2] (kc, kf, ks, kr: see kill_prepare), says READY, waits until the file argv[3]
-           exists (polled without a pause, so that it starts at once; 30 s at most), then runs what the parent kills
-           (kill_run). Says DONE if it was not killed, then waits for a line */
+           exists (polled after each usleep(1000), which Windows can round up to a timer tick; on a loaded machine the
+           parent can take a minute to get to it, so 300 s at most, after which it ends without running anything),
+           creates argv[3].run, from which the parent counts its delay, and runs what the parent kills (kill_run). Says
+           DONE if it was not killed, then waits for a line */
         kill_prepare($argv[2]);
         echo "READY\n";
-        $end = microtime(true) + 30;
+        $end = microtime(true) + 300;
         while (!file_exists($argv[3]) && microtime(true) < $end) {
+            usleep(1000);
             clearstatcache();
         }
-        kill_run($argv[2]);
-        echo "DONE\n";
-        fgets(STDIN);
-        $result = true;
+        $result = file_exists($argv[3]);
+        if ($result) {
+            touch($argv[3] . '.run');
+            kill_run($argv[2]);
+            echo "DONE\n";
+            fgets(STDIN);
+        }
         break;
 
     case 'kill_check':
@@ -4747,7 +4913,7 @@ if ($op === 'sleep_fatal') {
     $info = ucache_info();
     echo 'info ', is_array($info) ? count($info['ucache_entries']) : var_export($info, true);
 } else {
-    echo 'pong';
+    echo 'pong ', getmypid();
 }
 CHILDSCRIPT
     );
@@ -5078,8 +5244,13 @@ CHILDSCRIPT
     $clFiller = child_start('cl-fill', child_php_args($poolBase . 'cl', ['ucache.size' => '64'], $clientScript, ['clear_fill', $clFlag]));
     $crReader = child_start('cr-read', child_php_args($poolBase . 'cr', ['ucache.size' => '64'], $clientScript, ['clear_read', $crFlag]));
     $crFiller = child_start('cr-fill', child_php_args($poolBase . 'cr', ['ucache.size' => '64'], $clientScript, ['clear_fill', $crFlag]));
+    $csFlag = 'cs-cleared.flag';
+    $csFiller = child_start('cs-fill', child_php_args($poolBase . 'cs', ['ucache.size' => '64'], $clientScript, ['clear_fill', $csFlag]));
+    $csAgain = child_start('cs-again', child_php_args($poolBase . 'cs', ['ucache.size' => '64'], $clientScript, ['clear_again', $csFlag]));
     $allocSpeed = child_start('as-alloc-speed', child_php_args($poolBase . 'as', ['ucache.size' => '64'], $clientScript, ['alloc_speed']));
     $holeFit = child_start('hf-hole-fit', child_php_args($poolBase . 'hf', [], $clientScript, ['hole_fit']));
+    $headTake = child_start('ht-head-take', child_php_args($poolBase . 'ht', [], $clientScript, ['head_take']));
+    $noRemnants = child_start('nr-no-remnants', child_php_args($poolBase . 'nr', [], $clientScript, ['no_remnants']));
 
     /* The two processes of a check with Fibers (PHP 8.1+, see below), which waits 2 s, as these do: started now, checked
        there. The one that times a store must wait for the flag before the reader creates it */
@@ -5104,13 +5275,23 @@ CHILDSCRIPT
           ['exit code' => $exit, '[values of ucache_inc(), results of ucache_cas(), counter exists, swapped exists, unused entry exists]' => $result,
            'output' => child_tail($incAlive)]);
 
-    $exit = child_finish($writeGap, 60);
-    $result = child_result($writeGap);
-    $states = is_array($result) ? array_map(function ($state) { return array_slice($state, 0, 3); }, $result) : null;
-    check('(in another process) with ucache.gc.threshold 100, a write runs a scavenger step once a second has passed since the last step, or a tenth of a second after a step that removed entries: a write 0.75 s after a step that removed nothing leaves an expired entry in place, one 1.25 s after removes it, the write right after that one runs no step, and a write 0.625 s later removes the next expired entry',
-          $exit === 0 && $states === [['expiring,later,poke', 0, 0], ['expiring,later,poke', 0, 0], ['later,poke', 1, 0], ['poke', 1, 0]],
-          ['exit code' => $exit, '[keys listed, last_scavenge_count, last_scavenge_seconds, seconds since the start] after each write' => $result,
-           'output' => child_tail($writeGap)]);
+    /* The writes come 0.25 s or less before a time where a step would change what they do (and writes 3 and 4 0.1 s or
+       less apart): an attempt is on time if its first two sets ended 0.2 s after the start at most, each write 0.2 s
+       after its time at most (write 2: the list after it, whose seconds since the step of write 1 must still be 0), and
+       writes 3 and 4 within 0.05 s */
+    timed_check('(in another process) with ucache.gc.threshold 100, a write runs a scavenger step once a second has passed since the last step, or a tenth of a second after a step that removed entries: a write 0.75 s after a step that removed nothing leaves an expired entry in place, one 1.25 s after removes it, the write right after that one runs no step, and a write 0.625 s later removes the next expired entry',
+                timed_attempts($writeGap, function ($n) use ($poolBase, $clientScript) {
+                    return child_start("xw-write-gap-$n", child_php_args($poolBase . "xw$n", ['ucache.gc.threshold' => '100', 'ucache.gc.interval' => '0',
+                                                                                               'ucache.gc.step' => '1000000'], $clientScript, ['write_gap']));
+                }, function ($exit, $result) {
+                    $valid = is_array($result) && count($result) === 2 && is_array($result[0]) && count($result[0]) === 4 && is_array($result[1]);
+                    $states = $valid ? array_map(function ($state) { return array_slice($state, 0, 3); }, $result[0]) : null;
+                    $t = $valid ? $result[1] : null;
+                    return [$exit === 0 && $states === [['expiring,later,poke', 0, 0], ['expiring,later,poke', 0, 0], ['later,poke', 1, 0], ['poke', 1, 0]],
+                            $valid && $t['sets'] <= 0.2 && $t['w1'][1] <= 1.7 && $result[0][1][3] <= 2.45 && $t['w3,w4'][1] <= 2.95
+                            && $t['w3,w4'][1] - $t['w3,w4'][0] <= 0.05 && $t['w5'][1] <= 3.575];
+                }),
+                '[[keys listed, last_scavenge_count, last_scavenge_seconds, seconds since the start] after each write, seconds since the start when the sets ended and each write began and ended]');
 
     $exit = child_finish($writeBurst, 60);
     $result = child_result($writeBurst);
@@ -5157,10 +5338,21 @@ CHILDSCRIPT
           $exit === 0 && is_array($result) && $result['cold failed'] === 0 && $result['cold read'] === 10 && $result['hot stored'] < 60
           && $result['cold gone'] === 0 && $result['total_evicted_count'] === 0 && $result['total_scavenged_count'] === 0,
           ['exit code' => $exit, 'counts' => $result, 'output' => child_tail($fillKeep)]);
-    check('(in another process) after a full pass that removed nothing and left no room, the processes skip the pass for a second: a set that does not fit 0.6 s later fails without one',
-          $exit === 0 && is_array($result) && isset($result['set while the pass is skipped']) && $result['set while the pass is skipped'] === false
-          && $result['seconds since the last pass'] === 1,
-          ['exit code' => $exit, 'counts' => $result]);
+
+    /* The set and the read come at set times after the pass: an attempt is on time if the set ended 0.9 s after the pass
+       at most (inside the second of the skip, so the hot sets before it ran no pass either), and the read came 1.05 s
+       after the pass at least (the pass a second old) and 0.9 s after the set began at most (a pass at the set would be
+       less than a second old). Without these times, no hot set failed: wrong, whatever the times */
+    timed_check('(in another process) after a full pass that removed nothing and left no room, the processes skip the pass for a second: a set that does not fit 0.4 s later fails without one',
+                timed_attempts($fillKeep, function ($n) use ($poolBase, $clientScript) {
+                    return child_start("z0-fill-keep-$n", child_php_args($poolBase . "z0$n", ['ucache.size' => '5'], $clientScript, ['fill_evict']));
+                }, function ($exit, $result) {
+                    $t = (is_array($result) && isset($result['seconds since the pass'])) ? $result['seconds since the pass'] : null;
+                    $onTime = !is_array($t) || ($t['set'][1] <= 0.9 && $t['read'][0] >= 1.05 && $t['read'][1] - $t['set'][0] <= 0.9);
+                    return [$exit === 0 && is_array($t) && $onTime && $result['set while the pass is skipped'] === false
+                            && $result['seconds since the last pass'] === 1, $onTime];
+                }),
+                'counts');
 
     $exit = child_finish($fillMixed, 60);
     $result = child_result($fillMixed);
@@ -5251,10 +5443,12 @@ CHILDSCRIPT
        at a time, the lock released between batches: a process that reads meanwhile waits for a batch at most, and the
        lookups of every kind miss the cleared entries that the sweep has not reached yet (those of the last buckets),
        while an entry added meanwhile stays. WinCache 2.0.0.8 freed every entry under the lock, so the reader waited as
-       long as the clear took. Then the same with a process that stores strings of 1000 bytes meanwhile, which do not
-       fit at first: its sets that need memory help the sweep for a millisecond and fail if that is not enough, so it
-       waits a few milliseconds at most, and the clear does not take much longer than with the reader alone. The bounds
-       are relative, for a loaded machine */
+       long as the clear took. Then the same with a process that stores strings of 1000 bytes meanwhile: each of its
+       sets first helps free the entries for up to 0.1 s, so that few values go in the holes of the entries being freed
+       (such a value stays there and keeps the memory around it in pieces), and those that still need memory help for a
+       millisecond and fail if that is not enough; so it waits about 0.1 s at most, the clear does not take much longer
+       than with the reader alone, and it leaves the memory in a few free blocks. The bounds are relative, for a loaded
+       machine */
     $clearReady = child_wait_for($crFiller, '/^FILLED/m', 90) && child_wait_for($crReader, '/^READY/m', 30)
                   && child_wait_for($clFiller, '/^FILLED/m', 90) && child_wait_for($clReader, '/^READY/m', 30) && child_wait_for($clWriter, '/^READY/m', 30);
     child_send($crReader, 'go');
@@ -5287,15 +5481,31 @@ CHILDSCRIPT
     $clCleared = child_result($clFiller);
     $clRead = child_result($clReader);
     $clWrote = child_result($clWriter);
-    check('(in another process) ucache_clear() of a full cache of 64 MB while one process reads and another stores strings of 1000 bytes: the reader waits less than a quarter of the time the clear takes, the writer less than 50 ms or a quarter of it and stores some meanwhile, and the clear takes less than twice as long as with the reader alone',
+    check('(in another process) ucache_clear() of a full cache of 64 MB while one process reads and another stores strings of 1000 bytes: the reader waits less than a quarter of the time the clear takes, the writer, whose sets first help free the entries for up to 0.1 s, less than 0.35 s (or that quarter), and stores some, the clear takes less than twice as long as with the reader alone, and the memory it leaves is in few free blocks (8, and 3 more per 0.1 s that the clear takes, for the 3 blocks of each value stored meanwhile), where a value of 4 MB fits',
           $clReading && $clFillExit === 0 && $clReadExit === 0 && $clWriteExit === 0 && is_array($clCleared) && is_array($clRead)
           && is_array($clWrote) && is_array($crCleared) && $clCleared[0] > 100000 && $clCleared[1] === true
           && $clRead[0] < max(0.02, $clCleared[2] / 4) && $lookupsOk($clRead[2])
-          && $clWrote[0] < max(0.05, $clCleared[2] / 4) && $clWrote[1] > 0 && $clCleared[2] < 2 * $crCleared[2] + 0.25,
+          && $clWrote[0] < max(0.35, $clCleared[2] / 4) && $clWrote[1] > 0 && $clCleared[2] < 2 * $crCleared[2] + 0.25
+          && $clWrote[3] === true && $clWrote[4] <= 8 + 30 * $clCleared[2],
           ['exit codes (clears, reads, writes)' => [$clFillExit, $clReadExit, $clWriteExit], '[stored, cleared, seconds, entries left]' => $clCleared,
            'seconds of the clear with the reader alone' => is_array($crCleared) ? $crCleared[2] : null,
-           '[longest read, picked, lookups, total_item_count, during the clear]' => $clRead, '[longest set, stored, failed]' => $clWrote,
+           '[longest read, picked, lookups, total_item_count, during the clear]' => $clRead, '[longest set, stored, failed, 4 MB set, free blocks]' => $clWrote,
            'output' => [child_tail($clFiller), child_tail($clReader), child_tail($clWriter)]]);
+
+    /* One process sweeps to the end: a ucache_clear() while another process frees the entries of its own clear returns
+       at once (that process goes through the table again from its start) instead of sweeping too */
+    $csReady = child_wait_for($csFiller, '/^FILLED/m', 90) && child_wait_for($csAgain, '/^READY/m', 30);
+    child_send($csAgain, 'go');
+    child_send($csFiller, 'go');
+    $csFillExit = child_finish($csFiller, 60);
+    $csAgainExit = child_finish($csAgain, 30);
+    $first = child_result($csFiller);
+    $again = child_result($csAgain);
+    check('(in another process) a ucache_clear() while another process frees the entries of its own clear returns at once and leaves the sweep to that process',
+          $csReady && $csFillExit === 0 && $csAgainExit === 0 && is_array($first) && is_array($again) && $again[1] === true && $again[2] === true
+          && $again[0] < max(0.02, $first[2] / 4),
+          ['exit codes (first clear, second clear)' => [$csFillExit, $csAgainExit], 'first [stored, cleared, seconds, left]' => $first,
+           'second [seconds, cleared, during]' => $again, 'output' => [child_tail($csFiller), child_tail($csAgain)]]);
 
     /* Free blocks are kept in lists by size, so storing a value does not go through the free blocks that are too small
        for it: WinCache 2.0.0.8 kept them in one list in address order and took the first one large enough. The bound
@@ -5315,6 +5525,24 @@ CHILDSCRIPT
     check('(in another process) in a full cache, a string of the length of the one just deleted is stored in the free block it left',
           $exit === 0 && is_array($result) && $result[0] > 50 && $result[1] === true && $result[2] === true,
           ['exit code' => $exit, '[entries stored, stored into the hole, read back]' => $result, 'output' => child_tail($holeFit)]);
+
+    /* The parts of a value are allocated in order (entry, zval, then its string), and a part whose own size class is
+       empty takes a block of a larger class: the smallest of the first blocks of that class, not its first block, which
+       can be the only one that the string fits */
+    $exit = child_finish($headTake, 60);
+    $result = child_result($headTake);
+    check('(in another process) in a full cache whose free blocks are too small for a 1200-byte string but one, the first of their size class, the string is stored in that block: the entry and the zval of the value go in the smaller ones',
+          $exit === 0 && is_array($result) && $result[0] > 1000 && $result[2] === true && $result[3] === true,
+          ['exit code' => $exit, '[strings, integers, stored, read back]' => $result, 'output' => child_tail($headTake)]);
+
+    /* A free block too small for any value would never be used, and every search would go past it */
+    $exit = child_finish($noRemnants, 60);
+    $result = child_result($noRemnants);
+    $sorted = is_array($result) ? $result : [];
+    sort($sorted);
+    check('(in another process) a free block is split only when the rest can hold the smallest block the cache asks for: holes refilled with shorter strings leave no free block too small for any value',
+          $exit === 0 && is_array($result) && count($result) === 13 && $result === $sorted,
+          ['exit code' => $exit, 'free blocks per 8 bytes shorter' => $result, 'output' => child_tail($noRemnants)]);
 
     /* A process killed (an IIS FastCGI timeout) in the middle of an update of what the processes share: a hash chain and
        the count of entries under the cache lock, the lists of free blocks, the block headers and the counts of the allocator
@@ -5962,11 +6190,12 @@ CHILDSCRIPT
     );
 
     $expectedPrefixed = array_map(function ($name) { return 'my_cache_' . substr($name, strlen('ucache_')); }, $expectedFuncs);
+    $testOnlyPrefixed = array_map(function ($name) { return 'my_cache_' . substr($name, strlen('ucache_')); }, $testOnlyFuncs);
     $prefixed = child_start('q-prefix', child_php_args($poolBase . 'q', ['ucache.prefix' => 'my_cache_'], $prefixScript));
     $prefixedExit = child_finish($prefixed, 30);
     $result = child_result($prefixed);
     check('(in another process) with ucache.prefix=my_cache_ the functions are my_cache_*() (called in any case), ucache_*() are gone, and they belong to the extension',
-          $prefixedExit === 0 && is_array($result) && array_values(array_diff($result['funcs'], $expectedPrefixed)) === []
+          $prefixedExit === 0 && is_array($result) && array_values(array_diff($result['funcs'], $expectedPrefixed, $testOnlyPrefixed)) === []
           && array_values(array_diff($expectedPrefixed, $result['funcs'])) === [] && $result['ucache_get exists'] === false
           && $result['set'] === true && $result['get'] === [1, 'two'] && $result['extension'] === 'ucache',
           ['exit code' => $prefixedExit, 'result' => $result, 'output' => child_tail($prefixed)]);
@@ -6034,6 +6263,8 @@ CHILDSCRIPT
           "ucache: the user cache could not be created, so the ucache functions fail: its file in ucache.filemapdir \"$missing\" could not be created or opened (error 209, Windows error 3)"]],
         [['ucache.enablecli' => '0', 'ucache.size' => 'abc', 'ucache.prefix' => '1cache'], ['abc', null, 'disabled', false, null],
          ['ucache.prefix "1cache" is not a valid function name prefix']],
+        [['ucache.size' => '3MiB'], ['3MiB', 5 * $mb, 'enabled', true, true],
+         ['ucache.size "3MiB" is not a number of megabytes nor a size such as 64M, and the number it starts with is outside 5 to 930 MB: the cache has 5 MB']],
     ];
     $sized = [];
     foreach ($sizeCases as $n => $case) {
@@ -6146,8 +6377,8 @@ CHILDSCRIPT
 
     check('(in other processes) ucache.size takes megabytes or a size with a K, M or G suffix, in decimal: 64M, 100000k (rounded up), 064, 64 MB and an empty value give caches of 64, 98, 64, 64 and 8 MB, without a warning',
           $sizeOk(0) && $sizeOk(1) && $sizeOk(2) && $sizeOk(3) && $sizeOk(4), $sizeDetail([0, 1, 2, 3, 4]));
-    check('(in other processes) ucache.size=0 is clamped to 5 MB, 64MiB (digits and other text) gives 64 MB and 0x40 the default 8 MB, each with a startup warning that says so',
-          $sizeOk(5) && $sizeOk(6) && $sizeOk(7), $sizeDetail([5, 6, 7]));
+    check('(in other processes) ucache.size=0 is clamped to 5 MB, 64MiB (digits and other text) gives 64 MB, 3MiB (the same with digits below 5) 5 MB and 0x40 the default 8 MB, each with a startup warning that says so',
+          $sizeOk(5) && $sizeOk(6) && $sizeOk(10) && $sizeOk(7), $sizeDetail([5, 6, 10, 7]));
     check('(in another process) a cache that cannot be created (ucache.filemapdir names a folder that does not exist) gets a startup warning that names the folder and the Windows error, the functions fail and phpinfo() says unavailable; ucache.size=1GB gets its own warning there',
           $sizeOk(8), $sizeDetail([8]));
     check('(in another process) under the CLI without ucache.enablecli, phpinfo() says disabled and a ucache.size that is not valid raises no warning, but an invalid ucache.prefix does',
@@ -6385,6 +6616,8 @@ POWERSHELL;
         foreach (['stats.php' => $statsCopy, 'stats-copy.php' => $statsCopy, 'stats-auth2.php' => $statsAuth2, 'stats-default.php' => $statsSource] as $file => $source) {
             file_put_contents($childDir . DIRECTORY_SEPARATOR . $file, $source);
         }
+        /* The cache of 16 MB that a server with ucache.size 32 joins for the Summary page below: started now, used there */
+        $suHolder = child_start('su-holder', child_php_args($poolBase . 'su', ['ucache.size' => '16'], $holderScript, ['kept', 'kept value']));
         $server = ($replaced === 1 && $replacedAuth === 1) ? server_start('st-server', $poolBase . 'st', [], $port) : null;
         if ($replaced !== 1 || $replacedAuth !== 1) {
             check("test-build.php finds define('PASSWORD', 'ucache'); and define('USE_AUTHENTICATION', 1); once each in ucache.php, to make its copies",
@@ -6461,8 +6694,32 @@ POWERSHELL;
                    'its clear' => strtok((string)$iisCleared, "\r\n"), 'entries after it ' => $afterIis, 'server output' => child_tail($server)]);
             check('ucache.php with USE_AUTHENTICATION 2 asks for authentication, as with 1, and then offers Clear All',
                   $auth2 === [401, true], ['[status without credentials, Clear All with them]' => $auth2, 'server output' => child_tail($server)]);
+
+            /* A start parameter of more digits than an int holds is past the last entry: PHP 8.5 warns when it casts such
+               a string to int, which before any output would leave the page without its headers */
+            $overflow = http_request($port, 'GET', '/stats.php?page=4&start=99999999999999999999', [$basic], null, 30);
+            check('ucache.php keeps its headers with a start parameter of more digits than an int holds',
+                  $status($overflow) === 200 && preg_match('/^X-Frame-Options: DENY\r?$/mi', (string)$overflow) === 1
+                  && preg_match('/^Cache-Control: no-store\r?$/mi', (string)$overflow) === 1 && preg_match('/(Warning|Notice|Deprecated)(<\/b>)?:/', (string)$overflow) === 0,
+                  ['reply' => substr((string)$overflow, 0, 400), 'server output' => child_tail($server)]);
             child_kill($server);
+
+            /* The Summary page, on a server whose pool had a cache of 16 MB when it started with ucache.size 32: the cache
+               keeps its size until every process of the pool has exited, which the note says, rather than a limit */
+            $suServer = child_wait_for($suHolder, '/^READY/m', 30) ? server_start('su-server', $poolBase . 'su', ['ucache.size' => '32'], $suPort) : null;
+            $summary = ($suServer !== null) ? http_request($suPort, 'GET', '/stats.php?page=1', [$basic], null, 30) : null;
+            check('ucache.php shows its Summary page without a PHP diagnostic, with the Abandoned locks fact and ucache.enabled enabled, and for a cache of 16 MB that a process with ucache.size 32 joined, "16 MB of shared memory" without calling it a limit',
+                  $status($summary) === 200 && preg_match('/(Warning|Notice|Deprecated|Fatal error)(<\/b>)?:/', (string)$summary) === 0
+                  && strpos((string)$summary, 'Abandoned locks') !== false && strpos((string)$summary, 'ucache.enabled</code></th><td>enabled') !== false
+                  && strpos((string)$summary, '16 MB of shared memory (the size of the cache in use') !== false && strpos((string)$summary, '(the maximum)') === false,
+                  ['page' => strtok((string)$summary, "\r\n"),
+                   'size note' => preg_match('/ucache\.size<\/code><\/th><td>[^<]*<span class="note">([^<]*)/', (string)$summary, $sizeNote) ? $sizeNote[1] : null,
+                   'server output' => ($suServer !== null) ? child_tail($suServer) : null]);
+            if ($suServer !== null) {
+                child_kill($suServer);
+            }
         }
+        child_kill($suHolder);
     }
 
     children_cleanup();

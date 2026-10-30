@@ -281,14 +281,15 @@ static void drop_free_class(alloc_context * palloc, unsigned int cls)
  * Call under the allocator lock: a free block of at least size bytes, NULL if there is none, the
  * smallest that the lists find at once (a best fit, by class).  The class of the size first: below
  * ALLOC_CLASS_LINEAR_BYTES its first block fits, above it the first of its ALLOC_CLASS_WALK first
- * blocks that is large enough.  Then the first block of the smallest class above (used whole if the
- * rest could not be a free block, split otherwise), then the rest of the class of the size, so that the
- * allocation fails only if no free block is large enough, as before.  Preferring the blocks that a
- * split leaves a free block of, before the smaller ones that fit, let the zvals of new entries split
- * the holes of old entries and left the small pieces of other splits unused: in a cache kept full by
- * eviction, writes then failed with up to 5% of the memory free in such pieces, where this fails, as
- * the single list in address order of before did, with less than 0.3% free.  A list that leads to a
- * block that is not free is dropped (see drop_free_class), never followed.
+ * blocks that is large enough.  Then the smallest of the first ALLOC_CLASS_WALK blocks of the smallest
+ * class above (its first block below ALLOC_CLASS_LINEAR_BYTES; used whole if the rest could not be a
+ * free block, split otherwise), then the rest of the class of the size, so that the allocation fails
+ * only if no free block is large enough, as before.  Preferring the blocks that a split leaves a free
+ * block of, before the smaller ones that fit, let the zvals of new entries split the holes of old
+ * entries and left the small pieces of other splits unused: in a cache kept full by eviction, writes
+ * then failed with up to 5% of the memory free in such pieces, where this fails, as the single list in
+ * address order of before did, with less than 0.3% free.  A list that leads to a block that is not
+ * free is dropped (see drop_free_class), never followed.
  */
 static alloc_free_header * find_free_block(alloc_context * palloc, size_t size)
 {
@@ -296,10 +297,12 @@ static alloc_free_header * find_free_block(alloc_context * palloc, size_t size)
     void *                 segaddr = palloc->memaddr;
     alloc_free_header *    freeh   = NULL;
     alloc_free_header *    pfirst  = NULL;
+    alloc_free_header *    pnext   = NULL;
     unsigned int           cls     = alloc_class_of(size);
     unsigned int           word    = 0;
     unsigned int           bits    = 0;
     unsigned int           walked  = 0;
+    unsigned int           seen    = 0;
     unsigned long          bit     = 0;
 
     for(freeh = FREE_BLOCK(segaddr, header->freelists[cls]); freeh != NULL && walked < ALLOC_CLASS_WALK; walked++)
@@ -333,6 +336,21 @@ static alloc_free_header * find_free_block(alloc_context * palloc, size_t size)
                 pfirst = FREE_BLOCK(segaddr, header->freelists[word * 32 + bit]);
                 if(pfirst != NULL && pfirst->is_free == BLOCK_ISFREE_FREE)
                 {
+                    /* Above ALLOC_CLASS_LINEAR_BYTES the blocks of a class differ in size: the smallest of its first */
+                    /* ALLOC_CLASS_WALK, so that a small part of a value (its entry or its zval) does not take the */
+                    /* only block of the class that a larger part fits (the block freed last is first in the list) */
+                    if(word * 32 + bit >= ALLOC_CLASS_LINEAR_COUNT)
+                    {
+                        pnext = FREE_BLOCK(segaddr, pfirst->next_free);
+                        for(seen = 1; pnext != NULL && seen < ALLOC_CLASS_WALK && pnext->is_free == BLOCK_ISFREE_FREE; seen++)
+                        {
+                            if(pnext->size < pfirst->size)
+                            {
+                                pfirst = pnext;
+                            }
+                            pnext = FREE_BLOCK(segaddr, pnext->next_free);
+                        }
+                    }
                     return pfirst;
                 }
 

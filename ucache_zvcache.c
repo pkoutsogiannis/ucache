@@ -148,6 +148,10 @@ static int  copyout_reference(zvcache_context * pcache, zvcopy_context * pcopy, 
 /* for this long, killed most likely (see zvcache_clear): its batches are short */
 #define CLEAR_SWEEPER_STALE_MS      1000
 
+/* A ucache_set() or ucache_add() that starts while a ucache_clear() frees its entries runs batches of that */
+/* sweep for this long at most before it stores its value (see zvcache_set) */
+#define CLEAR_WRITE_HELP_US         100000
+
 /*
  * Writes a field of the shared memory in an update under the cache lock, after logging what it held (see
  * lock_undo_write in ucache_lock.c): every write of an update that changes more than one field goes
@@ -2661,12 +2665,14 @@ static zend_bool clear_pending(zvcache_header * header)
  * least one entry), whose freeing then takes about as long as the rest of the batch; then it releases
  * the lock and frees them, holding the allocator's lock for the batch (alloc_hold) instead of taking it
  * for each block.  So the other processes wait one batch at most, for the cache lock as for the
- * allocator's.  Each batch goes on where the last one stopped, in any process.
+ * allocator's, or a few milliseconds while several processes sweep at once (writes help, see
+ * zvcache_set).  Each batch goes on where the last one stopped, in any process.
  *
  * owner: the process that sweeps to the end, the one whose ucache_clear() started the sweep
- * (zvcache_header.sweeper); it stops if another one took the sweep over.  The others (a write that
- * needs memory, the end of a request) sweep for budget microseconds at most: the batch stops early
- * when its time passes the budget too.  budget 0: no limit.
+ * (zvcache_header.sweeper); it stops if another one took the sweep over.  The others (a write before
+ * it stores its value, see zvcache_set; a write that needs memory; the end of a request) sweep for
+ * budget microseconds at most: the batch stops early when its time passes the budget too.  budget 0:
+ * no limit.
  */
 static void sweep_cleared_entries(zvcache_context * pcache, LONGLONG budget, unsigned char owner)
 {
@@ -3030,8 +3036,8 @@ static unsigned int reclaim_entries(zvcache_context * pcache, zend_long * pperce
             ptemp  = pvalue;
             pvalue = ZVCACHE_VALUE(palloc, pvalue->next_value);
 
-            /* Left by a ucache_clear(): make_room() does not run the pass while it sweeps them, so */
-            /* these are left only by a process killed in the middle of it */
+            /* Left by a ucache_clear(): make_room() does not run the pass while a sweep is pending (also */
+            /* one that a killed process left unfinished), so only damaged counters leave these here */
             if(entry_cleared(pheader, ptemp))
             {
                 remove_zvcache_entry(pcache, index, ptemp);
@@ -3170,7 +3176,7 @@ static unsigned int reclaim_entries(zvcache_context * pcache, zend_long * pperce
  * SCAVENGER_WRITE_BUSY_MS after one that removed entries, SCAVENGER_WRITE_URGENT_MS after one that
  * removed entries while free memory was at or below a quarter of the threshold.  A step can hold
  * the cache lock for SCAVENGER_STEP_BUDGET_US: run by every write, it made each one wait that long
- * (0.6 ms instead of 4 microseconds for a set with 500,000 entries in 128 MB), whatever the step
+ * (0.6 ms instead of 4.7 microseconds for a set with 500,000 entries in 128 MB), whatever the step
  * found.  The short waits let the steps keep up with entries that expire in large numbers, for at
  * most about 1% and 10% of the time of the cache lock.  force 1: the end of a request
  * (zvcache_scavenge_periodic), which runs a step once ucache.gc.interval seconds have passed since
@@ -3909,6 +3915,7 @@ static int make_room(zvcache_context * pcache, const char * key, zvcopy_prepared
     unsigned int     removed = 0;
     unsigned int     tries   = 0;
     unsigned char    ran     = 0;
+    unsigned char    pending = 0;
     LONGLONG         spent   = 0;
     LARGE_INTEGER    started;
 
@@ -3932,7 +3939,12 @@ static int make_room(zvcache_context * pcache, const char * key, zvcopy_prepared
                 break;
             }
 
-            if(header->rcgen != gen)
+            /* A ucache_clear() since the check above, which read clear_pending() without the lock: its sweep frees */
+            /* its entries a batch at a time (here for SCAVENGER_STEP_BUDGET_US once the lock is released); a full */
+            /* pass would free them all under the cache lock, and with ucache.gc.evict also evict what was stored */
+            /* since the clear (the cleared entries it frees are not counted) */
+            pending = clear_pending(header);
+            if(pending || header->rcgen != gen)
             {
                 ran = 0;
             }
@@ -3950,6 +3962,11 @@ static int make_room(zvcache_context * pcache, const char * key, zvcopy_prepared
             lock_unlock(pcache->zvlock);
 
             free_pending_entries(pcache);
+
+            if(pending)
+            {
+                sweep_cleared_entries(pcache, SCAVENGER_STEP_BUDGET_US, 0);
+            }
         }
 
         result = create_zvcache_data(pcache, key, pprep, ttl, ppnewval);
@@ -4071,6 +4088,17 @@ int zvcache_set(zvcache_context * pcache, const char * key, zval * pzval, unsign
         dprintimportant("zvcache_set: the value takes at least %Iu bytes, the empty cache holds %Iu", minimum, pcache->maxfree);
         result = FATAL_OUT_OF_SMEMORY;
         goto Finished;
+    }
+
+    /* While a ucache_clear() frees the entries it cleared, run batches of its sweep first, CLEAR_WRITE_HELP_US at */
+    /* most (see sweep_cleared_entries): a value stored meanwhile goes in the hole of one of those entries and */
+    /* stays there, between free blocks that would otherwise be joined. Stored at full speed, the values of 4 */
+    /* writers left a cleared cache of 512 MB in 11,648 free blocks, where 1 MB no longer fitted (with */
+    /* ucache.gc.evict the first such value evicted every entry); with this wait a write waited about 0.1 s at */
+    /* most (the budget is checked between batches), and the same clear left about 70 free blocks */
+    if(clear_pending(pcache->zvheader))
+    {
+        sweep_cleared_entries(pcache, CLEAR_WRITE_HELP_US, 0);
     }
 
     /* Phase 2: if entry wasn't found or set was called, create new data */
@@ -4226,19 +4254,20 @@ Finished:
  * batches (sweep_cleared_entries), so that the other processes are not held up while a large cache is
  * freed.  One process sweeps to the end: this one, unless the process of an earlier ucache_clear()
  * still does (it went on less than CLEAR_SWEEPER_STALE_MS ago), which then goes through the table
- * again from its start, and this call returns at once.  The others help in short steps (a write that
- * needs memory, the end of a request).  If the process that sweeps is killed (an IIS FastCGI timeout),
- * the cache stays cleared, and the entries left are removed by those steps, by the lookups and the
- * scavenger steps that pass them, or by the next ucache_clear(), which takes the sweep over.  A process
- * killed in the middle of the update that clears leaves the cache as it was (see zvcache_lock).
+ * again from its start, and this call returns at once.  The others help in short steps (writes, see
+ * zvcache_set, and the end of a request).  If the process that sweeps is killed (an IIS FastCGI
+ * timeout), the cache stays cleared, and the entries left are removed by those steps, by the lookups
+ * and the scavenger steps that pass them, or by the next ucache_clear(), which takes the sweep over.  A
+ * process killed in the middle of the update that clears leaves the cache as it was (see zvcache_lock).
  */
 int zvcache_clear(zvcache_context * pcache)
 {
-    int              result = NONFATAL;
-    zvcache_header * header = NULL;
-    ULONGLONG        ticks  = 0;
-    unsigned int     pid    = GetCurrentProcessId();
-    unsigned char    owner  = 0;
+    int              result  = NONFATAL;
+    zvcache_header * header  = NULL;
+    ULONGLONG        ticks   = 0;
+    unsigned int     pid     = GetCurrentProcessId();
+    unsigned char    owner   = 0;
+    unsigned char    pending = 0;
 
     dprintverbose("start zvcache_clear %p", pcache);
 
@@ -4252,6 +4281,11 @@ int zvcache_clear(zvcache_context * pcache)
         goto Finished;
     }
 
+    /* Whether the sweep of an earlier clear was still going on: if not, a sweeper left in the header ended its */
+    /* loop when other processes had removed the last cleared entries (lookups, steps, a full pass) before its */
+    /* next batch, which would have reset it (see sweep_cleared_entries), and does not sweep this clear */
+    pending = clear_pending(header);
+
     /* One update (see ZVCACHE_SET), 6 fields: a process killed before its end leaves the cache as it */
     /* was, not cleared */
     ZVCACHE_SET(pcache, header->cleargen, header->cleargen + 1);
@@ -4261,7 +4295,7 @@ int zvcache_clear(zvcache_context * pcache)
 
     /* This process sweeps, unless another one goes on with the sweep of an earlier clear */
     ticks = GetTickCount64();
-    if(clear_pending(header) && (header->sweeper == 0 || header->sweeper == pid || utils_ticksdiff(ticks, header->sweepticks) >= CLEAR_SWEEPER_STALE_MS))
+    if(clear_pending(header) && (!pending || header->sweeper == 0 || header->sweeper == pid || utils_ticksdiff(ticks, header->sweepticks) >= CLEAR_SWEEPER_STALE_MS))
     {
         ZVCACHE_SET(pcache, header->sweeper, pid);
         ZVCACHE_SET(pcache, header->sweepticks, ticks);

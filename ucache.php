@@ -128,7 +128,9 @@ if (isset($_GET['page']) && is_numeric($_GET['page']) && $_GET['page'] == UCACHE
 // The list shows CACHE_MAX_ENTRY entries at a time, from position start (0 for the first entry)
 $ucache_start = 0;
 if (isset($_GET['start']) && is_string($_GET['start']) && ctype_digit($_GET['start'])) {
-    $ucache_start = (int)$_GET['start'];
+    // More digits than an int holds start past the last entry (PHP 8.5 warns when it casts such a string to int)
+    $digits = ltrim($_GET['start'], '0');
+    $ucache_start = (strlen($digits) > 18) ? PHP_INT_MAX : (int)$digits;
 }
 
 // Clearing the cache is a POST from the page's own form, never a link
@@ -341,8 +343,15 @@ function setting_note($name, $value) {
         case 'ucache.size':
             if (is_array($GLOBALS['ucache_mem_info'])) {
                 $size = intdiv((int)$GLOBALS['ucache_mem_info']['memory_total'], 1048576);
-                return format_number($size) . ' MB of shared memory'
-                    . (($number !== null && $size != $number) ? ($size > $number ? ' (the minimum)' : ' (the maximum)') : '');
+                $note = format_number($size) . ' MB of shared memory';
+                if ($number !== null && $size != $number) {
+                    // The extension clamps the setting to 5..930: any other difference is a cache that processes with
+                    // another ucache.size created, which keeps its size until every process of the pool has exited
+                    $clamped = min(max($number, 5), 930);
+                    $note .= ($size == $clamped) ? ($size > $number ? ' (the minimum)' : ' (the maximum)')
+                        : ' (the size of the cache in use: a cache keeps the size it was created with until every process of the pool has exited)';
+                }
+                return $note;
             }
             break;
     }
