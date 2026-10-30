@@ -40,34 +40,34 @@
 extern zend_module_entry ucache_module_entry;
 #define phpext_ucache_ptr &ucache_module_entry
 
-/* For static builds we need all the headers as this */
-/* file is included in main/internal_functions.c */
+// For static builds we need all the headers as this
+// file is included in main/internal_functions.c
 #ifndef COMPILE_DL_UCACHE
 #include "precomp.h"
 #endif
 
-/* Module globals */
-/* Fields backed by OnUpdateLong ini entries are zend_long because */
-/* OnUpdateLong writes a full zend_long at the field address */
+// Module globals
+// Fields backed by OnUpdateLong ini entries are zend_long because
+// OnUpdateLong writes a full zend_long at the field address
 ZEND_BEGIN_MODULE_GLOBALS(ucache)
-    zvcache_context*         zvucache;       /* User controlled user cache */
-    zend_long                ucgc_threshold; /* Free memory % at or below which the scavenger runs, also on writes (spaced out, see zvcache_run_scavenger); 0 or less = always, not on writes; above 100 = 100 */
-    zend_long                ucgc_interval;  /* Seconds between scavenger runs at the end of requests, 0 = none */
-    zend_long                ucgc_ttl;       /* Seconds without use after which the scavenger also removes an entry, 0 = never */
-    zend_long                ucgc_step;      /* Hash buckets the scavenger scans per step, 0 = automatic */
-    zend_long                ucgc_evict;     /* Free memory % that a full cache evicts idle entries up to, 0 = no eviction */
-    zend_bool                enablecli;      /* Enable ucache for command line sapi */
-    zend_bool                ucenabled;      /* User cache enabled or disabled */
-    zend_long                ucachesize;     /* User cache size in MBs (ucache_modify_size, clamped to 5..930 by MINIT) */
-    unsigned int             debuglevel;     /* Debug dump level (0/101/201/301/401/501) */
-    char*                    namesalt;       /* Salt to use in all the names, NULL when not set or empty */
-    char*                    prefix;         /* Prefix of the PHP function names, in place of "ucache_" */
+    zvcache_context*         zvucache;       // User controlled user cache
+    zend_long                ucgc_threshold; // Free memory % at or below which the scavenger runs, also on writes (spaced out, see zvcache_run_scavenger); 0 or less = always, not on writes; above 100 = 100
+    zend_long                ucgc_interval;  // Seconds between scavenger runs at the end of requests, 0 = none
+    zend_long                ucgc_ttl;       // Seconds without use after which the scavenger also removes an entry, 0 = never
+    zend_long                ucgc_step;      // Hash buckets the scavenger scans per step, 0 = automatic
+    zend_long                ucgc_evict;     // Free memory % that a full cache evicts idle entries up to, 0 = no eviction
+    zend_bool                enablecli;      // Enable ucache for command line sapi
+    zend_bool                ucenabled;      // User cache enabled or disabled
+    zend_long                ucachesize;     // User cache size in MBs (ucache_modify_size, clamped to 5..930 by MINIT)
+    unsigned int             debuglevel;     // Debug dump level (0/101/201/301/401/501)
+    char*                    namesalt;       // Salt to use in all the names, NULL when not set or empty
+    char*                    prefix;         // Prefix of the PHP function names, in place of "ucache_"
 
-    unsigned int             uclasterror;    /* Last error value encountered by user cache */
-    unsigned int             parentpid;      /* Parent process identifier */
-    filemap_global_context*  fmapgdata;      /* Global data for filemap */
-    const char*              apppoolid;      /* The application id: ucache.apppoolid, NULL when not set or empty */
-    char*                    filemapdir;     /* Directory where temp filemap files should be created, NULL when not set or empty */
+    unsigned int             uclasterror;    // Last error value encountered by user cache
+    unsigned int             parentpid;      // Parent process identifier
+    filemap_global_context*  fmapgdata;      // Global data for filemap
+    const char*              apppoolid;      // The application id: ucache.apppoolid, NULL when not set or empty
+    char*                    filemapdir;     // Directory where temp filemap files should be created, NULL when not set or empty
 ZEND_END_MODULE_GLOBALS(ucache)
 
 ZEND_EXTERN_MODULE_GLOBALS(ucache)
@@ -81,4 +81,4 @@ ZEND_TSRMLS_CACHE_EXTERN();
 #define UCG(v) (ucache_globals.v)
 #endif
 
-#endif /* _PHP_UCACHE_H_ */
+#endif // _PHP_UCACHE_H_

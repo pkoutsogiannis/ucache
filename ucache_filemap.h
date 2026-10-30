@@ -37,86 +37,86 @@
 #ifndef _UCACHE_FILEMAP_H_
 #define _UCACHE_FILEMAP_H_
 
-/* TBD?? Should we look at commandline arguments of the process to find what */
-/* all processes got launched for a single fastcgi process pool. Using ppid */
-/* won't work for per site php.ini configuration. We will end up sharing the */
-/* cache with all processes which won't be too bad either */
+// TBD?? Should we look at commandline arguments of the process to find what
+// all processes got launched for a single fastcgi process pool. Using ppid
+// won't work for per site php.ini configuration. We will end up sharing the
+// cache with all processes which won't be too bad either
 
-#define GROUP_MAX_LENGTH                        17  /* "P" and 16 hex digits, or a process id (10 digits at most) */
-#define READWRITE_LOCK_MAX_COUNT                20  /* NOT USED */
+#define GROUP_MAX_LENGTH                        17  // "P" and 16 hex digits, or a process id (10 digits at most)
+#define READWRITE_LOCK_MAX_COUNT                20  // NOT USED
 
-#define FILEMAP_TYPE_INVALID                    0   /* Invalid value */
-#define FILEMAP_TYPE_USERZVALS                  5   /* User cache map */
-#define FILEMAP_TYPE_UNUSED                     255 /* UNUSED SEGMENT MARKER */
+#define FILEMAP_TYPE_INVALID                    0   // Invalid value
+#define FILEMAP_TYPE_USERZVALS                  5   // User cache map
+#define FILEMAP_TYPE_UNUSED                     255 // UNUSED SEGMENT MARKER
 #define FILEMAP_TYPE_MAX                        255
 
 #define FILEMAP_MAX_COUNT                       30
-#define FILEMAP_MIN_SIZE                        1048576    /* 1   MB */
-#define FILEMAP_MAX_SIZE                        268435456  /* 256 MB */
+#define FILEMAP_MIN_SIZE                        1048576    // 1   MB
+#define FILEMAP_MAX_SIZE                        268435456  // 256 MB
 
-/* Following prefixes should be less than 254 characters */
+// Following prefixes should be less than 254 characters
 #define FILEMAP_INFORMATION_PREFIX              "UCACHE_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION "_FILEMAP_INFORMATION"
 #define FILEMAP_INFORMATION_PREFIX_LENGTH       (sizeof(FILEMAP_INFORMATION_PREFIX))
 
 #define FILEMAP_USERZVALS_PREFIX                "UCACHE_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION "_FILEMAP_USERZVALS"
 #define FILEMAP_USERZVALS_PREFIX_LENGTH         (sizeof(FILEMAP_USERZVALS_PREFIX))
 
-/* filemap_information_header - SHARED - 16 bytes */
-/* filemap_information_entry  - SHARED - 276 bytes */
-/* filemap_global_context     - LOCAL -  8 bytes */
-/* filemap_information        - LOCAL -  20 bytes */
-/* filemap_context            - LOCAL -  14 bytes (not aligned at 4 bytes) */
+// filemap_information_header - SHARED - 16 bytes
+// filemap_information_entry  - SHARED - 276 bytes
+// filemap_global_context     - LOCAL -  8 bytes
+// filemap_information        - LOCAL -  20 bytes
+// filemap_context            - LOCAL -  14 bytes (not aligned at 4 bytes)
 
-/* filemap_information_header.initdone once a process has initialized the information filemap ("DONE" in */
-/* memory). Any other value, 0 in a new filemap, means that it is still to be initialized */
+// filemap_information_header.initdone once a process has initialized the information filemap ("DONE" in
+// memory). Any other value, 0 in a new filemap, means that it is still to be initialized
 #define FILEMAP_INFO_INITDONE                   0x454E4F44
 
 typedef struct filemap_information_header filemap_information_header;
 struct filemap_information_header {
-    size_t                       size;          /* Total size of the memory map */
-    unsigned int                 initdone;      /* FILEMAP_INFO_INITDONE once initialized, else not */
-    unsigned short               entry_count;   /* How many other filemap objects are present */
-    unsigned short               maxcount;      /* Maximum number of filemaps which can be created */
+    size_t                       size;          // Total size of the memory map
+    unsigned int                 initdone;      // FILEMAP_INFO_INITDONE once initialized, else not
+    unsigned short               entry_count;   // How many other filemap objects are present
+    unsigned short               maxcount;      // Maximum number of filemaps which can be created
 };
 
 typedef struct filemap_information_entry filemap_information_entry;
 struct filemap_information_entry {
-    unsigned short               fmaptype;       /* Type which tells what is the purpose of this filemap */
-    unsigned short               cachekey;       /* short key which uniquely identifies fmap of this type */
-    char                         name[MAX_PATH]; /* name of filemap */
-    size_t                       size;           /* Size of this filemap */
-    unsigned int                 mapcount;       /* How many processes mapped this filemap */
-    unsigned int                 cpid;           /* ProcessID of process which initially created this map */
-    unsigned int                 opid;           /* Current ProcessID which is the owner */
-    void*                        mapaddr;        /* Map address where owner has this memory mapped */
+    unsigned short               fmaptype;       // Type which tells what is the purpose of this filemap
+    unsigned short               cachekey;       // short key which uniquely identifies fmap of this type
+    char                         name[MAX_PATH]; // name of filemap
+    size_t                       size;           // Size of this filemap
+    unsigned int                 mapcount;       // How many processes mapped this filemap
+    unsigned int                 cpid;           // ProcessID of process which initially created this map
+    unsigned int                 opid;           // Current ProcessID which is the owner
+    void*                        mapaddr;        // Map address where owner has this memory mapped
 };
 
 typedef struct filemap_context filemap_context;
 struct filemap_context {
-    unsigned short               id;            /* unique id of this filemap context */
-    filemap_information_entry*   infoentry;     /* pointer to filemap information entry */
-    HANDLE                       hshmfile;      /* file handle for file backed shared memory */
-    unsigned int                 existing;      /* 1 if the file mapping object already existed (another process had it open), whatever its file holds */
-    HANDLE                       hfilemap;      /* handle to memory map object */
-    void*                        mapaddr;       /* local adddress mapped for this process */
+    unsigned short               id;            // unique id of this filemap context
+    filemap_information_entry*   infoentry;     // pointer to filemap information entry
+    HANDLE                       hshmfile;      // file handle for file backed shared memory
+    unsigned int                 existing;      // 1 if the file mapping object already existed (another process had it open), whatever its file holds
+    HANDLE                       hfilemap;      // handle to memory map object
+    void*                        mapaddr;       // local adddress mapped for this process
 };
 
 typedef struct filemap_information filemap_information;
 struct filemap_information {
-    HANDLE                       hinfomap;      /* Handle to filemap object */
-    char*                        infoname;      /* Name of memory map to store filemap info */
-    size_t                       infonlen;      /* Length of name buffer */
-    filemap_information_header*  header;        /* Mapped memory address to information segment */
-    HANDLE                       hinitdone;     /* init mutex (_FILEMAP_INIT), owned while the process creates or opens the information filemap */
-    lock_context*                hlock;         /* Lock object for info filemap */
+    HANDLE                       hinfomap;      // Handle to filemap object
+    char*                        infoname;      // Name of memory map to store filemap info
+    size_t                       infonlen;      // Length of name buffer
+    filemap_information_header*  header;        // Mapped memory address to information segment
+    HANDLE                       hinitdone;     // init mutex (_FILEMAP_INIT), owned while the process creates or opens the information filemap
+    lock_context*                hlock;         // Lock object for info filemap
 };
 
 typedef struct filemap_global_context filemap_global_context;
 struct filemap_global_context {
-    unsigned int                 pid;                         /* PID of this process */
-    unsigned int                 ispool;                      /* 1 if an application pool id groups the processes, 0 if their parent process does */
-    char                         group[GROUP_MAX_LENGTH + 1]; /* The group in the object names: "P" and 16 hex digits of the hash of the pool id, or the parent process id */
-    filemap_information*         info;                        /* pointer to filemap_information */
+    unsigned int                 pid;                         // PID of this process
+    unsigned int                 ispool;                      // 1 if an application pool id groups the processes, 0 if their parent process does
+    char                         group[GROUP_MAX_LENGTH + 1]; // The group in the object names: "P" and 16 hex digits of the hash of the pool id, or the parent process id
+    filemap_information*         info;                        // pointer to filemap_information
 };
 
 extern int          filemap_global_initialize();
@@ -138,4 +138,4 @@ extern void   filemap_terminate(filemap_context* pfilemap);
 extern size_t       filemap_getsize(filemap_context* pfilemap);
 extern unsigned int filemap_getcpid(filemap_context* pfilemap);
 
-#endif /* _UCACHE_FILEMAP_H_ */
+#endif // _UCACHE_FILEMAP_H_

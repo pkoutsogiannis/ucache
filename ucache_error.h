@@ -37,11 +37,11 @@
 #ifndef _UCACHE_FATAL_H_
 #define _UCACHE_FATAL_H_
 
-/* Basic error codes */
+// Basic error codes
 #define NONFATAL                            0
 #define FATAL                               1
 
-/* General purpose error codes */
+// General purpose error codes
 #define FATAL_OUT_OF_MEMORY                 10
 #define FATAL_OUT_OF_LMEMORY                10
 #define FATAL_OUT_OF_SMEMORY                11
@@ -57,7 +57,7 @@
 #define FATAL_ZEND_BAILOUT                  98
 #define FATAL_UNKNOWN_FATAL                 99
 
-/* Error codes used by lock functionality */
+// Error codes used by lock functionality
 #define FATAL_LOCK_BASE                     100
 #define FATAL_LOCK_INIT_CREATEMUTEX         FATAL_LOCK_BASE + 1
 #define FATAL_LOCK_INIT_CREATEEVENT         FATAL_LOCK_BASE + 2
@@ -68,7 +68,7 @@
 #define FATAL_LOCK_WAIT                     FATAL_LOCK_BASE + 7
 #define FATAL_LOCK_UNDO                     FATAL_LOCK_BASE + 8
 
-/* Error codes used in filemap functionality */
+// Error codes used in filemap functionality
 #define FATAL_FILEMAP_BASE                  200
 #define FATAL_FILEMAP_CREATION              FATAL_FILEMAP_BASE + 1
 #define FATAL_FILEMAP_INFOCREATE            FATAL_FILEMAP_BASE + 2
@@ -85,20 +85,20 @@
 #define FATAL_FILEMAP_REVERT_FAILED         FATAL_FILEMAP_BASE + 14
 #define FATAL_FILEMAP_IMPERSONATE_FAILED    FATAL_FILEMAP_BASE + 15
 
-/* Error codes used by shared memory allocator */
+// Error codes used by shared memory allocator
 #define FATAL_ALLOC_BASE                    300
 #define FATAL_ALLOC_NO_MEMORY               FATAL_ALLOC_BASE + 1
 #define FATAL_ALLOC_INIT_EVENT              FATAL_ALLOC_BASE + 2
 #define FATAL_ALLOC_SEGMENT_CORRUPT         FATAL_ALLOC_BASE + 3
 
-/* Error codes used by zvcache */
+// Error codes used by zvcache
 #define FATAL_ZVCACHE_BASE                  900
 #define FATAL_ZVCACHE_INITIALIZE            FATAL_ZVCACHE_BASE + 1
 #define FATAL_ZVCACHE_INIT_EVENT            FATAL_ZVCACHE_BASE + 2
 #define FATAL_ZVCACHE_INVALID_ZVAL          FATAL_ZVCACHE_BASE + 3
 #define FATAL_ZVCACHE_INVALID_KEY_LENGTH    FATAL_ZVCACHE_BASE + 4
 
-/* Warning codes */
+// Warning codes
 #define WARNING_COMMON_BASE                 5000
 #define WARNING_ZVCACHE_EMISSING            WARNING_COMMON_BASE + 4
 #define WARNING_ZVCACHE_EXISTS              WARNING_COMMON_BASE + 5
@@ -109,7 +109,7 @@
 #define WARNING_APPPOOL_NAME_NOT_FOUND      WARNING_COMMON_BASE + 13
 #define WARNING_LOCK_ABANDONED              WARNING_COMMON_BASE + 14
 
-/* SUCCEEDED and FAILED macros */
+// SUCCEEDED and FAILED macros
 #ifdef SUCCEEDED
 #undef SUCCEEDED
 #endif
@@ -130,4 +130,4 @@ extern unsigned int error_setlasterror();
 extern char*        error_gethrmessage();
 extern char*        error_getmessage(unsigned int error_code);
 
-#endif /* _UCACHE_FATAL_H_ */
+#endif // _UCACHE_FATAL_H_

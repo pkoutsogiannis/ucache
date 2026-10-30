@@ -39,21 +39,26 @@
 #ifdef _WIN64
 #define LOCK_SUFFIX_FORMAT              "_%u_%u_%s_x64_"
 #define LOCK_NAMESALT_SUFFIX_FORMAT     "_%u_%s_%u_%s_x64_"
-#else  /* not _WIN64 */
+#else  // not _WIN64
 #define LOCK_SUFFIX_FORMAT              "_%u_%u_%s_"
 #define LOCK_NAMESALT_SUFFIX_FORMAT     "_%u_%s_%u_%s_"
-#endif /* _WIN64 */
+#endif // _WIN64
 
-/* Prefix of every named lock object, so that lock (and init event) */
-/* names never match the ones created by another extension */
+// Prefix of every named lock object, so that lock (and init event)
+// names never match the ones created by another extension
 #define LOCK_NAME_PREFIX                "UCACHE_"
 
 
-/* Globals */
+// Globals
 unsigned short glockid = 1;
 
-/* Create a new lock context */
-/* Call lock_initialize to actually create the lock */
+/**
+ * Create a new lock context
+ * Call lock_initialize to actually create the lock
+ *
+ * @param pplock  out: the new context, NULL on failure; free it with lock_destroy
+ * @return NONFATAL on success, FATAL_OUT_OF_LMEMORY if the allocation fails
+ */
 int lock_create(lock_context** pplock) {
     int            result = NONFATAL;
     lock_context*  plock = NULL;
@@ -69,7 +74,7 @@ int lock_create(lock_context** pplock) {
         goto Finished;
     }
 
-    /* Initialize lock_context structure with default values */
+    // Initialize lock_context structure with default values
     plock->id = glockid++;
     plock->type = LOCK_TYPE_INVALID;
     plock->unused = 0;
@@ -79,7 +84,7 @@ int lock_create(lock_context** pplock) {
     plock->hxlock = NULL;
     plock->last_owner = NULL;
 
-    /* id is 8 bit field. Keep maximum to 255 */
+    // id is 8 bit field. Keep maximum to 255
     if (glockid == 256) {
         glockid = 1;
     }
@@ -98,7 +103,13 @@ Finished:
     return result;
 }
 
-/* Destroy the lock context */
+/**
+ * Destroy the lock context
+ *
+ * Frees the context only: call lock_terminate first, which closes the mutex and frees the name.
+ *
+ * @param plock  the context from lock_create, may be NULL
+ */
 void lock_destroy(lock_context* plock) {
     dprintverbose("start lock_destroy");
 
@@ -113,7 +124,21 @@ void lock_destroy(lock_context* plock) {
     dprintverbose("end lock_destroy");
 }
 
-/* Caller must free ppnew_prefix using alloc_pefree() */
+/**
+ * Caller must free ppnew_prefix using alloc_pefree()
+ *
+ * Builds the prefix of the names of the objects of a lock: "UCACHE_<name>_<PHP major and minor version>_<ucache
+ * version>_<cachekey>[_<namesalt>]_0_<group>_[x64_]". The buffer has 2 bytes to spare, for a character the
+ * caller appends.
+ *
+ * @param name            base name, not empty
+ * @param cachekey        key of the cache, written in the name
+ * @param type            lock type: only LOCK_TYPE_SHARED is valid (the name then holds the group)
+ * @param ppnew_prefix    out: the new prefix (set only on success)
+ * @param pcchnew_prefix  out: its length in characters (set only on success)
+ * @return NONFATAL on success, else FATAL_LOCK_INVALID_TYPE (another type), FATAL_LOCK_LONGNAME (the name
+ *         would reach MAX_PATH - 1 characters, or did not fit), FATAL_OUT_OF_LMEMORY
+ */
 int lock_get_nameprefix(
     char* name,
     unsigned short cachekey,
@@ -128,18 +153,18 @@ int lock_get_nameprefix(
     int          pid = 0;
     const char*  group = NULL;
 
-    /* Get the initial length of name prefix */
+    // Get the initial length of name prefix
     namelen = strlen(name);
     _ASSERT(namelen > 0);
 
-    /* If a namesalt is specified, put _<salt> in the name */
+    // If a namesalt is specified, put _<salt> in the name
     if (UCG(namesalt) != NULL) {
         namelen += strlen(UCG(namesalt)) + 1;
     }
 
-    /* A lock shared by the processes of the group has the group in its name (see */
-    /* filemap_global_initialize). The pid stays 0 in the name: only the */
-    /* process-local lock type, now removed, set it */
+    // A lock shared by the processes of the group has the group in its name (see
+    // filemap_global_initialize). The pid stays 0 in the name: only the
+    // process-local lock type, now removed, set it
     switch (type) {
         case LOCK_TYPE_SHARED:
             group = UCG(fmapgdata)->group;
@@ -150,21 +175,21 @@ int lock_get_nameprefix(
             goto Finished;
     }
 
-    /* Add 6 for underscores, 1 for null termination, */
-    /* LOCK_NUMBER_MAX_STRLEN for adding cachekey, 2 for the pid (always 0), */
-    /* PHP_UCACHE_VERSION_LEN, plus the length of the PHP Maj.Min version. */
+    // Add 6 for underscores, 1 for null termination,
+    // LOCK_NUMBER_MAX_STRLEN for adding cachekey, 2 for the pid (always 0),
+    // PHP_UCACHE_VERSION_LEN, plus the length of the PHP Maj.Min version.
     namelen = namelen + LOCK_NUMBER_MAX_STRLEN + 9;
     namelen += sizeof(STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION));
     namelen += PHP_UCACHE_VERSION_LEN;
 
-    /* Add the length of LOCK_NAME_PREFIX */
+    // Add the length of LOCK_NAME_PREFIX
     namelen += sizeof(LOCK_NAME_PREFIX) - 1;
 
-    /* Add 2 for lock-type padding.  The buffer will be used to tack on
-     * an extra char for the lock type by the caller. */
+    // Add 2 for lock-type padding.  The buffer will be used to tack on
+    // an extra char for the lock type by the caller.
     namelen += 2;
 
-    /* Synchronization object names are limited to MAX_PATH characters */
+    // Synchronization object names are limited to MAX_PATH characters
     if (namelen >= MAX_PATH - 1) {
         result = FATAL_LOCK_LONGNAME;
         goto Finished;
@@ -178,7 +203,7 @@ int lock_get_nameprefix(
 
     ZeroMemory(objname, namelen + 1);
 
-    /* Create nameprefix as name_pid_group_ */
+    // Create nameprefix as name_pid_group_
     if (UCG(namesalt) == NULL) {
         actual_len = _snprintf_s(objname, namelen + 1, namelen, LOCK_NAME_PREFIX "%s_" STRVER2(PHP_MAJOR_VERSION, PHP_MINOR_VERSION) "_" PHP_UCACHE_VERSION LOCK_SUFFIX_FORMAT, name, cachekey, pid, group);
     } else {
@@ -191,7 +216,7 @@ int lock_get_nameprefix(
         goto Finished;
     }
 
-    /* Zero out the trailing portion of the buffer, for safety! */
+    // Zero out the trailing portion of the buffer, for safety!
     ZeroMemory(objname + actual_len, namelen - actual_len);
 
     *ppnew_prefix = objname;
@@ -201,25 +226,34 @@ Finished:
     return result;
 }
 
-/* Initialize the lock context with valid information */
-/* lock is not ready to use unless initialize is called */
-/*++
-
-Arguments:
-
-    plock           pointer to lock_context to be initialized
-    name            unique name for this lock
-    cachekey        ?
-    type            scope of this lock (LOCK_TYPE_SHARED, the only one)
-    plast_owner     Optional pointer to unsigned int that will receive the PID
-                    of the process which last successfully acquired the lock.
-
-Return Value:
-
-    NONFATAL                    Success
-    FAIL_LOCK_INIT_CREATMUTEX   Failed to create named mutex.  Call error_getlasterror() for more info.
-
---*/
+/**
+ * Initialize the lock context with valid information
+ * lock is not ready to use unless initialize is called
+ *
+ * Arguments:
+ *
+ *     plock           pointer to lock_context to be initialized
+ *     name            unique name for this lock
+ *     cachekey        ?
+ *     type            scope of this lock (LOCK_TYPE_SHARED, the only one)
+ *     plast_owner     Optional pointer to unsigned int that will receive the PID
+ *                     of the process which last successfully acquired the lock.
+ *
+ * Return Value:
+ *
+ *     NONFATAL                    Success
+ *     FAIL_LOCK_INIT_CREATMUTEX   Failed to create named mutex.  Call error_getlasterror() for more info.
+ *
+ * @param plock        the context from lock_create; receives the type, the name and the mutex handle
+ * @param name         base name of the lock (see lock_get_nameprefix)
+ * @param cachekey     key of the cache, written in the name: 1 to LOCK_NUMBER_MAXIMUM
+ * @param type         lock type: LOCK_TYPE_SHARED, the only valid one
+ * @param plast_owner  pointer to the shared unsigned int that receives the PID of the last owner, may be NULL
+ * @return NONFATAL on success, else FATAL_LOCK_NUMBER_LARGE (cachekey above LOCK_NUMBER_MAXIMUM), the code of
+ *         lock_get_nameprefix (FATAL_LOCK_INVALID_TYPE, FATAL_LOCK_LONGNAME, FATAL_OUT_OF_LMEMORY), or
+ *         FATAL_LOCK_INIT_CREATEMUTEX (CreateMutex failed; the Windows error is recorded); on failure the
+ *         context is left without name or handle
+ */
 int lock_initialize(lock_context* plock, char* name, unsigned short cachekey, unsigned short type, unsigned int* plast_owner) {
     int    result = NONFATAL;
     char*  objname = 0;
@@ -243,15 +277,15 @@ int lock_initialize(lock_context* plock, char* name, unsigned short cachekey, un
         goto Finished;
     }
 
-    /* lock_get_nameprefix validates that 'type' is a valid lock type */
+    // lock_get_nameprefix validates that 'type' is a valid lock type
     plock->type = type;
 
-    /* Use the name prefix as the lock name */
+    // Use the name prefix as the lock name
     plock->nameprefix = objname;
     _ASSERT(namelen < (MAX_PATH));
     plock->namelen = (unsigned short)namelen;
 
-    /* Create mutex which will be used to synchronize access */
+    // Create mutex which will be used to synchronize access
     plock->hxlock = CreateMutex(NULL, FALSE, objname);
     if (plock->hxlock == NULL) {
         dprintimportant("Failed to create lock %s due to error %u", objname, error_setlasterror());
@@ -289,6 +323,12 @@ Finished:
     return result;
 }
 
+/**
+ * Closes the mutex of a lock and frees its name, leaving the context as lock_create made it (unlocked,
+ * invalid type), ready for lock_destroy.
+ *
+ * @param plock  the context, may be NULL
+ */
 void lock_terminate(lock_context* plock) {
     dprintverbose("start lock_terminate");
 
@@ -313,12 +353,18 @@ void lock_terminate(lock_context* plock) {
     dprintverbose("end lock_terminate");
 }
 
-/*
+/**
  * Acquire write lock.  Returns NONFATAL; WARNING_LOCK_ABANDONED if the process that held the mutex
  * ended without releasing it (killed, for example by an IIS FastCGI timeout, or crashed): the mutex is
  * ours all the same, and what it guards may be half updated (see lock_undo_write); or FATAL_LOCK_WAIT if
  * the wait failed (an invalid handle): the lock is not held then, and the caller must not use what it
  * guards nor release the lock.
+ *
+ * Waits without a timeout. Once the lock is held, stores this process's PID in the last owner, if any.
+ *
+ * @param plock  an initialized lock, not held by this process
+ * @return NONFATAL if the lock was acquired, WARNING_LOCK_ABANDONED if it was acquired from a process that
+ *         ended holding it, FATAL_LOCK_WAIT if the wait failed (the lock is not held)
  */
 int lock_lock(lock_context* plock) {
     int          result = NONFATAL;
@@ -330,15 +376,15 @@ int lock_lock(lock_context* plock) {
     _ASSERT(plock != NULL);
     _ASSERT(plock->hxlock != NULL);
 
-    /* Simple case. Just lock hxwrite */
+    // Simple case. Just lock hxwrite
     ret = WaitForSingleObject(plock->hxlock, INFINITE);
 
-    /* PID of the process which got the lock before, for the messages below */
+    // PID of the process which got the lock before, for the messages below
     if (plock->last_owner) {
         last_owner = *plock->last_owner;
     }
 
-    /* The mutex is ours all the same: record it as for WAIT_OBJECT_0 below, so that lock_unlock() finds it locked */
+    // The mutex is ours all the same: record it as for WAIT_OBJECT_0 below, so that lock_unlock() finds it locked
     if (ret == WAIT_ABANDONED) {
         error_setlasterror();
         dprintcritical("lock_lock: acquired abandoned mutex %s (last owner pid %u). Something bad happend in another process!",
@@ -366,7 +412,7 @@ Finished:
     return result;
 }
 
-/*
+/**
  * The undo log.  IIS ends a FastCGI process at any instruction (activityTimeout, requestTimeout, a
  * stopped or recycled pool), and a process can crash.  If that happens while it holds a mutex in the
  * middle of an update of shared memory made of several writes (a split or a free of the allocator,
@@ -390,6 +436,15 @@ Finished:
  * only keeps the accesses before it before it, not the ones after.  _ReadWriteBarrier() keeps both in
  * place; it costs no instruction.  A replay is idempotent: a process ended while it replays leaves the
  * log as it was, and the next one replays it again.
+ *
+ * lock_undo_initialize sets up pundo, in this process, to log the fields of the segment at pbase into the
+ * shared count and entries; it does not change the count or the entries.
+ *
+ * @param pundo     out: the process-local description of the log
+ * @param pbase     start of the segment that the lock guards (the offsets of the log are from it)
+ * @param size      size of the segment in bytes
+ * @param pcount    the count of the log, in the shared segment
+ * @param pentries  the LOCK_UNDO_MAXIMUM entries of the log, in the shared segment
  */
 void lock_undo_initialize(lock_undo* pundo, void* pbase, size_t size, unsigned int* pcount, lock_undo_entry* pentries) {
     _ASSERT(pundo != NULL);
@@ -403,7 +458,13 @@ void lock_undo_initialize(lock_undo* pundo, void* pbase, size_t size, unsigned i
     pundo->size = size;
 }
 
-/* An update logs more fields than the log holds (see lock_undo_write): out of line, it never happens */
+/**
+ * An update logs more fields than the log holds (see lock_undo_write): out of line, it never happens
+ *
+ * Marks the log LOCK_UNDO_OVERFLOW, reporting it only the first time.
+ *
+ * @param pundo  the log
+ */
 static __declspec(noinline) void lock_undo_overflow(lock_undo* pundo) {
     if (*pundo->pcount != LOCK_UNDO_OVERFLOW) {
         dprintcritical("lock_undo_write: an update writes more than %u fields: it cannot be undone", LOCK_UNDO_MAXIMUM);
@@ -411,13 +472,18 @@ static __declspec(noinline) void lock_undo_overflow(lock_undo* pundo) {
     }
 }
 
-/*
+/**
  * Writes value into the field of width bytes (4 or 8) at pfield, after logging what the field held (see
  * above); use LOCK_UNDO_SET.  A log never takes more than LOCK_UNDO_MAXIMUM entries: an update that would
  * log more (no update does, see LOCK_UNDO_MAXIMUM) writes its fields without logging them, and marks the
  * log LOCK_UNDO_OVERFLOW.  If the process completes the update, the log is emptied as usual; if it ends
  * first, the next owner of the lock cannot undo the update whole, and does not use the structures the lock
  * guards (see lock_undo_replay): the calls fail rather than work on half-updated memory.
+ *
+ * @param pundo   the log; call under the lock that guards its segment
+ * @param pfield  the field to write, inside the segment of pundo
+ * @param width   size of the field in bytes: 4 or 8
+ * @param value   the new value (truncated to 32 bits for a 4-byte field)
  */
 void lock_undo_write(lock_undo* pundo, void* pfield, size_t width, unsigned __int64 value) {
     unsigned int      count = *pundo->pcount;
@@ -432,14 +498,14 @@ void lock_undo_write(lock_undo* pundo, void* pfield, size_t width, unsigned __in
         pentry->where = (size_t)((char*)pfield - pundo->pbase) | ((width == 8) ? 1 : 0);
         pentry->value = (width == 8) ? *(unsigned __int64*)pfield : *(unsigned int*)pfield;
 
-        /* The entry before the count that includes it */
+        // The entry before the count that includes it
         _ReadWriteBarrier();
         *pundo->pcount = count + 1;
     } else {
         lock_undo_overflow(pundo);
     }
 
-    /* The count before the field */
+    // The count before the field
     _ReadWriteBarrier();
 
     if (width == 8) {
@@ -449,21 +515,31 @@ void lock_undo_write(lock_undo* pundo, void* pfield, size_t width, unsigned __in
     }
 }
 
-/* The update is complete: a process ended from here on leaves nothing to undo */
+/**
+ * The update is complete: a process ended from here on leaves nothing to undo
+ *
+ * Empties the log (count 0).
+ *
+ * @param pundo  the log; call under the lock, after the last write of the update
+ */
 void lock_undo_commit(lock_undo* pundo) {
-    /* Every write of the update before the log is emptied, and every write after the update after it */
+    // Every write of the update before the log is emptied, and every write after the update after it
     _ReadWriteBarrier();
     *pundo->pcount = 0;
     _ReadWriteBarrier();
 }
 
-/*
+/**
  * Call under the lock, when the log is not empty: puts back the fields of the update that the process
  * before left half done, the last first, and empties the log.  Returns how many, or -1 if the log cannot
  * be replayed: an update overflowed it (see lock_undo_write), or the memory is not a log (an entry outside
  * the segment, a count past the log).  It is left as it is then, nothing put back, so that every process
  * finds it so: the caller must not use the structures the lock guards.  Out of line: it runs only after a
  * process ended inside an update.
+ *
+ * @param pundo  the log
+ * @return the number of fields put back (0 if the log was empty), or -1 if the log cannot be replayed (count
+ *         above LOCK_UNDO_MAXIMUM, including LOCK_UNDO_OVERFLOW, or an entry misaligned or outside the segment)
  */
 __declspec(noinline) int lock_undo_replay(lock_undo* pundo) {
     unsigned int      count = *pundo->pcount;
@@ -499,7 +575,7 @@ __declspec(noinline) int lock_undo_replay(lock_undo* pundo) {
         }
     }
 
-    /* Every field back before the log is emptied */
+    // Every field back before the log is emptied
     _ReadWriteBarrier();
     *pundo->pcount = 0;
     _ReadWriteBarrier();
@@ -507,7 +583,11 @@ __declspec(noinline) int lock_undo_replay(lock_undo* pundo) {
     return (int)count;
 }
 
-/* Release write lock */
+/**
+ * Release write lock
+ *
+ * @param plock  a lock that this process holds (lock_lock returned NONFATAL or WARNING_LOCK_ABANDONED)
+ */
 void lock_unlock(lock_context* plock) {
     dprintverbose("start lock_unlock %p", plock);
 
@@ -515,7 +595,7 @@ void lock_unlock(lock_context* plock) {
     _ASSERT(plock->hxlock != NULL);
     _ASSERT(plock->state == LOCK_STATE_LOCKED);
 
-    /* Simple case. Just release the mutex */
+    // Simple case. Just release the mutex
     plock->state = LOCK_STATE_UNLOCKED;
     ReleaseMutex(plock->hxlock);
 

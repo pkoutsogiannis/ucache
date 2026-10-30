@@ -52,23 +52,45 @@ error_context ucache_errors[] =
     { FATAL_ALLOC_NO_MEMORY, "Fatal: Shared memory segment is completely full" }
 };
 
-/* Windows maintain last error code for each thread */
-/* We are only maintaining for the process */
+// Windows maintain last error code for each thread
+// We are only maintaining for the process
 unsigned int error_glerror = 0;
 
+/**
+ * The last Windows error that error_setlasterror() recorded for the process.
+ *
+ * @return the recorded error code (0 if none was recorded)
+ */
 unsigned int error_getlasterror() {
     return error_glerror;
 }
 
+/**
+ * Records GetLastError() of the calling thread as the last error of the process (error_glerror).
+ *
+ * @return the recorded error code
+ */
 unsigned int error_setlasterror() {
     error_glerror = GetLastError();
     return error_glerror;
 }
 
+/**
+ * The message of ucache_errors for the recorded last error (error_glerror), through error_getmessage().
+ *
+ * @return a static string (not to be freed); NULL if ucache_errors has no entry for that code
+ */
 char* error_gethrmessage() {
     return error_getmessage(error_glerror);
 }
 
+/**
+ * The message of ucache_errors for an error code. The loop compares the entries with error_glerror, the recorded
+ * last error, not with error_code, so it returns the message of the recorded last error whatever error_code is.
+ *
+ * @param error_code  the error code to look up (not used by the lookup, see above)
+ * @return a static string (not to be freed); NULL if ucache_errors has no entry for error_glerror
+ */
 char* error_getmessage(unsigned int error_code) {
     int    count = 0;
     int    index = 0;

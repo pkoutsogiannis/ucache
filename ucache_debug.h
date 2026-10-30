@@ -46,4 +46,4 @@ extern void dprintdecorate(char* format, ...);
 
 ZEND_INI_MH(ucache_modify_debuglevel);
 
-#endif /* _UCACHE_DEBUG_H_ */
+#endif // _UCACHE_DEBUG_H_

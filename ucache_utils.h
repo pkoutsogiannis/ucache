@@ -66,4 +66,4 @@ extern void         utils_reimpersonate_if_necessary(HANDLE hOriginalToken);
 
 extern const char* utils_get_typename(zend_uchar type);
 
-#endif /* _UCACHE_UTILS_H_ */
+#endif // _UCACHE_UTILS_H_
