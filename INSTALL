@@ -8,14 +8,15 @@ Requirements
 
 Building
 --------
-build.bat builds bin\Release\php_ucache.dll with MSBuild (Visual Studio 2022)
-against the PHP 7.2 NTS x64 devel pack, then runs test-build.php with the PHP
-found in PHP_DIR. Adjust MSBUILD, DEVEL_DIR and PHP_DIR at the top of
-build.bat first.
+build.bat builds bin\Release\<version>\php72\php_ucache.dll with MSBuild
+(Visual Studio 2022) against the PHP 7.2 NTS x64 devel pack, then runs
+test-build.php with the PHP found in PHP_DIR. <version> is the name of the
+current git branch (1.0.0.0, ...), or else the version in precomp.h. Adjust
+MSBUILD, DEVEL_DIR and PHP_DIR at the top of build.bat first.
 
   build.bat           build and test
   build.bat install   build, copy php_ucache.dll into %PHP_DIR%\ext, delete
-                      the bin folder, and test the installed DLL
+                      the build's folder, and test the installed DLL
 
 Installation
 ------------
