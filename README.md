@@ -1,4 +1,13 @@
-# UCache
+<p align="center">
+    <img style="height:80px" src="ucache-logo.svg">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/github/issues/pkoutsogiannis/ucache" alt="Issues">
+  <img src="https://img.shields.io/github/languages/top/pkoutsogiannis/ucache" alt="Language">
+  <img src="https://img.shields.io/github/stars/pkoutsogiannis/ucache" alt="Stars">
+  <img src="https://img.shields.io/github/forks/pkoutsogiannis/ucache" alt="Forks">
+</p>
 
 UCache is the user cache of WinCache (Microsoft's Windows Cache Extension for PHP, 2.0.0.8) as a PHP extension of
 its own, for PHP 7.2, 7.3, 7.4, 8.0, 8.1, 8.2, 8.3, 8.4 and 8.5 on Windows x64. Extension `ucache`, file
