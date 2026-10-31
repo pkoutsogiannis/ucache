@@ -37,6 +37,11 @@
 #ifndef _UCACHE_ZVCACHE_H_
 #define _UCACHE_ZVCACHE_H_
 
+// ucache.bucketbytes: one hash bucket per this many bytes of the cache, the default and the limits
+#define ZVCACHE_BUCKET_BYTES_DEFAULT  512
+#define ZVCACHE_BUCKET_BYTES_MINIMUM  64
+#define ZVCACHE_BUCKET_BYTES_MAXIMUM  65536
+
 typedef struct _zvcache_hashtable_pool_tracker zvcache_hashtable_pool_tracker;
 struct _zvcache_hashtable_pool_tracker {
     size_t        val;                   // Hashtable *ht; Offset
@@ -141,6 +146,7 @@ struct zvcache_context {
     size_t            freelist;          // Entries unlinked under the lock, freed once it is released (chained by next_value)
     unsigned int      freecount;         // How many entries freelist holds
     size_t            maxfree;           // The most the cache holds, its free memory when it is empty (alloc_capacity); 0 if not known
+    unsigned int      bucketbytes;       // Bytes of the segment per hash bucket in the table the cache has, whatever this process's ucache.bucketbytes
     lock_undo         undo;              // The undo log of the cache, in its header (see zvcache_lock)
 };
 
@@ -150,6 +156,7 @@ struct zvcache_info {
     unsigned int      hitcount;          // Cumulative hitcount of zvcache
     unsigned int      misscount;         // Cumulative misscount of zvcache
     unsigned int      itemcount;         // Number of items including stale ones
+    unsigned int      bucketcount;       // Hash buckets of the table
     zend_bool         scavenged;         // A scavenger step ran since the cache was created
     unsigned int      scage;             // Seconds since the last scavenger step
     unsigned int      sccount;           // Entries the last scavenger step removed
@@ -174,7 +181,8 @@ extern void zvcache_destroy(zvcache_context* pcache);
 extern int  zvcache_initialize(
     zvcache_context* pcache,
     unsigned short cachekey,
-    unsigned int cachesize
+    unsigned int cachesize,
+    unsigned int bucketbytes
 );
 
 extern void zvcache_terminate(zvcache_context* pcache);

@@ -81,6 +81,7 @@ static int        functions_register(int type);
 static void       functions_unregister(void);
 static ZEND_INI_MH(ucache_modify_size);
 static void       size_validate(void);
+static void       bucketbytes_validate(void);
 static void       startup_failure_warning(int result);
 
 // START OF PHP EXTENSION MACROS STUFF
@@ -218,6 +219,7 @@ PHP_INI_BEGIN()
 /* index --*/  STD_PHP_INI_ENTRY("ucache.gc.ttl", "0", PHP_INI_SYSTEM, OnUpdateLong, ucgc_ttl, zend_ucache_globals, ucache_globals)
 /* index --*/  STD_PHP_INI_ENTRY("ucache.gc.evict", "0", PHP_INI_SYSTEM, OnUpdateLong, ucgc_evict, zend_ucache_globals, ucache_globals)
 /* index --*/  STD_PHP_INI_ENTRY("ucache.prefix", PREFIX_DEFAULT, PHP_INI_SYSTEM, OnUpdateString, prefix, zend_ucache_globals, ucache_globals)
+/* index --*/  PHP_INI_ENTRY("ucache.bucketbytes", ZEND_TOSTR(ZVCACHE_BUCKET_BYTES_DEFAULT), PHP_INI_SYSTEM, NULL)
 PHP_INI_END()
 
 // END OF PHP EXTENSION MACROS STUFF
@@ -242,6 +244,8 @@ static void globals_initialize(zend_ucache_globals* globals) {
     UCG(ucenabled) = 1;             // User cache enabled by default
     UCG(enablecli) = 0;             // ucache not enabled by default for CLI
     UCG(ucachesize) = SIZE_DEFAULT; // User cache size is 8 MB by default
+    // One hash bucket per 512 bytes of a cache that this process creates
+    UCG(bucketbytes) = ZVCACHE_BUCKET_BYTES_DEFAULT;
     UCG(ucgc_threshold) = 0;        // Writes do not run the scavenger by default
     UCG(ucgc_interval) = 10;        // Secs between scavenger runs at the end of requests
     UCG(ucgc_ttl) = 0;              // Scavenger removes expired entries only
@@ -396,6 +400,61 @@ static void size_validate(void) {
         zend_error(E_CORE_WARNING, "ucache.size \"%s\" is outside %d to %d MB: the cache has %d MB",
             value, ZCACHE_SIZE_MINIMUM, ZCACHE_SIZE_MAXIMUM, (int)size);
     }
+}
+
+/**
+ * Reads ucache.bucketbytes into UCG(bucketbytes): a number of bytes in decimal, with blanks allowed around it, clamped
+ * to ZVCACHE_BUCKET_BYTES_MINIMUM..ZVCACHE_BUCKET_BYTES_MAXIMUM with a startup warning; anything else gives the default
+ * with a startup warning, and so does an empty value, without one. The INI entry has no handler of its own, so that
+ * ini_get() and phpinfo() show the value as written, and PHP 8.2 and later add no warning of theirs to this one. Called
+ * by MINIT where it creates the cache, the only place that uses the value (see zvcache_initialize)
+ */
+static void bucketbytes_validate(void) {
+    const char*  value = INI_STR("ucache.bucketbytes");
+    size_t       index = 0;
+    size_t       digits = 0;
+    zend_ulong   number = 0;
+    zend_ulong   bytes = 0;
+
+    UCG(bucketbytes) = ZVCACHE_BUCKET_BYTES_DEFAULT;
+
+    if (value == NULL) {
+        return;
+    }
+
+    while (value[index] == ' ' || value[index] == '\t') {
+        index++;
+    }
+
+    // Empty: the default, as when the setting is not there
+    if (value[index] == '\0') {
+        return;
+    }
+
+    // Saturated above the maximum, which then clamps it
+    for (; value[index] >= '0' && value[index] <= '9'; index++, digits++) {
+        if (number <= ZVCACHE_BUCKET_BYTES_MAXIMUM) {
+            number = number * 10 + (zend_ulong)(value[index] - '0');
+        }
+    }
+
+    while (value[index] == ' ' || value[index] == '\t') {
+        index++;
+    }
+
+    if (digits == 0 || value[index] != '\0') {
+        zend_error(E_CORE_WARNING, "ucache.bucketbytes \"%s\" is not a number of bytes: the cache has the default, one hash bucket per %d bytes",
+            value, ZVCACHE_BUCKET_BYTES_DEFAULT);
+        return;
+    }
+
+    bytes = MIN(MAX(number, ZVCACHE_BUCKET_BYTES_MINIMUM), ZVCACHE_BUCKET_BYTES_MAXIMUM);
+    if (bytes != number) {
+        zend_error(E_CORE_WARNING, "ucache.bucketbytes \"%s\" is outside %d to %d bytes: the cache has one hash bucket per %d bytes",
+            value, ZVCACHE_BUCKET_BYTES_MINIMUM, ZVCACHE_BUCKET_BYTES_MAXIMUM, (int)bytes);
+    }
+
+    UCG(bucketbytes) = (unsigned int)bytes;
 }
 
 /**
@@ -571,9 +630,10 @@ static void functions_unregister(void) {
 
 /**
  * Module startup: initializes the globals, registers the INI entries and the functions (under ucache.prefix), then,
- * unless this is the CLI without ucache.enablecli, normalizes the empty INI strings, validates ucache.size, cuts
- * ucache.namesalt and creates the user cache (filemap globals, then the zvcache). A cache that cannot be created
- * gets a startup warning (startup_failure_warning) and leaves UCG(zvucache) NULL, so the functions fail
+ * unless this is the CLI without ucache.enablecli, normalizes the empty INI strings, validates ucache.size and
+ * ucache.bucketbytes, cuts ucache.namesalt and creates the user cache (filemap globals, then the zvcache). A cache that
+ * cannot be created gets a startup warning (startup_failure_warning) and leaves UCG(zvucache) NULL, so the functions
+ * fail
  *
  * @param type  the module type, passed to functions_register
  * @return SUCCESS, always: a failure to create the cache does not stop PHP from starting
@@ -612,8 +672,9 @@ PHP_MINIT_FUNCTION(ucache) {
         UCG(namesalt) = NULL;
     }
 
-    // Then the size, with its startup warning
+    // Then the size and the hash buckets, with their startup warnings
     size_validate();
+    bucketbytes_validate();
 
     // Truncate namesalt to 8 characters, in a copy (see ucache_namesalt)
     if (UCG(namesalt) != NULL && strlen(UCG(namesalt)) > NAMESALT_LENGTH_MAXIMUM) {
@@ -646,7 +707,7 @@ PHP_MINIT_FUNCTION(ucache) {
     }
 
     // cachekey = 1
-    result = zvcache_initialize(pzcache, 1, UCG(ucachesize));
+    result = zvcache_initialize(pzcache, 1, UCG(ucachesize), UCG(bucketbytes));
     if (FAILED(result)) {
         goto Finished;
     }
@@ -1449,12 +1510,12 @@ Finished:
  *                              $offset and $limit then do not apply
  * @param int     $offset       optional, default 0: entries to skip in the full list
  * @param int     $limit        optional, default 0: at most this many entries in the full list, 0 for all
- * @return array with total_cache_uptime, is_local_cache (always false), total_item_count, total_hit_count,
- *         total_miss_count, last_scavenge_seconds (null before the first scavenger step), last_scavenge_count,
- *         total_scavenged_count, total_evicted_count, total_abandoned_lock_count and ucache_entries, the entries
- *         (key_name, value_type, value_size, ttl_seconds, age_seconds, hitcount) indexed from $offset + 1 (from 1
- *         with $key); false when the cache is unavailable, $offset or $limit is negative (with a warning), or the
- *         call fails (memory_limit included)
+ * @return array with total_cache_uptime, is_local_cache (always false), total_item_count, hash_bucket_count,
+ *         total_hit_count, total_miss_count, last_scavenge_seconds (null before the first scavenger step),
+ *         last_scavenge_count, total_scavenged_count, total_evicted_count, total_abandoned_lock_count and
+ *         ucache_entries, the entries (key_name, value_type, value_size, ttl_seconds, age_seconds, hitcount) indexed
+ *         from $offset + 1 (from 1 with $key); false when the cache is unavailable, $offset or $limit is negative
+ *         (with a warning), or the call fails (memory_limit included)
  */
 PHP_FUNCTION(ucache_info) {
     int                  result = NONFATAL;
@@ -1512,6 +1573,8 @@ PHP_FUNCTION(ucache_info) {
     // Always false: the user cache is always the one shared by the processes of the pool
     add_assoc_bool(return_value, "is_local_cache", 0);
     add_assoc_long(return_value, "total_item_count", zvinfo.itemcount);
+    // The hash buckets of the cache (ucache.bucketbytes of the process that created it)
+    add_assoc_long(return_value, "hash_bucket_count", zvinfo.bucketcount);
     add_assoc_long(return_value, "total_hit_count", zvinfo.hitcount);
     add_assoc_long(return_value, "total_miss_count", zvinfo.misscount);
 

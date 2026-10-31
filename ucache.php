@@ -113,7 +113,8 @@ $settings_to_hide = ['ucache.debuglevel'];
 
 // The groups of the Cache settings card, each in this order; a setting that none lists goes last in the first one
 $setting_groups = [
-    'Cache' => ['ucache.enabled', 'ucache.enablecli', 'ucache.size', 'ucache.prefix', 'ucache.apppoolid', 'ucache.namesalt', 'ucache.filemapdir'],
+    'Cache' => ['ucache.enabled', 'ucache.enablecli', 'ucache.size', 'ucache.bucketbytes', 'ucache.prefix', 'ucache.apppoolid', 'ucache.namesalt',
+                'ucache.filemapdir'],
     'Scavenger' => ['ucache.gc.interval', 'ucache.gc.step', 'ucache.gc.ttl', 'ucache.gc.threshold', 'ucache.gc.evict'],
 ];
 
@@ -354,6 +355,16 @@ function setting_note($name, $value) {
                 return $note;
             }
             break;
+        case 'ucache.bucketbytes':
+            // The table of the cache in use, whichever setting the process that created it had: a cache keeps its table,
+            // as it keeps its size, until every process of the pool has exited
+            if (is_array($GLOBALS['ucache_info']) && isset($GLOBALS['ucache_info']['hash_bucket_count'])
+                && $GLOBALS['ucache_info']['hash_bucket_count'] > 0 && is_array($GLOBALS['ucache_mem_info'])) {
+                $buckets = (int)$GLOBALS['ucache_info']['hash_bucket_count'];
+                return format_number($buckets) . ' hash buckets, one per '
+                    . format_number(intdiv((int)$GLOBALS['ucache_mem_info']['memory_total'], $buckets)) . ' bytes';
+            }
+            break;
     }
     if ($number === null) {
         return null;
@@ -363,6 +374,10 @@ function setting_note($name, $value) {
             // The extension takes 5 to 930
             $size = min(max($number, 5), 930);
             return format_number($size) . ' MB of shared memory' . ($size != $number ? ($size > $number ? ' (the minimum)' : ' (the maximum)') : '');
+        case 'ucache.bucketbytes':
+            // The extension takes 64 to 65536
+            $bytes = min(max($number, 64), 65536);
+            return 'one hash bucket per ' . format_number($bytes) . ' bytes' . ($bytes != $number ? ($bytes > $number ? ' (the minimum)' : ' (the maximum)') : '');
         case 'ucache.gc.interval':
             return $number > 0 ? 'a step every ' . format_duration($number) . ', at the end of a request' : 'off';
         case 'ucache.gc.step':

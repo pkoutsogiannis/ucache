@@ -120,6 +120,7 @@ The following table lists and explains the configuration settings provided by th
 | `ucache.enabled` | "1" | "0" | "1" | PHP_INI_ALL | Available as of UCache 1.0.0 |
 | `ucache.enablecli` | "0" | "0" | "1" | PHP_INI_SYSTEM | Available as of UCache 1.0.0 |
 | `ucache.size` | "8" | "5" | "930" | PHP_INI_SYSTEM | Available as of UCache 1.0.0 |
+| `ucache.bucketbytes` | "512" | "64" | "65536" | PHP_INI_SYSTEM | Available as of UCache 1.0.0.2 |
 | `ucache.namesalt` | NULL | | | PHP_INI_SYSTEM | Available as of UCache 1.0.0 |
 | `ucache.apppoolid` | NULL | | | PHP_INI_SYSTEM | Available as of UCache 1.0.0 |
 | `ucache.filemapdir` | NULL | | | PHP_INI_SYSTEM | Available as of UCache 1.0.0 |
@@ -160,6 +161,23 @@ nearest limit, with a startup warning. Digits followed by other text (`64MiB`) a
 warning, and any other value (`abc`, `-1`, `0x40`) gives the default, 8 MB, with a startup warning; so does an empty
 value, without one. `ini_get()` and `phpinfo()` show the value as written, `ucache_meminfo()` the size of the cache
 (see [Startup warnings](#startup-warnings)).
+
+`ucache.bucketbytes` *int*
+
+Defines the size of the hash table of the cache: one hash bucket per this many bytes of `ucache.size`, 64 to 65536
+(the table has the largest prime number of buckets up to that, which `ucache_info()` reports as `hash_bucket_count`).
+Every key is looked up in the chain of entries of its bucket. Each bucket takes 8 bytes of the cache: with the default,
+512, the buckets take 1.6% of it, and the chains of a cache full of small entries (about 200 bytes each) hold 2 to 3
+entries. A smaller value shortens the chains at the cost of memory (12.5% of the cache at 64) and of the time of what
+goes through the whole table: at 64, a full listing of `ucache_info()` of a nearly empty 930 MB cache took 7 ms instead
+of 1, and a `ucache_clear()` 11 ms instead of 2. A larger one gives the memory back, but the chains of small entries
+grow (about 20 entries at 4096, 300 at 65536): every lookup goes through its chain, and the full pass of a full cache
+through all of them, more slowly (71 ms instead of 21 for 128 MB of small entries, at 4096 as at 65536): keep larger
+values for a cache of large values (see [Tuning](#tuning)). A value outside 64..65536 is clamped to the nearest limit,
+and a value that is not a number of bytes (`4K`) gives the default, each with a startup warning; an empty value gives
+the default without one. Only the process that creates the cache uses it: a cache keeps its table for as long as it
+lives, as it keeps its size (see [Settings per IIS application pool](#settings-per-iis-application-pool)).
+`ucache.gc.step` counts buckets of this table.
 
 `ucache.namesalt` *string*
 
@@ -236,15 +254,15 @@ functions. This manual names the functions with the default prefix. ucache.php f
 #### Startup warnings
 
 UCache raises a startup warning (`E_CORE_WARNING`) when it cannot use a setting as written (`ucache.size`,
-`ucache.prefix`) and when it cannot create the cache. PHP writes startup warnings to its error log (the file of
+`ucache.bucketbytes`, `ucache.prefix`) and when it cannot create the cache. PHP writes startup warnings to its error log (the file of
 `error_log`, or else the error output of the process) and, on Windows, to the Application event log, with the source
 `PHP-<version>` (for example `PHP-8.4.14`) and the event ID 4: PHP 7 always does, PHP 8 when `log_errors` is on (as in
 php.ini-production and php.ini-development) or `display_startup_errors` is off. Event Viewer says that the description
 of the event cannot be found, and shows the warning under "the following information was included with the event". With
 `display_startup_errors` on, PHP also displays it (the CLI prints it). Every PHP process raises the warning again when
 it starts, and IIS starts new php-cgi processes regularly: fix the setting rather than ignore the warning. The
-`ucache.size` and cache warnings are not raised under the CLI without `ucache.enablecli=1`, where no cache is created;
-the `ucache.prefix` warning is.
+`ucache.size`, `ucache.bucketbytes` and cache warnings are not raised under the CLI without `ucache.enablecli=1`, where
+no cache is created; the `ucache.prefix` warning is.
 
 When the cache cannot be created, PHP runs without it: the functions return false (`ucache_meminfo()` returns null),
 and the `User cache` line of `phpinfo()` says `unavailable`. The warning gives the UCache error and, where it applies,
@@ -289,11 +307,12 @@ The application still needs arguments that differ from those of the other applic
 
 The processes that share a cache must use the same `ucache.*` settings. Two sites of one pool that use different FastCGI
 applications still share the pool's cache: give them different `ucache.namesalt` values if their settings differ.
-php-cgi reads the settings when it starts: after changing them, recycle the pool. After changing `ucache.size`, stop the
-pool and, once its php-cgi processes have exited, start it again instead: an overlapped recycle (the IIS default) starts
-the new processes while the old ones still run, and the new processes would open the cache of the old ones and keep its
-old size, also after the old ones have exited: a cache keeps the size it was created with for as long as any process of
-the pool has it open, which under steady traffic can be until the pool is stopped (see [Installation](#installation)).
+php-cgi reads the settings when it starts: after changing them, recycle the pool. After changing `ucache.size` or
+`ucache.bucketbytes`, stop the pool and, once its php-cgi processes have exited, start it again instead: an overlapped
+recycle (the IIS default) starts the new processes while the old ones still run, and the new processes would open the
+cache of the old ones and keep its old size and hash table, also after the old ones have exited: a cache keeps the size
+and the table it was created with for as long as any process of the pool has it open, which under steady traffic can be
+until the pool is stopped (see [Installation](#installation)).
 `phpinfo()` on a site shows the settings its processes use.
 
 ### Resource Types
@@ -540,12 +559,13 @@ A step goes through `ucache.gc.step` buckets, at most the whole table. The defau
 buckets x `ucache.gc.interval` / 300, rounded up (buckets / 300 when `ucache.gc.interval` is 0), so that the steps at
 the end of requests go through the whole table in at most about 5 minutes while requests keep coming, and the steps
 on writes, a second apart, `ucache.gc.interval` times faster (in about 5 minutes when `ucache.gc.interval` is 0, while
-writes keep coming). The table has a prime number of buckets, the largest prime up to one bucket per 512 bytes of
-`ucache.size`: 16381 for the default 8 MB (547 buckets a step), 1904621 for 930 MB (63488 buckets a step). A step also
-stops after about 1 ms of work under the cache lock, and the next step goes on from there: the clock is read every 256
-buckets, and after each bucket where the step removed entries, since each removal beyond the first 32 frees its memory
-under the lock (see [Freeing memory](#freeing-memory)). So a step holds the cache lock for about 1 ms at most, but
-going through a table that holds many entries can take more than 5 minutes.
+writes keep coming). The table has a prime number of buckets, the largest prime up to one bucket per
+`ucache.bucketbytes` bytes of `ucache.size` (512 by default): 16381 for the default 8 MB (547 buckets a step), 1904621
+for 930 MB (63488 buckets a step). A step also stops after about 1 ms of work under the cache lock, and the next step
+goes on from there: the clock is read every 256 buckets of 512 bytes (in proportion with other sizes: every 2 buckets of
+65536 bytes, every 2048 of 64), and after each bucket where the step removed entries, since each removal beyond the
+first 32 frees its memory under the lock (see [Freeing memory](#freeing-memory)). So a step holds the cache lock for
+about 1 ms at most, but going through a table that holds many entries can take more than 5 minutes.
 
 ### A full cache
 
@@ -610,8 +630,9 @@ while the last process of the pool exits), which is not counted.
 `ucache_clear()` clears the cache at once, under the cache lock: from then on no process sees the entries that were in
 it (the calls miss them, the listing and `total_item_count` leave them out), and an entry stored afterwards is kept.
 Then it removes them and frees their memory in batches: each batch takes the cache lock for at most 32 entries (fewer if
-their values took 256 KB) or 4096 hash buckets, and frees its entries once the lock is released, taking the lock of the
-allocator once for the batch. So the other processes go on reading and writing meanwhile: a read waits for one batch at
+their values took 256 KB) or 4096 hash buckets of 512 bytes (in proportion with other `ucache.bucketbytes`: 32 buckets
+of 65536 bytes), and frees its entries once the lock is released, taking the lock of the allocator once for the batch.
+So the other processes go on reading and writing meanwhile: a read waits for one batch at
 most, or a few milliseconds while several processes free entries at once, and a `ucache_set()` or `ucache_add()` first
 runs batches itself, for about 0.1 second at most, before it stores its value (each key of the array forms does, so that
 an array form of many keys can wait until the entries are all freed). A value stored while entries are still being
@@ -670,6 +691,13 @@ neither are removals on contact, deletes, replaces and clears.
 - `ucache.gc.interval=0` turns off the steps at the end of requests: expired entries are then removed only on contact,
   by steps on writes (`ucache.gc.threshold`) and by the full pass of a full cache. It suits a cache where no entry has a
   ttl and `ucache.gc.ttl` is 0, since steps have nothing to remove there.
+- `ucache.bucketbytes` trades memory for speed: around the default it moves little memory either way, and larger
+  buckets soon slow down the lookups of small entries. Measured on PHP 7.2, in a cache of 128 MB filled until a write
+  failed: with small entries (an integer, a key of 40 characters), 128 bytes stored 4.8% fewer entries than the default
+  512 and read them in 1.07 microseconds instead of 1.19 (a missing key 0.89 instead of 1.04), 4096 stored 1.4% more
+  and read them in 2.0 (2.7), and 65536 1.6% more in 16.9 (31.7), with 316 entries per bucket; the full pass of that
+  full cache took 21 ms at 512 and 71 ms at 4096 and 65536. With arrays of 14 strings (about 1.6 KB serialized), reads
+  took 1.68, 1.68, 1.78 and 2.26 microseconds, and with strings of 1 KB 1.25, 1.23, 1.42 and 3.46.
 
 ## UCache Functions
 
@@ -1408,6 +1436,7 @@ negative, or memory_limit was reached while the entries were listed). The array 
 - `total_cache_uptime` - total time in seconds that the user cache has been active
 - `is_local_cache` - always false (the user cache is always the shared one)
 - `total_item_count` - total number of elements that are currently in the user cache, expired ones included
+- `hash_bucket_count` - the hash buckets of the cache (see `ucache.bucketbytes`): 16381 for the default 8 MB
 - `total_hit_count` - number of times the data has been served from the cache
 - `total_miss_count` - number of times the data has not been found in the cache
 - `last_scavenge_seconds` - seconds since the scavenger last ran a step (at the end of a request or on a write) or a
@@ -1459,6 +1488,7 @@ Array
     [total_cache_uptime] => 0
     [is_local_cache] => 
     [total_item_count] => 2
+    [hash_bucket_count] => 16381
     [total_hit_count] => 1
     [total_miss_count] => 1
     [last_scavenge_seconds] => 
@@ -1513,6 +1543,7 @@ Array
     [total_cache_uptime] => 0
     [is_local_cache] => 
     [total_item_count] => 1
+    [hash_bucket_count] => 16381
     [total_hit_count] => 0
     [total_miss_count] => 0
     [last_scavenge_seconds] => 
@@ -1863,7 +1894,8 @@ PowerShell script holds named objects of a cache. They check what a single proce
 
 - a cache shared by several processes, and which processes share one (`ucache.apppoolid`, `APP_POOL_ID`, the parent
   process);
-- the settings read at startup (`ucache.size`, `ucache.prefix`), and a cache that cannot be created;
+- the settings read at startup (`ucache.size`, `ucache.bucketbytes`, `ucache.prefix`), and a cache that cannot be
+  created;
 - the processes that start while the last process of their pool closes the cache, or after one died while it created the
   cache (the PowerShell script holds the named objects of the cache as such processes find them; without
   `powershell.exe`, or where it runs in ConstrainedLanguage mode, these checks are skipped, with a `SKIP` line);
@@ -1986,12 +2018,14 @@ Several of these change what existing code sees.
   killed during the clear left the entries it had not reached in the cache.
 - Lookups stay fast as the cache fills: the hash table has one bucket per 512 bytes of `ucache.size` (16381 for the
   default 8 MB, 262139 for 128 MB), so its chains hold 2 to 3 entries on average even in a cache full of the smallest
-  entries, and the whole key is hashed. WinCache 2.0.0.8 had one bucket per 32 to 64 KB (197 for 8 MB, 3203 for 128 MB)
-  and put every key longer than 260 characters into the same bucket. With 500,000 entries of 40-character keys in
-  128 MB, its chains held about 156 entries, and a read compared its key with theirs one by one: it took about
-  9 microseconds, 17 for a missing key, with keys that differ from their first characters, and about 10 and 20 with keys
-  that share their first 33, against about 1 with UCache's table. 5,000 keys of 300 characters in one chain made a read
-  take about 13 microseconds and a miss 26, against about 1.3 when they are spread.
+  entries, and the whole key is hashed; `ucache.bucketbytes` sets other sizes, and `ucache_info()` reports the number
+  (`hash_bucket_count`). WinCache 2.0.0.8 had one bucket per 32 to 64 KB (197 for 8 MB, 3203 for 128 MB), which no
+  setting changed, and put every key longer than 260 characters into the same bucket. With 500,000 entries of
+  40-character keys in 128 MB, its chains held about 156 entries, and a read
+  compared its key with theirs one by one: it took about 9 microseconds, 17 for a missing key, with keys that differ
+  from their first characters, and about 10 and 20 with keys that share their first 33, against about 1 with UCache's
+  table. 5,000 keys of 300 characters in one chain made a read take about 13 microseconds and a miss 26, against about
+  1.3 when they are spread.
 - A `ttl` is taken as given up to 4294967295 seconds, and as 4294967295 above. WinCache 2.0.0.8 cut it to 32 bits:
   2147483648 to 4294967295 were refused as negative ttls, 4294967296 meant no expiry and 4294967297 one second.
 - UCache measures times with the 64-bit millisecond tick count of Windows, which does not wrap: an entry expires on

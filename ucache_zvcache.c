@@ -63,12 +63,14 @@
 // we need zend_long's to be at least as big as size_t.
 C_ASSERT(SIZEOF_SIZE_T <= SIZEOF_ZEND_LONG);
 
-// One hash bucket per this many bytes of the cache (the largest prime up to that number of buckets).
-// An entry takes 168 bytes or more (208 with a key of 40 characters and an integer value), so the
-// chains of a cache full of small entries hold 2 to 3 entries on average, and the buckets (8 bytes
-// each) take about 1.6% of the cache.  WinCache had one bucket per 32 to 64 KB: 197 for 8 MB, whose
-// chains could hold hundreds of small entries each.
-#define ZVCACHE_BUCKET_BYTES         512
+// By default, one hash bucket per this many bytes of the cache (ucache.bucketbytes; the largest prime up
+// to that number of buckets).  An entry takes 168 bytes or more (208 with a key of 40 characters and an
+// integer value), so the chains of a cache full of small entries hold 2 to 3 entries on average, and the
+// buckets (8 bytes each) take about 1.6% of the cache.  WinCache had one bucket per 32 to 64 KB: 197 for
+// 8 MB, whose chains could hold hundreds of small entries each.  The work that is counted in buckets (the
+// batches of the sweep of the cleared entries, the reads of the clock in a scavenger step) is counted in
+// buckets of this size, and scaled to the buckets of the cache (see buckets_scaled)
+#define ZVCACHE_BUCKET_BYTES         ZVCACHE_BUCKET_BYTES_DEFAULT
 
 // The bytes above: a zvcache_value of 64 bytes, its key and the top-level zval, each in a block of
 // the allocator (x64; config.w32 also allows an x86 build, where the structure is smaller)
@@ -133,8 +135,9 @@ static int  copyout_reference(zvcache_context* pcache, zvcopy_context* pcopy, Ha
 // At most this many removed entries wait to be freed after the cache lock is released (see remove_zvcache_entry)
 #define FREELIST_MAXIMUM            32
 
-// A batch of the sweep of the cleared entries goes through at most this many buckets, and removes
-// entries whose values took this many bytes at most, or one entry (see sweep_cleared_entries)
+// A batch of the sweep of the cleared entries goes through at most this many buckets (of
+// ZVCACHE_BUCKET_BYTES, see buckets_scaled), and removes entries whose values took this many bytes at
+// most, or one entry (see sweep_cleared_entries)
 #define CLEAR_SWEEP_BUCKETS         4096
 #define CLEAR_SWEEP_BYTES           (256 * 1024)
 
@@ -170,6 +173,7 @@ static void           free_pending_entries(zvcache_context* pcache);
 static zend_bool      entry_expired(zvcache_value* pvalue, ULONGLONG ticks);
 static zend_bool      entry_cleared(zvcache_header* header, zvcache_value* pvalue);
 static zend_bool      clear_pending(zvcache_header* header);
+static unsigned int   buckets_scaled(zvcache_context* pcache, unsigned int count);
 static void           sweep_cleared_entries(zvcache_context* pcache, LONGLONG budget, unsigned char owner);
 static LONGLONG       scavenger_elapsed_us(const LARGE_INTEGER* pstart);
 static unsigned int   reclaim_entries(zvcache_context* pcache, zend_long* ppercent, size_t minimum);
@@ -2638,14 +2642,33 @@ static zend_bool clear_pending(zvcache_header* header) {
 }
 
 /**
+ * A number of buckets of the cache that holds about as many entries as count buckets of ZVCACHE_BUCKET_BYTES: the
+ * work that is counted in buckets under the cache lock (a batch of the sweep of the cleared entries, the buckets
+ * between two reads of the clock) stays about the same with any ucache.bucketbytes. Larger buckets hold more entries
+ * each in a full cache (about 300 small ones at 65536 bytes, where 4096 buckets would take tens of milliseconds to go
+ * through), smaller ones fewer. Rounded to the nearest: a table has a few more bytes per bucket than ucache.bucketbytes
+ * (the largest prime number of buckets up to it), so 256 buckets of 512 bytes are 2 of 65536, not 1
+ *
+ * @param pcache  the cache (bucketbytes, set by zvcache_initialize)
+ * @param count   a number of buckets of ZVCACHE_BUCKET_BYTES
+ * @return the number of buckets of the cache, rounded, at least 1
+ */
+static unsigned int buckets_scaled(zvcache_context* pcache, unsigned int count) {
+    size_t bytes = MAX(pcache->bucketbytes, 1);
+    size_t scaled = ((size_t)count * ZVCACHE_BUCKET_BYTES + bytes / 2) / bytes;
+
+    return (unsigned int)MIN(MAX(scaled, 1), UINT_MAX);
+}
+
+/**
  * Removes the entries that ucache_clear() left in the table (see zvcache_clear), a batch at a time: a
- * batch takes the cache lock, goes on from clearnext through CLEAR_SWEEP_BUCKETS buckets at most, and
- * removes FREELIST_MAXIMUM cleared entries at most, or entries whose values took CLEAR_SWEEP_BYTES (at
- * least one entry), whose freeing then takes about as long as the rest of the batch; then it releases
- * the lock and frees them, holding the allocator's lock for the batch (alloc_hold) instead of taking it
- * for each block.  So the other processes wait one batch at most, for the cache lock as for the
- * allocator's, or a few milliseconds while several processes sweep at once (writes help, see
- * zvcache_set).  Each batch goes on where the last one stopped, in any process.
+ * batch takes the cache lock, goes on from clearnext through CLEAR_SWEEP_BUCKETS buckets at most (scaled
+ * to the buckets of the cache, see buckets_scaled), and removes FREELIST_MAXIMUM cleared entries at most,
+ * or entries whose values took CLEAR_SWEEP_BYTES (at least one entry), whose freeing then takes about as
+ * long as the rest of the batch; then it releases the lock and frees them, holding the allocator's lock for
+ * the batch (alloc_hold) instead of taking it for each block.  So the other processes wait one batch at
+ * most, for the cache lock as for the allocator's, or a few milliseconds while several processes sweep at
+ * once (writes help, see zvcache_set).  Each batch goes on where the last one stopped, in any process.
  *
  * owner: the process that sweeps to the end, the one whose ucache_clear() started the sweep
  * (zvcache_header.sweeper); it stops if another one took the sweep over.  The others (a write before
@@ -2666,6 +2689,8 @@ static void sweep_cleared_entries(zvcache_context* pcache, LONGLONG budget, unsi
     unsigned int     last = 0;
     unsigned int     pid = GetCurrentProcessId();
     unsigned int     scanned = 0;
+    unsigned int     batch = buckets_scaled(pcache, CLEAR_SWEEP_BUCKETS);
+    unsigned int     clockevery = buckets_scaled(pcache, 256);
     size_t           bytes = 0;
     unsigned char    full = 0;
     unsigned char    held = 0;
@@ -2691,7 +2716,7 @@ static void sweep_cleared_entries(zvcache_context* pcache, LONGLONG budget, unsi
         }
 
         index = header->clearnext;
-        last = MIN(index + CLEAR_SWEEP_BUCKETS, header->valuecount);
+        last = MIN(index + batch, header->valuecount);
         bytes = 0;
         full = 0;
         scanned = 0;
@@ -2722,8 +2747,9 @@ static void sweep_cleared_entries(zvcache_context* pcache, LONGLONG budget, unsi
 
             index++;
 
-            // A sweep with a budget stops the batch once its time has passed
-            if (budget != 0 && (++scanned % 256) == 0 && scavenger_elapsed_us(&started) >= budget) {
+            // A sweep with a budget stops the batch once its time has passed (the clock read every 256 buckets of
+            // ZVCACHE_BUCKET_BYTES)
+            if (budget != 0 && (++scanned % clockevery) == 0 && scavenger_elapsed_us(&started) >= budget) {
                 break;
             }
         }
@@ -2844,12 +2870,12 @@ static ULONGLONG scavenger_interval_ms(void) {
 #define SCAVENGER_STEP_MINIMUM      16
 
 // A step stops after about this much work under the cache lock, and the next one goes on from
-// there; the clock is read every SCAVENGER_CLOCK_EVERY buckets, which hold a few hundred entries
-// on average in a full cache (see ZVCACHE_BUCKET_BYTES). Most buckets are empty otherwise: read
-// every 16 buckets, the clock took about half the time of a step. It is also read after a bucket
-// where the step removed entries: past FREELIST_MAXIMUM, each one is freed under the lock (5 to
-// 30 microseconds early in a mass removal), and steps that removed a few hundred held the lock
-// 2 to 7 ms
+// there; the clock is read every SCAVENGER_CLOCK_EVERY buckets (of ZVCACHE_BUCKET_BYTES, see
+// buckets_scaled), which hold a few hundred entries on average in a full cache. Most buckets are
+// empty otherwise: read every 16 buckets, the clock took about half the time of a step. It is also
+// read after a bucket where the step removed entries: past FREELIST_MAXIMUM, each one is freed under
+// the lock (5 to 30 microseconds early in a mass removal), and steps that removed a few hundred held
+// the lock 2 to 7 ms
 #define SCAVENGER_STEP_BUDGET_US    1000
 #define SCAVENGER_CLOCK_EVERY       256
 
@@ -3175,6 +3201,7 @@ int zvcache_run_scavenger(zvcache_context* pcache, unsigned int force) {
     unsigned int  sindex = 0;
     unsigned int  eindex = 0;
     unsigned int  scanned = 0;
+    unsigned int  clockevery = buckets_scaled(pcache, SCAVENGER_CLOCK_EVERY);
     ULONGLONG     ticks = GetTickCount64();
     ULONGLONG     wait = 0;
     unsigned int  step = 0;
@@ -3243,7 +3270,7 @@ int zvcache_run_scavenger(zvcache_context* pcache, unsigned int force) {
 
     for (;sindex < eindex; sindex++) {
         // About SCAVENGER_STEP_BUDGET_US of work under the lock: the next step goes on from here
-        if (scanned != 0 && ((scanned % SCAVENGER_CLOCK_EVERY) == 0 || count != counted)
+        if (scanned != 0 && ((scanned % clockevery) == 0 || count != counted)
             && scavenger_elapsed_us(&started) > SCAVENGER_STEP_BUDGET_US) {
             break;
         }
@@ -3362,6 +3389,7 @@ int zvcache_create(zvcache_context** ppcache) {
     pcache->freelist = 0;
     pcache->freecount = 0;
     pcache->maxfree = 0;
+    pcache->bucketbytes = ZVCACHE_BUCKET_BYTES;
     memset(&pcache->undo, 0, sizeof(pcache->undo));
 
     *ppcache = pcache;
@@ -3398,19 +3426,22 @@ void zvcache_destroy(zvcache_context* pcache) {
 
 /**
  * Opens the user cache of the pool, or creates it: maps its shared memory segment, sets up its allocator, its
- * header with the hash buckets (a prime number of them, one per ZVCACHE_BUCKET_BYTES bytes of the segment)
- * and its undo log, the cross-process cache lock, and the copy contexts of the process. Whether the segment
- * is initialized or only opened is decided under the init mutex (hinitdone). On failure, the allocator, the
- * segment, the lock and the init mutex are closed again.
+ * header with the hash buckets (the largest prime number of them up to one per bucketbytes bytes of the
+ * segment) and its undo log, the cross-process cache lock, and the copy contexts of the process. Whether the
+ * segment is initialized or only opened is decided under the init mutex (hinitdone). A segment that is only
+ * opened keeps the buckets it has, whatever bucketbytes says, as it keeps its size. On failure, the allocator,
+ * the segment, the lock and the init mutex are closed again.
  *
- * @param pcache     the context (zvcache_create)
- * @param cachekey   the key of the cache, part of the names of its shared objects
- * @param cachesize  the size of the cache in MB (2 to 1024)
+ * @param pcache       the context (zvcache_create)
+ * @param cachekey     the key of the cache, part of the names of its shared objects
+ * @param cachesize    the size of the cache in MB (2 to 1024)
+ * @param bucketbytes  ucache.bucketbytes: bytes of the segment per hash bucket when the segment is initialized
+ *                     (ZVCACHE_BUCKET_BYTES_MINIMUM to ZVCACHE_BUCKET_BYTES_MAXIMUM)
  * @return NONFATAL, else FATAL_ZVCACHE_INIT_EVENT (the init mutex), FATAL_ZVCACHE_INITIALIZE (no room for the
  *         header), FATAL_OUT_OF_LMEMORY (the copy contexts), or the failure of the filemap, allocator or lock
  *         function that failed
  */
-int zvcache_initialize(zvcache_context* pcache, unsigned short cachekey, unsigned int cachesize) {
+int zvcache_initialize(zvcache_context* pcache, unsigned short cachekey, unsigned int cachesize, unsigned int bucketbytes) {
     int              result = NONFATAL;
     size_t           segsize = 0;
     zvcache_header*  header = NULL;
@@ -3429,6 +3460,7 @@ int zvcache_initialize(zvcache_context* pcache, unsigned short cachekey, unsigne
 
     _ASSERT(pcache != NULL);
     _ASSERT(cachesize >= 2 && cachesize <= 1024);
+    _ASSERT(bucketbytes >= ZVCACHE_BUCKET_BYTES_MINIMUM && bucketbytes <= ZVCACHE_BUCKET_BYTES_MAXIMUM);
 
     // Initialize memory map to store the user cache
     result = filemap_create(&pcache->zvfilemap);
@@ -3482,8 +3514,9 @@ int zvcache_initialize(zvcache_context* pcache, unsigned short cachekey, unsigne
         goto Finished;
     }
 
-    // Get memory for cache header
-    zvcount = utils_get_prime_less_than(segsize / ZVCACHE_BUCKET_BYTES);
+    // Get memory for cache header: the size is only used by the process that initializes the segment, the
+    // others get the header that exists, with the buckets it has (valuecount)
+    zvcount = utils_get_prime_less_than(segsize / MAX(bucketbytes, ZVCACHE_BUCKET_BYTES_MINIMUM));
     msize = sizeof(zvcache_header) + ((zvcount - 1) * sizeof(size_t));
     pcache->zvheader = (zvcache_header*)alloc_get_cacheheader(pcache->zvalloc, msize, CACHE_TYPE_USERZVALS);
     if (pcache->zvheader == NULL) {
@@ -3554,6 +3587,10 @@ int zvcache_initialize(zvcache_context* pcache, unsigned short cachekey, unsigne
         // Increment the mapcount
         InterlockedIncrement(&header->mapcount);
     }
+
+    // The buckets of the table the cache has: a process that opened a cache created with another
+    // ucache.bucketbytes scales its batches to that table (see buckets_scaled)
+    pcache->bucketbytes = (unsigned int)(segsize / MAX(header->valuecount, 1));
 
     // Create incopy and outcopy zvcopy contexts
     pcache->incopy = (zvcopy_context*)alloc_pemalloc(sizeof(zvcopy_context));
@@ -4495,6 +4532,7 @@ int zvcache_list(zvcache_context* pcache, zend_bool summaryonly, char* pkey, zen
     pcinfo->hitcount = header->hitcount;
     pcinfo->misscount = header->misscount;
     pcinfo->itemcount = header->itemcount;
+    pcinfo->bucketcount = header->valuecount;
 
     pcinfo->scavenged = (header->scruns != 0);
     pcinfo->scage = pcinfo->scavenged ? (unsigned int)(utils_ticksdiff(cticks, header->scticks) / 1000) : 0;

@@ -583,6 +583,7 @@ $expectedIni = [
     'ucache.gc.ttl'       => ['0',  INI_SYSTEM],
     'ucache.gc.evict'     => ['0',  INI_SYSTEM],
     'ucache.prefix'       => ['ucache_', INI_SYSTEM],
+    'ucache.bucketbytes'  => ['512', INI_SYSTEM],
 ];
 
 $ini = ini_get_all('ucache');
@@ -591,7 +592,7 @@ $names = array_keys($ini);
 $expectedNames = array_keys($expectedIni);
 sort($names);
 sort($expectedNames);
-check('INI settings are exactly the 13 ucache.* settings', $names === $expectedNames, $names);
+check('INI settings are exactly the 14 ucache.* settings', $names === $expectedNames, $names);
 
 $badAccess = [];
 foreach ($expectedIni as $name => $spec) {
@@ -1059,10 +1060,16 @@ if (PHP_VERSION_ID >= 80000) {
 
 $info = ucache_info();
 check('ucache_info() returns the expected keys', is_array($info) && array_keys($info) ===
-      ['total_cache_uptime', 'is_local_cache', 'total_item_count', 'total_hit_count', 'total_miss_count', 'last_scavenge_seconds',
-       'last_scavenge_count', 'total_scavenged_count', 'total_evicted_count', 'total_abandoned_lock_count', 'ucache_entries'],
+      ['total_cache_uptime', 'is_local_cache', 'total_item_count', 'hash_bucket_count', 'total_hit_count', 'total_miss_count',
+       'last_scavenge_seconds', 'last_scavenge_count', 'total_scavenged_count', 'total_evicted_count', 'total_abandoned_lock_count',
+       'ucache_entries'],
       is_array($info) ? array_keys($info) : $info);
 check('the user cache is not a local cache', $info['is_local_cache'] === false, $info['is_local_cache']);
+/* build.bat gives this process the default ucache.size and ucache.bucketbytes, and no other process shares its cache */
+if (get_cfg_var('ucache.size') === false && get_cfg_var('ucache.bucketbytes') === false) {
+    check('ucache_info() reports the hash buckets of the default table: 16381 for 8 MB, the largest prime up to one per 512 bytes',
+          isset($info['hash_bucket_count']) && $info['hash_bucket_count'] === 16381, isset($info['hash_bucket_count']) ? $info['hash_bucket_count'] : null);
+}
 check('ucache_info() reports no abandoned lock in a cache whose processes all released their locks (total_abandoned_lock_count is 0)',
       isset($info['total_abandoned_lock_count']) && $info['total_abandoned_lock_count'] === 0,
       isset($info['total_abandoned_lock_count']) ? $info['total_abandoned_lock_count'] : null);
@@ -2715,6 +2722,22 @@ function timed_check($name, array $attempts, $resultName)
 function limit_exit_ok($exit)
 {
     return (PHP_VERSION_ID >= 80000) ? $exit === 255 : ($exit === 1 || $exit === 255);
+}
+
+/* The hash buckets of a cache of $megabytes MB created with ucache.bucketbytes $bytes, as zvcache_initialize() computes
+   them: the largest odd prime up to one per $bytes bytes */
+function bucket_count($megabytes, $bytes)
+{
+    $candidate = intdiv($megabytes * 1048576, $bytes);
+    $candidate -= ($candidate % 2 === 0) ? 1 : 0;
+    while (true) {
+        for ($divisor = 3; $divisor <= intdiv($candidate, $divisor) && $candidate % $divisor !== 0; $divisor += 2) {
+        }
+        if ($divisor > intdiv($candidate, $divisor)) {
+            return $candidate;
+        }
+        $candidate -= 2;
+    }
 }
 
 /* The names of the kernel objects of the cache of pool id $pool (without ucache.namesalt), as the extension builds them:
@@ -6384,6 +6407,113 @@ CHILDSCRIPT
     check('(in another process) under the CLI without ucache.enablecli, phpinfo() says disabled and a ucache.size that is not valid raises no warning, but an invalid ucache.prefix does',
           $sizeOk(9), $sizeDetail([9]));
 
+    /* ucache.bucketbytes: the table of a new cache has the largest prime number of hash buckets up to one per that many
+       bytes, 64 to 65536 (512 by default), which ucache_info() reports (hash_bucket_count). Outside 64 to 65536 it is
+       clamped, and anything but a number of bytes gives the default, each with a startup warning; an empty value gives the
+       default without one. Chains of about 24 entries (3000 entries in the 127 buckets of 65536) and tables of a million
+       buckets (64 in 64 MB) work alike, and ucache_clear() frees every entry, its batches scaled to the buckets. A process
+       that opens a running cache with another ucache.bucketbytes uses the table of that cache */
+    $bucketScript = $childDir . DIRECTORY_SEPARATOR . 'buckets.php';
+    file_put_contents($bucketScript, <<<'CHILDSCRIPT'
+<?php
+/* ucache.bucketbytes as ini_get() shows it, hash_bucket_count, then 3000 entries: how many were stored and read back, the
+   entries counted, how many a ucache_clear() left (with argv[1] 'shared', a ucache_delete() of the 3000 instead, and what
+   the key 'pooled' of another process holds), and whether the free memory is back to what it was */
+$shared = isset($argv[1]) && $argv[1] === 'shared';
+$count = ucache_info(true)['hash_bucket_count'];
+$free = ucache_meminfo()['memory_free'];
+$keys = [];
+$stored = 0;
+$read = 0;
+for ($i = 0; $i < 3000; $i++) {
+    $keys[] = "bucket_$i";
+    $stored += ucache_set("bucket_$i", [$i, str_repeat('b', $i % 100)]) ? 1 : 0;
+}
+for ($i = 0; $i < 3000; $i++) {
+    $read += (ucache_get("bucket_$i") === [$i, str_repeat('b', $i % 100)]) ? 1 : 0;
+}
+$items = ucache_info(true)['total_item_count'];
+$pooled = $shared ? ucache_get('pooled') : null;
+if ($shared) {
+    ucache_delete($keys);
+} else {
+    ucache_clear();
+}
+$left = 0;
+foreach ($keys as $key) {
+    $left += ucache_exists($key) ? 1 : 0;
+}
+echo "RESULT ", base64_encode(serialize([ini_get('ucache.bucketbytes'), $count, $stored, $read, $items, $left,
+                                         ucache_meminfo()['memory_free'] === $free, $pooled])), "\n";
+CHILDSCRIPT
+    );
+
+    $bucketCases = [
+        /* [settings, [ini_get(), hash_bucket_count], warning expected or null] */
+        [[], ['512', bucket_count(8, 512)], null],
+        [['ucache.bucketbytes' => '64'], ['64', bucket_count(8, 64)], null],
+        [['ucache.bucketbytes' => '65536'], ['65536', bucket_count(8, 65536)], null],
+        [['ucache.bucketbytes' => '1000'], ['1000', bucket_count(8, 1000)], null],
+        [['ucache.bucketbytes' => ''], ['', bucket_count(8, 512)], null],
+        [['ucache.size' => '64', 'ucache.bucketbytes' => '64'], ['64', bucket_count(64, 64)], null],
+        [['ucache.bucketbytes' => '8'], ['8', bucket_count(8, 64)],
+         'ucache.bucketbytes "8" is outside 64 to 65536 bytes: the cache has one hash bucket per 64 bytes'],
+        [['ucache.bucketbytes' => '1000000'], ['1000000', bucket_count(8, 65536)],
+         'ucache.bucketbytes "1000000" is outside 64 to 65536 bytes: the cache has one hash bucket per 65536 bytes'],
+        [['ucache.bucketbytes' => '4K'], ['4K', bucket_count(8, 512)],
+         'ucache.bucketbytes "4K" is not a number of bytes: the cache has the default, one hash bucket per 512 bytes'],
+    ];
+    $bucketChildren = [];
+    foreach ($bucketCases as $n => $case) {
+        $bucketChildren[$n] = child_start("bb-$n", child_php_args($poolBase . "bb$n", $case[0], $bucketScript));
+    }
+    $bucketHolder = child_start('bb-holder', child_php_args($poolBase . 'bbs', ['ucache.bucketbytes' => '4096'], $holderScript,
+                                                            ['pooled', 'stored with 4096']));
+    $bucketHolderReady = child_wait_for($bucketHolder, '/^READY/m', 30);
+    $bucketSharer = child_start('bb-sharer', child_php_args($poolBase . 'bbs', ['ucache.bucketbytes' => '64'], $bucketScript, ['shared']));
+
+    $bucketResults = [];
+    foreach ($bucketChildren as $n => $child) {
+        $exit = child_finish($child, 60);
+        $output = child_output($child);
+        $warning = $bucketCases[$n][2];
+        $bucketResults[$n] = ['exit code' => $exit, 'result' => child_result($child),
+                              'warned as expected' => ($warning === null) ? strpos($output, 'ucache.bucketbytes') === false
+                                                                          : strpos($output, $warning) !== false,
+                              'output' => child_tail($child)];
+    }
+    $bucketOk = function (array $cases) use ($bucketResults, $bucketCases) {
+        foreach ($cases as $n) {
+            $r = $bucketResults[$n];
+            if ($r['exit code'] !== 0 || !$r['warned as expected']
+                || $r['result'] !== array_merge($bucketCases[$n][1], [3000, 3000, 3000, 0, true, null])) {
+                return false;
+            }
+        }
+        return true;
+    };
+    $bucketDetail = function (array $cases) use ($bucketResults, $bucketCases) {
+        $detail = [];
+        foreach ($cases as $n) {
+            $detail[json_encode($bucketCases[$n][0])] = ['expected' => $bucketCases[$n][1]] + $bucketResults[$n];
+        }
+        return $detail;
+    };
+    check('(in other processes) ucache.bucketbytes sets the hash buckets of a new cache, the largest prime up to one per that many bytes: the default 512, 64, 65536, 1000, an empty value and 64 in 64 MB give ' . bucket_count(8, 512) . ', ' . bucket_count(8, 64) . ', ' . bucket_count(8, 65536) . ', ' . bucket_count(8, 1000) . ', ' . bucket_count(8, 512) . ' and ' . bucket_count(64, 64) . ' (hash_bucket_count), without a warning; 3000 entries are stored and read back in each, and ucache_clear() frees them all',
+          $bucketOk([0, 1, 2, 3, 4, 5]), $bucketDetail([0, 1, 2, 3, 4, 5]));
+    check('(in other processes) ucache.bucketbytes=8 is clamped to 64, 1000000 to 65536, and 4K (not a number of bytes) gives the default 512, each with a startup warning that says so',
+          $bucketOk([6, 7, 8]), $bucketDetail([6, 7, 8]));
+
+    $sharerExit = child_finish($bucketSharer, 60);
+    $sharerResult = child_result($bucketSharer);
+    child_send($bucketHolder, 'pooled');
+    $holderExit = child_finish($bucketHolder, 30);
+    check('(in other processes) a process with ucache.bucketbytes=64 that opens a cache created with 4096 uses its table (' . bucket_count(8, 4096) . ' buckets): it reads the value of the process that created it, and stores, reads and deletes 3000 entries of its own',
+          $bucketHolderReady && $sharerExit === 0 && $sharerResult === ['64', bucket_count(8, 4096), 3000, 3000, 3001, 0, true, 'stored with 4096']
+          && $holderExit === 0 && child_result($bucketHolder) === serialize('stored with 4096'),
+          ['holder ready' => $bucketHolderReady, 'exit codes' => [$sharerExit, $holderExit], 'result' => $sharerResult,
+           'holder read' => child_result($bucketHolder), 'output' => child_tail($bucketSharer)]);
+
     check('ucache.apppoolid: the same id shares a cache, A-Z taken as a-z (site907, SITE907), and ids that WinCache 2.0.0.8 reduced to the same number do not (site1499); with an empty ucache.filemapdir the cache is in the paging file, with no file in the root of the drive',
           $holdersOk && $seen['SITE907'] === true && $seen['site1499'] === false && $rootFiles === [],
           ['holders' => $holderResults, 'SITE907, site1499' => [$seen['SITE907'], $seen['site1499']], 'files in the root' => $rootFiles]);
@@ -6705,15 +6835,19 @@ POWERSHELL;
             child_kill($server);
 
             /* The Summary page, on a server whose pool had a cache of 16 MB when it started with ucache.size 32: the cache
-               keeps its size until every process of the pool has exited, which the note says, rather than a limit */
-            $suServer = child_wait_for($suHolder, '/^READY/m', 30) ? server_start('su-server', $poolBase . 'su', ['ucache.size' => '32'], $suPort) : null;
+               keeps its size until every process of the pool has exited, which the note says, rather than a limit; and it
+               keeps its table, made with the default ucache.bucketbytes, which the note of the server's 4096 shows */
+            $suServer = child_wait_for($suHolder, '/^READY/m', 30)
+                        ? server_start('su-server', $poolBase . 'su', ['ucache.size' => '32', 'ucache.bucketbytes' => '4096'], $suPort) : null;
             $summary = ($suServer !== null) ? http_request($suPort, 'GET', '/stats.php?page=1', [$basic], null, 30) : null;
-            check('ucache.php shows its Summary page without a PHP diagnostic, with the Abandoned locks fact and ucache.enabled enabled, and for a cache of 16 MB that a process with ucache.size 32 joined, "16 MB of shared memory" without calling it a limit',
+            check('ucache.php shows its Summary page without a PHP diagnostic, with the Abandoned locks fact and ucache.enabled enabled, and for a cache of 16 MB that a process with ucache.size 32 and ucache.bucketbytes 4096 joined, "16 MB of shared memory" without calling it a limit and the table the cache has ("32,749 hash buckets, one per 512 bytes")',
                   $status($summary) === 200 && preg_match('/(Warning|Notice|Deprecated|Fatal error)(<\/b>)?:/', (string)$summary) === 0
                   && strpos((string)$summary, 'Abandoned locks') !== false && strpos((string)$summary, 'ucache.enabled</code></th><td>enabled') !== false
-                  && strpos((string)$summary, '16 MB of shared memory (the size of the cache in use') !== false && strpos((string)$summary, '(the maximum)') === false,
+                  && strpos((string)$summary, '16 MB of shared memory (the size of the cache in use') !== false && strpos((string)$summary, '(the maximum)') === false
+                  && strpos((string)$summary, '4096<span class="note">32,749 hash buckets, one per 512 bytes</span>') !== false,
                   ['page' => strtok((string)$summary, "\r\n"),
                    'size note' => preg_match('/ucache\.size<\/code><\/th><td>[^<]*<span class="note">([^<]*)/', (string)$summary, $sizeNote) ? $sizeNote[1] : null,
+                   'bucket note' => preg_match('/ucache\.bucketbytes<\/code><\/th><td>[^<]*<span class="note">([^<]*)/', (string)$summary, $bucketNote) ? $bucketNote[1] : null,
                    'server output' => ($suServer !== null) ? child_tail($suServer) : null]);
             if ($suServer !== null) {
                 child_kill($suServer);
