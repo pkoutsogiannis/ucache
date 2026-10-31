@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 452 200" width="452" height="200">
+  <title>ucache</title>
+  <!-- same tile proportions as the mutx lockup, in teal so the two cards read apart -->
+  <rect width="452" height="200" rx="34" fill="#4fb39a"/>
+  <!-- wordmark drawn as rounded strokes, so it renders the same without any font -->
+  <g fill="none" stroke="#fff" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M45 75V131A10 10 0 0 0 55 141H73A10 10 0 0 0 83 131V75"/>
+    <path d="M143 75H123A10 10 0 0 0 113 85V131A10 10 0 0 0 123 141H143"/>
+    <path d="M173 75H201A10 10 0 0 1 211 85V141M211 108H183A10 10 0 0 0 173 118V131A10 10 0 0 0 183 141H211"/>
+    <path d="M271 75H251A10 10 0 0 0 241 85V131A10 10 0 0 0 251 141H271"/>
+    <path d="M301 41V141M301 75H329A10 10 0 0 1 339 85V141"/>
+    <path d="M369 108H407V85A10 10 0 0 0 397 75H379A10 10 0 0 0 369 85V131A10 10 0 0 0 379 141H407"/>
+  </g>
+</svg>
