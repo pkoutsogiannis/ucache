@@ -38,24 +38,24 @@
 #define _PRECOMP_H_
 
 #define PHP_UCACHE_EXTNAME   "ucache"
-#define PHP_UCACHE_VERSION    "1.0.1"
+#define PHP_UCACHE_VERSION    "1.1.0"
 #define PHP_UCACHE_VERSION_LEN (sizeof(PHP_UCACHE_VERSION)-1)
 
-/* comment following line for release builds */
-/* #define UCACHE_DEBUG */
+// comment following line for release builds
+// #define UCACHE_DEBUG
 
 #ifdef PHP_WIN32
- #define PHP_UCACHE_API __declspec(dllexport)
+#define PHP_UCACHE_API __declspec(dllexport)
 #else
- #define PHP_UCACHE_API
+#define PHP_UCACHE_API
 #endif
 
 #ifdef HAVE_CONFIG_H
- #include "config.h"
+#include "config.h"
 #endif
 
 #ifdef ZTS
- #include "TSRM.h"
+#include "TSRM.h"
 #endif
 
 #include "php.h"
@@ -66,14 +66,12 @@
 #include "ext/standard/php_var.h"
 #include "ext/standard/basic_functions.h"
 
-/*
- * ucache is NTS only.  The headers of a thread-safe devel pack do not define ZTS: its
- * main/config.w32.h differs from the NTS one only in CONFIGURE_COMMAND (and, in 8.4 and 8.5,
- * OpenSSL defines), because PHP's own build passes /D ZTS=1 on the command line
- * (script\confutils.js).  So this only catches a build that defines ZTS itself.
- * php_ucache.vcxproj refuses a thread-safe import library (php7ts.lib, php8ts.lib), and
- * config.w32 does not build the extension for a ZTS PHP.
- */
+// ucache is NTS only.  The headers of a thread-safe devel pack do not define ZTS: its
+// main/config.w32.h differs from the NTS one only in CONFIGURE_COMMAND (and, in 8.4 and 8.5,
+// OpenSSL defines), because PHP's own build passes /D ZTS=1 on the command line
+// (script\confutils.js).  So this only catches a build that defines ZTS itself.
+// php_ucache.vcxproj refuses a thread-safe import library (php7ts.lib, php8ts.lib), and
+// config.w32 does not build the extension for a ZTS PHP.
 #ifdef ZTS
 # error ucache requires a non-thread-safe (NTS) build of PHP
 #endif
@@ -87,7 +85,7 @@
 #define STRVER2(maj, min)              XSTRVER2(maj, min)
 
 #ifdef _ASSERT
- #undef _ASSERT
+#undef _ASSERT
 #endif
 
 #ifdef UCACHE_DEBUG
@@ -123,4 +121,4 @@
 
 #include "php_ucache.h"
 
-#endif /* _PRECOMP_H_ */
+#endif // _PRECOMP_H_

@@ -48,7 +48,20 @@
 #define POINTER_OFFSET(baseaddr, p)    ((char *)p - (char *)baseaddr)
 #define FREE_HEADER(baseaddr, offset)  (alloc_free_header *)((char *)baseaddr + offset)
 #define USED_HEADER(baseaddr, offset)  (alloc_used_header *)((char *)baseaddr + offset)
-#define MIN_FREE_BLOCK_SIZE            (ALLOC_FREE_BLOCK_OVERHEAD + 4)
+#define FREE_BLOCK(baseaddr, offset)   ((offset == 0) ? NULL : FREE_HEADER(baseaddr, offset))
+
+// The smallest block the cache asks for: a zval (16 bytes, the top-level zval of an entry, or a pool tracker).
+// A block is split only when the rest can hold that much: a smaller free block would never be used, and
+// every search would go past it (a hole of 152 bytes split for an entry of 104 left 8 bytes)
+#define ALLOC_SMALLEST_REQUEST         16
+#define MIN_FREE_BLOCK_SIZE            (ALLOC_FREE_BLOCK_OVERHEAD + ALLOC_SMALLEST_REQUEST)
+
+// An allocation looks at no more than this many blocks of its own class before the classes above
+#define ALLOC_CLASS_WALK               16
+
+// With the lock held for a series of frees (alloc_hold), it is released and taken again after this
+// many, so that the allocations of the other processes wait a few microseconds at most
+#define ALLOC_HOLD_FREES               64
 
 #define POOL_ALLOCATION_TYPE_UNKNOWN   0
 #define POOL_ALLOCATION_TYPE_SMALL     1
@@ -64,198 +77,455 @@
 #define POOL_ALLOCATION_MEDIUM_BSIZE   1024
 #define POOL_ALLOCATION_LARGE_BSIZE    4096
 
-/* Globals */
+// Writes a field of the segment in an update under the allocator lock, after logging what it held (see
+// lock_undo_write): every write that a process could see once the update is undone goes through it, the
+// update ends with lock_undo_commit(), and the lock is taken with alloc_lock().  Not logged, because no
+// process reads them afterwards: what goes inside a block (the end of a used block, the header of the
+// rest of a block split, a block taken whole), the links of a block that was not free when the update
+// began (link_free_block), and what does not change.  An update logs 13 fields at most: see free_block()
+// and LOCK_UNDO_MAXIMUM.
+#define ALLOC_SET(palloc, field, value)  LOCK_UNDO_SET(&(palloc)->undo, field, value)
+
+// The count of the undo log on the first cache line of the segment, with last_owner (see alloc_lock)
+C_ASSERT(FIELD_OFFSET(alloc_segment_header, undocount) < 64 && FIELD_OFFSET(alloc_segment_header, last_owner) < 64);
+
+// Globals
 unsigned short gallocid = 1;
 
-/* Private methods */
-static int    allocate_memory(alloc_context * palloc, size_t size, void ** ppaddr);
-static alloc_free_header * find_next_free(alloc_context * palloc, alloc_used_header * usedh);
-static void   free_memory(alloc_context * palloc, void * paddr);
-static size_t get_memory_size(alloc_context * palloc, void * addr);
+// Private methods
+static int                alloc_lock(alloc_context* palloc);
+static unsigned int       alloc_class_of(size_t size);
+static void               link_free_block(alloc_context* palloc, alloc_free_header* freeh, unsigned char wasfree);
+static void               unlink_free_block(alloc_context* palloc, alloc_free_header* freeh);
+static void               drop_free_class(alloc_context* palloc, unsigned int cls);
+static alloc_free_header* find_free_block(alloc_context* palloc, size_t size);
+static int                allocate_memory(alloc_context* palloc, size_t size, void** ppaddr);
+static void               free_block(alloc_context* palloc, alloc_used_header* usedh, unsigned char counted);
+static void               free_memory(alloc_context* palloc, void* paddr);
+static void               shrink_memory(alloc_context* palloc, void* paddr, size_t size);
 
-static void * alloc_malloc(alloc_context * palloc, unsigned int type, size_t size);
-static void * alloc_realloc(alloc_context * palloc, unsigned int type, void * addr, size_t size);
-static char * alloc_strdup(alloc_context * palloc, unsigned int type, const char * str);
-static void   alloc_free(alloc_context * palloc, unsigned int type, void * addr);
+static void*  alloc_malloc(alloc_context* palloc, unsigned int type, size_t size);
+static char*  alloc_strdup(alloc_context* palloc, unsigned int type, const char* str);
+static void   alloc_free(alloc_context* palloc, unsigned int type, void* addr);
 
-static int allocate_memory(alloc_context * palloc, size_t size, void ** ppaddr)
-{
-    int                    result  = NONFATAL;
-    void *                 paddr   = NULL;
-    void *                 segaddr = NULL;
-    unsigned char          flock   = 0;
+/**
+ * Takes the allocator lock, the only way to take it.  A process that ended in the middle of an update of
+ * the allocator (see lock_undo_write) left its log in the segment header: the update is undone first, so
+ * that the block being taken stays free, and the block being freed stays in use (lost with the rest of
+ * its entry).  The log is replayed whenever it is not empty, not only when the mutex was abandoned: the
+ * mutex is created again if every process closed it (a process that starts while the last one of the
+ * pool exits, which closes its handles before its views), and the segment can outlive it.  Reading the
+ * count costs nothing: it is on the cache line of last_owner, which lock_lock() has just written.  The
+ * abandoned mutexes are counted (header->abandoned, for ucache_info()); a mutex created again is not.
+ * Returns NONFATAL with the lock held; with a failure the lock is not held, and the caller must neither
+ * use the segment nor release the lock: FATAL_LOCK_WAIT if the wait failed, FATAL_LOCK_UNDO if the log
+ * cannot be replayed (see lock_undo_replay), which stays so for every process until the segment is
+ * created again.  Call it only once alloc_initialize() has set the segment up.
+ *
+ * @param palloc  the allocator context, its segment set up by alloc_initialize()
+ * @return NONFATAL with the lock held (an abandoned mutex counted and taken all the same), FATAL_LOCK_WAIT
+ *         if the wait failed, FATAL_LOCK_UNDO if the undo log could not be replayed (the lock then released)
+ */
+static int alloc_lock(alloc_context* palloc) {
+    int                    result = NONFATAL;
+    int                    undone = 0;
+    alloc_segment_header*  header = palloc->header;
+
+    result = lock_lock(palloc->lock);
+    if (result == WARNING_LOCK_ABANDONED) {
+        header->abandoned++;
+        result = NONFATAL;
+    }
+
+    if (FAILED(result)) {
+        return result;
+    }
+
+    if (header->undocount != 0) {
+        undone = lock_undo_replay(&palloc->undo);
+        if (undone < 0) {
+            lock_unlock(palloc->lock);
+            return FATAL_LOCK_UNDO;
+        }
+
+        dprintcritical("alloc_lock: put back %d fields of an update of the allocator that a process left half done", undone);
+    }
+
+    return NONFATAL;
+}
+
+/**
+ * Free blocks are kept in one doubly linked list per size class, and a bitmap in the segment header
+ * tells which lists hold blocks, so that an allocation and a free take the same time whatever the
+ * number of free blocks.  Below ALLOC_CLASS_LINEAR_BYTES a class holds one size; above, a class
+ * holds the sizes of an eighth of a power of two.  A free block is still combined with the free
+ * blocks on both sides of it, which the sizes at both ends of every block find.  With every free
+ * block in one list in address order, as before, an allocation went through the list from the start
+ * for the first block large enough, which took time in proportion to the free blocks before that one
+ * (1.6 ms per ucache_set() of a 1000-byte string with 250000 smaller free blocks), and a free looked
+ * for the place of the block in it.
+ *
+ * @param size  a size in bytes: of a free block (its header's size) or of a request
+ * @return the size class: size / ALLOC_ALIGNMENT below ALLOC_CLASS_LINEAR_BYTES, else one of the eight
+ *         classes of its power of two, at most ALLOC_CLASS_COUNT - 1
+ */
+static unsigned int alloc_class_of(size_t size) {
+    unsigned long msb = 0;
+    size_t        cls = 0;
+
+    if (size < ALLOC_CLASS_LINEAR_BYTES) {
+        return (unsigned int)(size / ALLOC_ALIGNMENT);
+    }
+
+#ifdef _WIN64
+    _BitScanReverse64(&msb, (unsigned __int64)size);
+#else  // _WIN64
+    _BitScanReverse(&msb, (unsigned long)size);
+#endif // _WIN64
+
+    cls = ALLOC_CLASS_LINEAR_COUNT + ((size_t)(msb - ALLOC_CLASS_LINEAR_LOG2) << ALLOC_CLASS_SPLIT_LOG2)
+        + ((size >> (msb - ALLOC_CLASS_SPLIT_LOG2)) & ((1 << ALLOC_CLASS_SPLIT_LOG2) - 1));
+
+    return (unsigned int)MIN(cls, ALLOC_CLASS_COUNT - 1);
+}
+
+/**
+ * Call under the allocator lock, in an update (see ALLOC_SET): puts a free block, its size set, first in
+ * the list of its class (2 fields logged, 4 if wasfree).  wasfree: the block was free when the update
+ * began (the free block before a block being freed, which grows), so an undo must give it its links
+ * back; otherwise its links are written without a log: they become the inside of a used block again, or
+ * of the free block that a split cut.
+ *
+ * @param palloc   the allocator context
+ * @param freeh    the free block, its size already set (it picks the class)
+ * @param wasfree  nonzero if the block was free when the update began: its links are then logged
+ */
+static void link_free_block(alloc_context* palloc, alloc_free_header* freeh, unsigned char wasfree) {
+    alloc_segment_header*  header = palloc->header;
+    void*                  segaddr = palloc->memaddr;
+    unsigned int           cls = alloc_class_of(freeh->size);
+    size_t                 offset = POINTER_OFFSET(segaddr, freeh);
+    size_t                 next = header->freelists[cls];
+
+    if (wasfree) {
+        ALLOC_SET(palloc, freeh->prev_free, 0);
+        ALLOC_SET(palloc, freeh->next_free, next);
+    } else {
+        freeh->prev_free = 0;
+        freeh->next_free = next;
+    }
+
+    if (next != 0) {
+        ALLOC_SET(palloc, (FREE_HEADER(segaddr, next))->prev_free, offset);
+    } else {
+        ALLOC_SET(palloc, header->freemap[cls / 32], header->freemap[cls / 32] | (1u << (cls % 32)));
+    }
+
+    ALLOC_SET(palloc, header->freelists[cls], offset);
+}
+
+/**
+ * Call under the allocator lock, in an update (see ALLOC_SET): takes a free block out of the list of its
+ * class, its size as when it was linked (2 fields logged at most).  Its own links are left as they are:
+ * the block becomes a used block, which never reads them, or part of a larger free block, whose links
+ * link_free_block() sets; and after an undo they are what its neighbours in the list point back to.
+ *
+ * @param palloc  the allocator context
+ * @param freeh   the free block, in the list of the class of its size
+ */
+static void unlink_free_block(alloc_context* palloc, alloc_free_header* freeh) {
+    alloc_segment_header*  header = palloc->header;
+    void*                  segaddr = palloc->memaddr;
+    unsigned int           cls = 0;
+
+    if (freeh->prev_free != 0) {
+        ALLOC_SET(palloc, (FREE_HEADER(segaddr, freeh->prev_free))->next_free, freeh->next_free);
+    } else {
+        cls = alloc_class_of(freeh->size);
+        ALLOC_SET(palloc, header->freelists[cls], freeh->next_free);
+
+        if (freeh->next_free == 0) {
+            ALLOC_SET(palloc, header->freemap[cls / 32], header->freemap[cls / 32] & ~(1u << (cls % 32)));
+        }
+    }
+
+    if (freeh->next_free != 0) {
+        ALLOC_SET(palloc, (FREE_HEADER(segaddr, freeh->next_free))->prev_free, freeh->prev_free);
+    }
+}
+
+/**
+ * Call under the allocator lock, before an update writes anything: the list of a class leads to a block
+ * that is not free, or its bit is set while it is empty.  No process leaves that, since every update is
+ * undone if it is cut off (see alloc_lock); memory damaged otherwise could.  The class is emptied, so
+ * that this list does not make every allocation of a smaller size fail: its blocks stay unused until the
+ * processes of the pool have exited (free_size and freecount still count them).  Not logged: a process
+ * ended between its two writes leaves an empty list with its bit set, which is dropped again.
+ *
+ * @param palloc  the allocator context
+ * @param cls     the damaged class, below ALLOC_CLASS_COUNT
+ */
+static void drop_free_class(alloc_context* palloc, unsigned int cls) {
+    dprintcritical("allocate_memory: the free list of class %u is damaged: its blocks are left unused", cls);
+
+    palloc->header->freelists[cls] = 0;
+    palloc->header->freemap[cls / 32] &= ~(1u << (cls % 32));
+}
+
+/**
+ * Call under the allocator lock: a free block of at least size bytes, NULL if there is none, the
+ * smallest that the lists find at once (a best fit, by class).  The class of the size first: below
+ * ALLOC_CLASS_LINEAR_BYTES its first block fits, above it the first of its ALLOC_CLASS_WALK first
+ * blocks that is large enough.  Then the smallest of the first ALLOC_CLASS_WALK blocks of the smallest
+ * class above (its first block below ALLOC_CLASS_LINEAR_BYTES; used whole if the rest could not be a
+ * free block, split otherwise), then the rest of the class of the size, so that the allocation fails
+ * only if no free block is large enough, as before.  Preferring the blocks that a split leaves a free
+ * block of, before the smaller ones that fit, let the zvals of new entries split the holes of old
+ * entries and left the small pieces of other splits unused: in a cache kept full by eviction, writes
+ * then failed with up to 5% of the memory free in such pieces, where this fails, as the single list in
+ * address order of before did, with less than 0.3% free.  A list that leads to a block that is not
+ * free is dropped (see drop_free_class), never followed.
+ *
+ * @param palloc  the allocator context
+ * @param size    the bytes wanted, already aligned by the caller
+ * @return the free block, still in its list; NULL if no block that it looks at is large enough (the blocks
+ *         of a list found damaged are not looked at)
+ */
+static alloc_free_header* find_free_block(alloc_context* palloc, size_t size) {
+    alloc_segment_header*  header = palloc->header;
+    void*                  segaddr = palloc->memaddr;
+    alloc_free_header*     freeh = NULL;
+    alloc_free_header*     pfirst = NULL;
+    alloc_free_header*     pnext = NULL;
+    unsigned int           cls = alloc_class_of(size);
+    unsigned int           word = 0;
+    unsigned int           bits = 0;
+    unsigned int           walked = 0;
+    unsigned int           seen = 0;
+    unsigned long          bit = 0;
+
+    for (freeh = FREE_BLOCK(segaddr, header->freelists[cls]); freeh != NULL && walked < ALLOC_CLASS_WALK; walked++) {
+        if (freeh->is_free != BLOCK_ISFREE_FREE) {
+            drop_free_class(palloc, cls);
+            freeh = NULL;
+            break;
+        }
+
+        if (freeh->size >= size) {
+            return freeh;
+        }
+
+        freeh = FREE_BLOCK(segaddr, freeh->next_free);
+    }
+
+    if (cls + 1 < ALLOC_CLASS_COUNT) {
+        word = (cls + 1) / 32;
+        bits = header->freemap[word] & (~0u << ((cls + 1) % 32));
+
+        while (1) {
+            if (bits != 0) {
+                _BitScanForward(&bit, bits);
+
+                pfirst = FREE_BLOCK(segaddr, header->freelists[word * 32 + bit]);
+                if (pfirst != NULL && pfirst->is_free == BLOCK_ISFREE_FREE) {
+                    // Above ALLOC_CLASS_LINEAR_BYTES the blocks of a class differ in size: the smallest of its first
+                    // ALLOC_CLASS_WALK, so that a small part of a value (its entry or its zval) does not take the
+                    // only block of the class that a larger part fits (the block freed last is first in the list)
+                    if (word * 32 + bit >= ALLOC_CLASS_LINEAR_COUNT) {
+                        pnext = FREE_BLOCK(segaddr, pfirst->next_free);
+                        for (seen = 1; pnext != NULL && seen < ALLOC_CLASS_WALK && pnext->is_free == BLOCK_ISFREE_FREE; seen++) {
+                            if (pnext->size < pfirst->size) {
+                                pfirst = pnext;
+                            }
+                            pnext = FREE_BLOCK(segaddr, pnext->next_free);
+                        }
+                    }
+                    return pfirst;
+                }
+
+                drop_free_class(palloc, word * 32 + bit);
+                bits &= ~(1u << bit);
+                continue;
+            }
+
+            if (++word == ALLOC_CLASS_WORDS) {
+                break;
+            }
+
+            bits = header->freemap[word];
+        }
+    }
+
+    for (; freeh != NULL; freeh = FREE_BLOCK(segaddr, freeh->next_free)) {
+        if (freeh->is_free != BLOCK_ISFREE_FREE) {
+            drop_free_class(palloc, cls);
+            return NULL;
+        }
+
+        if (freeh->size >= size) {
+            return freeh;
+        }
+    }
+
+    return NULL;
+}
+
+/**
+ * One update of the allocator (see ALLOC_SET), which logs 9 fields at most: a block split whose rest goes
+ * in another class (unlinked 2, header 2, the end of the block 1, the rest linked 2, counts 2); 7 if the
+ * rest takes its place in the list; 6 for a block taken whole.
+ *
+ * @param palloc  the allocator context; its lock is taken here unless the process holds it (alloc_hold)
+ * @param size    the bytes wanted, rounded up to a multiple of size_t here
+ * @param ppaddr  out: the address of the block's memory, right after its header; left as it is on failure
+ *                (the caller sets it to NULL)
+ * @return NONFATAL on success, FATAL_ALLOC_NO_MEMORY if the free memory is less than size or no free block
+ *         large enough is found, or the failure of alloc_lock() (FATAL_LOCK_WAIT, FATAL_LOCK_UNDO)
+ */
+static int allocate_memory(alloc_context* palloc, size_t size, void** ppaddr) {
+    int                    result = NONFATAL;
+    void*                  paddr = NULL;
+    void*                  segaddr = NULL;
+    unsigned char          flock = 0;
+    unsigned char          samecls = 0;
 
     size_t                 oldsize = 0;
     size_t                 oldprev = 0;
     size_t                 oldnext = 0;
+    size_t                 restsiz = 0;
+    size_t                 restoff = 0;
 
-    alloc_segment_header * header  = NULL;
-    alloc_free_header *    freeh   = NULL;
-    alloc_free_header *    pfree   = NULL;
-    alloc_used_header *    usedh   = NULL;
+    alloc_segment_header* header = NULL;
+    alloc_free_header*    freeh = NULL;
+    alloc_used_header*    usedh = NULL;
 
     dprintdecorate("start allocate_memory");
 
-    _ASSERT(palloc         != NULL);
-    _ASSERT(palloc->lock   != NULL);
+    _ASSERT(palloc != NULL);
+    _ASSERT(palloc->lock != NULL);
     _ASSERT(palloc->header != NULL);
-    _ASSERT(size           >= 0);
+    _ASSERT(size >= 0);
 
-    /* Allocate memory from memory segment shared with other processes */
+    // Allocate memory from memory segment shared with other processes
     segaddr = palloc->memaddr;
-    header  = palloc->header;
+    header = palloc->header;
 
-    /* Allocate in sizes which are multiples of size_t */
+    // Allocate in sizes which are multiples of size_t
 #ifdef _WIN64
     size = ALIGNQWORD(size);
-#else /* _WIN64 */
+#else // _WIN64
     size = ALIGNDWORD(size);
-#endif /* _WIN64 */
+#endif // _WIN64
 
-    /* Acquire lock to segment before doing anything */
-    lock_lock(palloc->lock);
-    flock = 1;
+    // Acquire lock to segment before doing anything, unless the process holds it (alloc_hold)
+    if (palloc->held == 0) {
+        result = alloc_lock(palloc);
+        if (FAILED(result)) {
+            goto Finished;
+        }
 
-    /* If available size is less than requested size, return NULL */
-    if(header->free_size < size)
-    {
+        flock = 1;
+    }
+
+    // If available size is less than requested size, return NULL
+    if (header->free_size < size) {
         result = FATAL_ALLOC_NO_MEMORY;
         goto Finished;
     }
 
-    /* Get pointer to start block and move to next block */
-    freeh = (alloc_free_header *)(header + 1);
-    _ASSERT(freeh->is_free == BLOCK_ISFREE_FIRST);
-    if (freeh->is_free != BLOCK_ISFREE_FIRST)
-    {
-        dprintcritical("allocate_memory: First block is not BLOCK_ISFREE_FIRST");
-        result = FATAL_ALLOC_SEGMENT_CORRUPT;
-
-        goto Finished;
-    }
-
-    freeh = FREE_HEADER(segaddr, freeh->next_free);
-    _ASSERT(freeh->is_free == BLOCK_ISFREE_FREE || freeh->is_free == BLOCK_ISFREE_LAST);
-    if (freeh->is_free != BLOCK_ISFREE_FREE && freeh->is_free != BLOCK_ISFREE_LAST)
-    {
-        dprintcritical("allocate_memory: Free block is not BLOCK_ISFREE_FREE or BLOCK_ISFREE_LAST");
-        result = FATAL_ALLOC_SEGMENT_CORRUPT;
-
-        goto Finished;
-    }
-
-    /* Find a free block which is large enough to satisfy the request */
-    while(freeh->is_free != BLOCK_ISFREE_LAST)
-    {
-        _ASSERT(freeh->is_free == BLOCK_ISFREE_FREE);
-        if (freeh->is_free != BLOCK_ISFREE_FREE)
-        {
-            dprintcritical("allocate_memory: Free block is not BLOCK_ISFREE_FREE");
-            result = FATAL_ALLOC_SEGMENT_CORRUPT;
-
-            goto Finished;
-        }
-
-        if(freeh->size >= size)
-        {
-            break;
-        }
-
-        freeh = FREE_HEADER(segaddr, freeh->next_free);
-    }
-
-    /* If we didn't find a block big enough, return error */
-    if(freeh->is_free == BLOCK_ISFREE_LAST)
-    {
+    freeh = find_free_block(palloc, size);
+    if (freeh == NULL) {
         result = FATAL_ALLOC_NO_MEMORY;
         goto Finished;
     }
 
     _ASSERT(freeh->is_free == BLOCK_ISFREE_FREE);
 
-    /* Got a free block with sufficient free memory. Now */
-    /* see if block size is big enough to be broken into two */
-    if(freeh->size >= size + MIN_FREE_BLOCK_SIZE)
-    {
+    // Got a free block with sufficient free memory. Now
+    // see if block size is big enough to be broken into two
+    if (freeh->size >= size + MIN_FREE_BLOCK_SIZE) {
         oldsize = freeh->size;
         oldprev = freeh->prev_free;
         oldnext = freeh->next_free;
+        restsiz = oldsize - size - ALLOC_USED_BLOCK_OVERHEAD;
 
-        usedh = (alloc_used_header *)freeh;
-        usedh->size    = size;
-        usedh->is_free = BLOCK_ISFREE_USED;
-        usedh->dummy1  = 0;
-        usedh->dummy2  = 0;
+        // The rest of a block of the same class takes its place in the list (the large free block
+        // that an empty cache is, mostly); else the rest goes in the list of its own class
+        samecls = (alloc_class_of(restsiz) == alloc_class_of(oldsize));
+        if (!samecls) {
+            unlink_free_block(palloc, freeh);
+        }
 
-        /* Return pointer right after the used header */
-        paddr = (void *)(usedh + 1);
+        // The header of the free block becomes that of the used block
+        usedh = (alloc_used_header*)freeh;
+        ALLOC_SET(palloc, usedh->size, size);
+        ALLOC_SET(palloc, usedh->is_free, BLOCK_ISFREE_USED);
 
-        /* Put the size of allocated block in the end */
-        *((size_t *)((char *)paddr + size)) = size;
+        // Return pointer right after the used header
+        paddr = (void*)(usedh + 1);
 
-        /* Create a new free header after the allocated block */
-        freeh = (alloc_free_header *)((char *)usedh + size + ALLOC_USED_BLOCK_OVERHEAD);
-        freeh->size      = oldsize - size - ALLOC_USED_BLOCK_OVERHEAD;
-        freeh->is_free   = BLOCK_ISFREE_FREE;
-        freeh->prev_free = oldprev;
-        freeh->next_free = oldnext;
-        *((size_t *)(((char *)(freeh + 1))+ freeh->size)) = freeh->size;
+        // The size of the used block at its end, and the header of the rest after it, inside the free
+        // block: not logged (see ALLOC_SET). The size at the end of the free block is now the rest's
+        *((size_t*)((char*)paddr + size)) = size;
 
-        pfree = FREE_HEADER(segaddr, freeh->prev_free);
-        pfree->next_free = POINTER_OFFSET(segaddr, freeh);
-        pfree = FREE_HEADER(segaddr, freeh->next_free);
-        pfree->prev_free = POINTER_OFFSET(segaddr, freeh);
+        freeh = (alloc_free_header*)((char*)usedh + size + ALLOC_USED_BLOCK_OVERHEAD);
+        restoff = POINTER_OFFSET(segaddr, freeh);
+        freeh->size = restsiz;
+        freeh->is_free = BLOCK_ISFREE_FREE;
+        ALLOC_SET(palloc, *((size_t*)(((char*)(freeh + 1)) + restsiz)), restsiz);
 
-        /* Update free_size in segment header */
-        header->free_size  -= (size + ALLOC_USED_BLOCK_OVERHEAD);
+        if (samecls) {
+            freeh->prev_free = oldprev;
+            freeh->next_free = oldnext;
 
-        /* Number of free blocks are not decreasing in this case */
-        header->usedcount++;
-    }
-    else
-    {
-        /* Block is very small and should be used completely */
-        pfree = FREE_HEADER(segaddr, freeh->prev_free);
-        pfree->next_free = freeh->next_free;
+            if (oldprev != 0) {
+                ALLOC_SET(palloc, (FREE_HEADER(segaddr, oldprev))->next_free, restoff);
+            } else {
+                ALLOC_SET(palloc, header->freelists[alloc_class_of(restsiz)], restoff);
+            }
 
-        pfree = FREE_HEADER(segaddr, freeh->next_free);
-        pfree->prev_free = freeh->prev_free;
+            if (oldnext != 0) {
+                ALLOC_SET(palloc, (FREE_HEADER(segaddr, oldnext))->prev_free, restoff);
+            }
+        } else {
+            link_free_block(palloc, freeh, 0);
+        }
 
-        /* Update size to indicate number of bytes we are actually allocating */
+        // The number of free blocks does not change
+        ALLOC_SET(palloc, header->free_size, header->free_size - (size + ALLOC_USED_BLOCK_OVERHEAD));
+        ALLOC_SET(palloc, header->usedcount, header->usedcount + 1);
+    } else {
+        // Block is very small and should be used completely
+        unlink_free_block(palloc, freeh);
+
+        // Update size to indicate number of bytes we are actually allocating: the size in the
+        // header and at the end of the block stay as they are
         size = freeh->size;
 
-        /* Set used header and last two size_t bytes */
-        usedh = (alloc_used_header *)freeh;
-        usedh->size    = size;
-        usedh->is_free = BLOCK_ISFREE_USED;
-        usedh->dummy1  = 0;
-        usedh->dummy2  = 0;
+        usedh = (alloc_used_header*)freeh;
+        ALLOC_SET(palloc, usedh->is_free, BLOCK_ISFREE_USED);
 
-        /* Return pointer right after the used header */
-        paddr = (void *)(usedh + 1);
+        // Return pointer right after the used header
+        paddr = (void*)(usedh + 1);
 
-        /* Put the size of allocated block in the end */
-        *((size_t *)((char *)paddr + size)) = size;
-
-        header->free_size  -= size;
-
-        /* One free block got converted to used block */
-        header->freecount--;
-        header->usedcount++;
+        // One free block got converted to used block
+        ALLOC_SET(palloc, header->free_size, header->free_size - size);
+        ALLOC_SET(palloc, header->freecount, header->freecount - 1);
+        ALLOC_SET(palloc, header->usedcount, header->usedcount + 1);
     }
+
+    lock_undo_commit(&palloc->undo);
 
     *ppaddr = paddr;
 
 Finished:
 
-    if(flock)
-    {
+    if (flock) {
         lock_unlock(palloc->lock);
         flock = 0;
     }
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         _ASSERT(*ppaddr == NULL);
 
         dprintverbose("failure %d in allocate_memory", result);
@@ -266,246 +536,286 @@ Finished:
     return result;
 }
 
-/*
- * The free list is kept in address order (free_memory relies on it to combine a block with the
- * free blocks on both sides of it, and so do the other processes of the pool, which may run an
- * older build).  So a block that is freed between two used blocks goes in before the first free
- * block that follows it, the last block if there is none.  Three walks find that block, one step
- * each in turn, and the first to get there answers: forward over the used blocks after it, which
- * is short where free blocks are many (they are then close together), and along the free list from
- * the first block or back from the last block, which is short where free blocks are few or the
- * freed block is near an end of the segment.  WinCache walked forward only, which took time in
- * proportion to the number of entries: a delete took 134 us with 10000 entries and deleting
- * 100000 one by one took minutes.  The last block is found from total_size, as alloc_initialize
- * placed it; if it does not carry its marker, the walk back is left out.
+/**
+ * Call under the allocator lock, in an update (see ALLOC_SET): makes a used block free, combined with the
+ * free blocks on both sides of it, and puts the result in the list of its class.  counted: the block
+ * counts as a used block (shrink_memory frees the end of a block, which did not).  Logs 13 fields at most,
+ * the most an update logs: with free blocks on both sides, unlinked (2 + 2), the size in the header and at
+ * the end of the block (2), the block before, which grows, linked with its own links (4), and the counts
+ * (3), each written once.
+ *
+ * @param palloc   the allocator context
+ * @param usedh    the header of the used block
+ * @param counted  nonzero if the block counts in usedcount, which then goes down by one
  */
-static alloc_free_header * find_next_free(alloc_context * palloc, alloc_used_header * usedh)
-{
-    void *              segaddr = palloc->memaddr;
-    size_t              offset  = (size_t)POINTER_OFFSET(segaddr, usedh);
-    alloc_free_header * pnext   = NULL;
-    alloc_free_header * pahead  = NULL;
-    alloc_free_header * pbehind = NULL;
+static void free_block(alloc_context* palloc, alloc_used_header* usedh, unsigned char counted) {
+    size_t                 blocksiz = usedh->size;
+    size_t                 lastsize = 0;
+    alloc_segment_header*  header = palloc->header;
+    alloc_free_header*     freeh = NULL;
+    alloc_free_header*     pfree = NULL;
+    size_t*                pend = NULL;
+    size_t                 freesize = header->free_size + blocksiz;
+    unsigned int           freecnt = header->freecount + 1;
+    unsigned char          wasfree = 0;
 
-    /* Forward over the used blocks after it */
-    pnext = (alloc_free_header *)((char *)usedh + usedh->size + ALLOC_USED_BLOCK_OVERHEAD);
+    // The block becomes a free block, combined below with the free blocks on both sides of it
+    freeh = (alloc_free_header*)usedh;
 
-    /* Along the free list from the first block, and back from the last block */
-    pahead  = FREE_HEADER(segaddr, ((alloc_free_header *)(palloc->header + 1))->next_free);
-    pbehind = FREE_HEADER(segaddr, palloc->header->total_size - ALLOC_FREE_BLOCK_OVERHEAD);
-    pbehind = (pbehind->is_free == BLOCK_ISFREE_LAST) ? FREE_HEADER(segaddr, pbehind->prev_free) : NULL;
+    // Check if next block is free
+    pfree = (alloc_free_header*)((char*)usedh + blocksiz + ALLOC_USED_BLOCK_OVERHEAD);
+    if (pfree->is_free == BLOCK_ISFREE_FREE) {
+        unlink_free_block(palloc, pfree);
+        blocksiz += pfree->size + ALLOC_FREE_BLOCK_OVERHEAD;
 
-    while(1)
-    {
-        if(pnext->is_free != BLOCK_ISFREE_USED)
-        {
-            return pnext;
-        }
-        pnext = (alloc_free_header *)((char *)pnext + pnext->size + ALLOC_USED_BLOCK_OVERHEAD);
-
-        /* The first free block after it, or the last block */
-        if(pahead->is_free != BLOCK_ISFREE_FREE || (size_t)POINTER_OFFSET(segaddr, pahead) > offset)
-        {
-            return pahead;
-        }
-        pahead = FREE_HEADER(segaddr, pahead->next_free);
-
-        /* The last free block before it, or the first block: the block after that one */
-        if(pbehind != NULL)
-        {
-            if(pbehind->is_free != BLOCK_ISFREE_FREE || (size_t)POINTER_OFFSET(segaddr, pbehind) < offset)
-            {
-                return FREE_HEADER(segaddr, pbehind->next_free);
-            }
-            pbehind = FREE_HEADER(segaddr, pbehind->prev_free);
-        }
+        freecnt--;
+        freesize += ALLOC_FREE_BLOCK_OVERHEAD;
     }
+
+    // Check if previous block is free
+    lastsize = *((size_t*)((char*)usedh - sizeof(size_t)));
+    pfree = (alloc_free_header*)((char*)usedh - ALLOC_FREE_BLOCK_OVERHEAD - lastsize);
+
+    _ASSERT(pfree->size == lastsize);
+    if (pfree->is_free == BLOCK_ISFREE_FREE) {
+        unlink_free_block(palloc, pfree);
+        blocksiz += pfree->size + ALLOC_FREE_BLOCK_OVERHEAD;
+        freeh = pfree;
+        wasfree = 1;
+
+        freecnt--;
+        freesize += ALLOC_FREE_BLOCK_OVERHEAD;
+    }
+
+    // The header and the end of the free block, where they change: the block before was free already,
+    // and a block that joins nothing keeps its size
+    if (freeh->size != blocksiz) {
+        ALLOC_SET(palloc, freeh->size, blocksiz);
+    }
+
+    if (!wasfree) {
+        ALLOC_SET(palloc, freeh->is_free, BLOCK_ISFREE_FREE);
+    }
+
+    pend = (size_t*)(((char*)(freeh + 1)) + blocksiz);
+    if (*pend != blocksiz) {
+        ALLOC_SET(palloc, *pend, blocksiz);
+    }
+
+    link_free_block(palloc, freeh, wasfree);
+
+    if (counted) {
+        ALLOC_SET(palloc, header->usedcount, header->usedcount - 1);
+    }
+
+    ALLOC_SET(palloc, header->freecount, freecnt);
+    ALLOC_SET(palloc, header->free_size, freesize);
 }
 
-static void free_memory(alloc_context * palloc, void * paddr)
-{
-    int             combined = 0;
-    size_t          blocksiz = 0;
-    size_t          lastsize = 0;
-    size_t          coffset  = 0;
-    void *          segaddr  = NULL;
-    unsigned char   flock    = 0;
+/**
+ * Whether paddr is the address that allocate_memory() returned for a block in use: logged when it is not
+ *
+ * @param palloc  the allocator context
+ * @param paddr   the address to check, that of the memory after a block header
+ * @return 1 if the block is in the segment and marked in use, 0 otherwise
+ */
+static zend_bool used_block(alloc_context* palloc, void* paddr) {
+    void*              segaddr = palloc->memaddr;
+    alloc_used_header* usedh = (alloc_used_header*)((char*)paddr - sizeof(alloc_used_header));
 
-    alloc_segment_header * header = NULL;
-    alloc_used_header *    usedh  = NULL;
-    alloc_free_header *    freeh  = NULL;
-    alloc_free_header *    pfree  = NULL;
-
-    dprintdecorate("start free_memory");
-
-    _ASSERT(palloc != NULL);
-    _ASSERT(paddr  != NULL);
-
-    /* Free the block from shared segment */
-    lock_lock(palloc->lock);
-    flock = 1;
-
-    header  = palloc->header;
-    segaddr = palloc->memaddr;
-
-    /* Get pointer to used_header for the block which is getting freed */
-    usedh = (alloc_used_header *)((char *)paddr - sizeof(alloc_used_header));
-
-    /* Validate the memory being freed is in the heap */
-    if ((void *)usedh < segaddr || (char *)usedh > ((char *)segaddr + palloc->size))
-    {
+    // Validate the memory being freed is in the heap
+    if ((void*)usedh < segaddr || (char*)usedh >((char*)segaddr + palloc->size)) {
         _ASSERT(0);
         dprintcritical("free_memory: Address %p not in segment %p (size %d)",
             paddr, segaddr, palloc->size);
 
-        goto Finished;
+        return 0;
     }
 
-    /* Block is in our heap.  Validate it is in use */
+    // Block is in our heap.  Validate it is in use
     _ASSERT(usedh->is_free == BLOCK_ISFREE_USED);
-    if (usedh->is_free != BLOCK_ISFREE_USED)
-    {
+    if (usedh->is_free != BLOCK_ISFREE_USED) {
         dprintcritical("free_memory: Address %p not in use in segment %p (size %d)",
             paddr, segaddr, palloc->size);
 
+        return 0;
+    }
+
+    return 1;
+}
+
+/**
+ * Frees a block that allocate_memory() returned, in one update committed at once, after used_block() has
+ * checked it.  The allocator lock is taken for it, unless the process holds it (alloc_hold): the held lock
+ * is then released and taken again every ALLOC_HOLD_FREES calls.  If the lock cannot be taken, the block
+ * stays in use.
+ *
+ * @param palloc  the allocator context
+ * @param paddr   the address that allocate_memory() returned, not NULL
+ */
+static void free_memory(alloc_context* palloc, void* paddr) {
+    dprintdecorate("start free_memory");
+
+    _ASSERT(palloc != NULL);
+    _ASSERT(paddr != NULL);
+
+    // Free the block from shared segment, under the lock, unless the process holds it (alloc_hold).
+    // Without the lock (see alloc_lock), the block stays in use
+    if (palloc->held == 0 && FAILED(alloc_lock(palloc))) {
         goto Finished;
     }
 
-    /* Increment freecount and decrement usedcount right away */
-    header->usedcount--;
-    header->freecount++;
-
-    blocksiz = usedh->size;
-    header->free_size += blocksiz;
-
-    /* Check if next block is free */
-    freeh = (alloc_free_header *)((char *)usedh + blocksiz + ALLOC_USED_BLOCK_OVERHEAD);
-    if(freeh->is_free == BLOCK_ISFREE_FREE)
-    {
-        /* Block after this block is free. Need to combine */
-        pfree = (alloc_free_header *)usedh;
-
-        pfree->size      = freeh->size + ALLOC_FREE_BLOCK_OVERHEAD + blocksiz;
-        pfree->is_free   = BLOCK_ISFREE_FREE;
-        pfree->prev_free = freeh->prev_free;
-        pfree->next_free = freeh->next_free;
-
-        coffset = POINTER_OFFSET(segaddr, pfree);
-        (FREE_HEADER(segaddr, pfree->prev_free))->next_free = coffset;
-        (FREE_HEADER(segaddr, pfree->next_free))->prev_free = coffset;
-        *((size_t *)(((char *)(pfree + 1)) + pfree->size)) = pfree->size;
-
-        header->freecount--;
-        header->free_size  += ALLOC_FREE_BLOCK_OVERHEAD;
-
-        combined = 1;
+    if (used_block(palloc, paddr)) {
+        free_block(palloc, (alloc_used_header*)((char*)paddr - sizeof(alloc_used_header)), 1);
+        lock_undo_commit(&palloc->undo);
     }
 
-    /* Check if previous block is free */
-    lastsize = *((size_t *)((char *)paddr - sizeof(alloc_used_header) - sizeof(size_t)));
-    freeh    = (alloc_free_header *)((char *)paddr - sizeof(alloc_used_header) - ALLOC_FREE_BLOCK_OVERHEAD - lastsize);
-
-    _ASSERT(freeh->size == lastsize);
-    if(freeh->is_free == BLOCK_ISFREE_FREE)
-    {
-        /* Block before block getting freed is free. Combine with that */
-        if(combined == 0)
-        {
-            /* Just need to expand the size of this block */
-            freeh->size += usedh->size + ALLOC_USED_BLOCK_OVERHEAD;
+    if (palloc->held == 0) {
+        lock_unlock(palloc->lock);
+    } else if (++palloc->heldfrees >= ALLOC_HOLD_FREES) {
+        // Let the other processes allocate (a released mutex goes to a process that waits for it). If
+        // the lock cannot be taken again, it is not held any more: the next frees take it each
+        lock_unlock(palloc->lock);
+        if (FAILED(alloc_lock(palloc))) {
+            palloc->held = 0;
         }
-        else
-        {
-            /* We already combined next block with block getting freed */
-            pfree = (alloc_free_header *)usedh;
-            freeh->size += pfree->size + ALLOC_FREE_BLOCK_OVERHEAD;
-
-            freeh->next_free = pfree->next_free;
-            pfree = FREE_HEADER(segaddr, pfree->next_free);
-            pfree->prev_free = POINTER_OFFSET(segaddr, freeh);
-        }
-
-        *((size_t *)(((char *)(freeh + 1)) + freeh->size)) = freeh->size;
-
-        header->freecount--;
-        header->free_size  += ALLOC_FREE_BLOCK_OVERHEAD;
-
-        combined = 1;
-    }
-
-    if(combined == 0)
-    {
-        /* New free block around two used blocks or around */
-        /* used and first block or around used and last block: */
-        /* it goes in before the free block that follows it (see find_next_free) */
-        usedh = (alloc_used_header *)((char *)paddr - sizeof(alloc_used_header));
-        freeh = find_next_free(palloc, usedh);
-
-        _ASSERT(freeh->is_free == BLOCK_ISFREE_FREE || freeh->is_free == BLOCK_ISFREE_LAST);
-        if (freeh->is_free != BLOCK_ISFREE_FREE && freeh->is_free != BLOCK_ISFREE_LAST)
-        {
-            dprintcritical("free_memory: Free block %p is not free in segment %p (size %d) - CORRUPTION IMMINENT",
-                freeh, segaddr, palloc->size);
-        }
-
-        pfree = (alloc_free_header *)usedh;
-        pfree->is_free = BLOCK_ISFREE_FREE;
-        pfree->next_free = POINTER_OFFSET(segaddr, freeh);
-        pfree->prev_free = freeh->prev_free;
-
-        freeh = FREE_HEADER(segaddr, pfree->prev_free);
-        freeh->next_free = POINTER_OFFSET(segaddr, pfree);
-
-        freeh = FREE_HEADER(segaddr, pfree->next_free);
-        freeh->prev_free = POINTER_OFFSET(segaddr, pfree);
+        palloc->heldfrees = 0;
     }
 
 Finished:
-
-    if(flock)
-    {
-        lock_unlock(palloc->lock);
-        flock = 0;
-    }
 
     dprintdecorate("end free_memory");
 
     return;
 }
 
-static size_t get_memory_size(alloc_context * palloc, void * addr)
-{
-    size_t              size  = 0;
-    alloc_used_header * usedh = NULL;
-
-    dprintverbose("start get_memory_size");
+/**
+ * Gives back the end of a used block past its first size bytes, when that is large enough to be a free
+ * block: the rest becomes a used block of its own, which is freed at once (combined with the free
+ * block after it, if any).  Nothing moves: the block keeps its address and its first size bytes.  One
+ * update (see ALLOC_SET), which logs 11 fields at most: the size in the header and at the end of the
+ * block (2), and the free of the rest, which never counted as a used block and has a used block before
+ * it (9).
+ *
+ * @param palloc  the allocator context; its lock is taken here unless the process holds it (alloc_hold)
+ * @param paddr   the address that allocate_memory() returned for the block
+ * @param size    the bytes to keep, rounded up to a multiple of size_t here
+ */
+static void shrink_memory(alloc_context* palloc, void* paddr, size_t size) {
+    alloc_used_header*  usedh = NULL;
+    alloc_used_header*  resth = NULL;
+    size_t              restsiz = 0;
 
     _ASSERT(palloc != NULL);
-    _ASSERT(addr   != NULL);
+    _ASSERT(paddr != NULL);
 
-    lock_lock(palloc->lock);
+#ifdef _WIN64
+    size = ALIGNQWORD(size);
+#else // _WIN64
+    size = ALIGNDWORD(size);
+#endif // _WIN64
 
-    usedh = (alloc_used_header *)((char *)addr - sizeof(alloc_used_header));
-    _ASSERT(usedh->is_free == BLOCK_ISFREE_USED);
+    // Without the lock (see alloc_lock), the block keeps its size
+    if (palloc->held == 0 && FAILED(alloc_lock(palloc))) {
+        return;
+    }
 
-    size = usedh->size;
-    lock_unlock(palloc->lock);
+    if (!used_block(palloc, paddr)) {
+        goto Finished;
+    }
 
-    dprintverbose("end get_memory_size");
-    return size;
+    usedh = (alloc_used_header*)((char*)paddr - sizeof(alloc_used_header));
+    if (usedh->size < size + MIN_FREE_BLOCK_SIZE) {
+        goto Finished;
+    }
+
+    // The rest: its header after the new end of the block, and that new end, inside the block, are not
+    // logged (see ALLOC_SET); its size at the end, where the block's was, and the size of the block are
+    restsiz = usedh->size - size - ALLOC_USED_BLOCK_OVERHEAD;
+    resth = (alloc_used_header*)((char*)paddr + size + sizeof(size_t));
+    resth->size = restsiz;
+    resth->is_free = BLOCK_ISFREE_USED;
+    *((size_t*)((char*)paddr + size)) = size;
+
+    ALLOC_SET(palloc, *((size_t*)((char*)(resth + 1) + restsiz)), restsiz);
+    ALLOC_SET(palloc, usedh->size, size);
+
+    free_block(palloc, resth, 0);
+    lock_undo_commit(&palloc->undo);
+
+Finished:
+
+    if (palloc->held == 0) {
+        lock_unlock(palloc->lock);
+    }
+
+    return;
 }
 
-static void * alloc_malloc(alloc_context * palloc, unsigned int type, size_t size)
-{
-    void * result = NULL;
+/**
+ * The process takes the allocator lock once for a series of frees (the batches of ucache_clear() and of
+ * a full pass), instead of once for each block: allocate_memory(), free_memory() and alloc_getinfo() do
+ * not take it while it is held.  Every ALLOC_HOLD_FREES frees, free_memory() releases it and takes it
+ * again, so that the allocations of the other processes are not held up.  Hold it only for work in shared
+ * memory: nothing in between may run user code, allocate request memory, or take the cache lock (which
+ * is taken before this one everywhere else).  Returns NONFATAL with the lock held; otherwise (see
+ * alloc_lock) it is not held, and the caller must not call alloc_release(): its frees take the lock each.
+ *
+ * @param palloc  the allocator context; calls nest (the lock is taken by the first one only)
+ * @return NONFATAL with the lock held, else the failure of alloc_lock() (FATAL_LOCK_WAIT, FATAL_LOCK_UNDO)
+ */
+int alloc_hold(alloc_context* palloc) {
+    int result = NONFATAL;
+
+    _ASSERT(palloc != NULL);
+    _ASSERT(palloc->lock != NULL);
+
+    if (palloc->held == 0) {
+        result = alloc_lock(palloc);
+        if (FAILED(result)) {
+            return result;
+        }
+
+        palloc->heldfrees = 0;
+    }
+
+    palloc->held++;
+
+    return NONFATAL;
+}
+
+/**
+ * Ends an alloc_hold() that succeeded: the allocator lock is released when the last nested hold ends.
+ * Nothing happens if nothing is held (free_memory() could not take the lock again).
+ *
+ * @param palloc  the allocator context
+ */
+void alloc_release(alloc_context* palloc) {
+    _ASSERT(palloc != NULL);
+
+    // held is 0 if free_memory() could not take the lock again: nothing is held then
+    if (palloc->held != 0 && --palloc->held == 0) {
+        lock_unlock(palloc->lock);
+    }
+}
+
+/**
+ * Allocates size bytes in shared memory (allocate_memory), request memory (pemalloc(size, 0)) or
+ * persistent process memory (pemalloc(size, 1)), as type says.
+ *
+ * @param palloc  the allocator context for ALLOC_TYPE_SHAREDMEM; unused (may be NULL) for the other types
+ * @param type    ALLOC_TYPE_SHAREDMEM, ALLOC_TYPE_PROCESS or ALLOC_TYPE_PROCESS_PERSISTENT
+ * @param size    the bytes wanted
+ * @return the memory; NULL if the shared-memory allocation failed or type is none of these
+ */
+static void* alloc_malloc(alloc_context* palloc, unsigned int type, size_t size) {
+    void* result = NULL;
 
     _ASSERT(size >= 0);
 
-    switch(type)
-    {
+    switch (type) {
         case ALLOC_TYPE_SHAREDMEM:
-            if(FAILED(allocate_memory(palloc, size, &result)))
-            {
+            if (FAILED(allocate_memory(palloc, size, &result))) {
                 return NULL;
             }
             break;
@@ -523,56 +833,25 @@ static void * alloc_malloc(alloc_context * palloc, unsigned int type, size_t siz
     return result;
 }
 
-static void * alloc_realloc(alloc_context * palloc, unsigned int type, void * addr, size_t size)
-{
-    void * result = NULL;
-    size_t osize  = 0;
-
-    _ASSERT(addr != NULL);
-    _ASSERT(size >= 0);
-
-    switch(type)
-    {
-        case ALLOC_TYPE_SHAREDMEM:
-            if(FAILED(allocate_memory(palloc, size, &result)))
-            {
-                return NULL;
-            }
-            osize = get_memory_size(palloc, addr);
-            if(size < osize)
-            {
-                osize = size;
-            }
-            memcpy_s(result, osize, addr, osize);
-            free_memory(palloc, addr);
-            break;
-        case ALLOC_TYPE_PROCESS:
-            result = perealloc(addr, size, 0);
-            break;
-        case ALLOC_TYPE_PROCESS_PERSISTENT:
-            result = perealloc(addr, size, 1);
-            break;
-        default:
-            _ASSERT(FALSE);
-            break;
-    }
-
-    return result;
-}
-
-static char * alloc_strdup(alloc_context * palloc, unsigned int type, const char * str)
-{
-    char * result = NULL;
-    size_t strl   = 0;
+/**
+ * Copies a NUL-terminated string into shared memory (allocate_memory), request memory (pestrdup(str, 0))
+ * or persistent process memory (pestrdup(str, 1)), as type says.
+ *
+ * @param palloc  the allocator context for ALLOC_TYPE_SHAREDMEM; unused (may be NULL) for the other types
+ * @param type    ALLOC_TYPE_SHAREDMEM, ALLOC_TYPE_PROCESS or ALLOC_TYPE_PROCESS_PERSISTENT
+ * @param str     the string to copy, not NULL
+ * @return the copy; NULL if the shared-memory allocation failed or type is none of these
+ */
+static char* alloc_strdup(alloc_context* palloc, unsigned int type, const char* str) {
+    char*  result = NULL;
+    size_t strl = 0;
 
     _ASSERT(str != NULL);
     strl = strlen(str) + 1;
 
-    switch(type)
-    {
+    switch (type) {
         case ALLOC_TYPE_SHAREDMEM:
-            if(FAILED(allocate_memory(palloc, strl, &result)))
-            {
+            if (FAILED(allocate_memory(palloc, strl, &result))) {
                 return NULL;
             }
             memcpy_s(result, strl, str, strl);
@@ -591,12 +870,18 @@ static char * alloc_strdup(alloc_context * palloc, unsigned int type, const char
     return result;
 }
 
-static void alloc_free(alloc_context * palloc, unsigned int type, void * addr)
-{
+/**
+ * Frees memory that alloc_malloc() or alloc_strdup() returned for the same type: free_memory() for
+ * shared memory, pefree() for process memory.
+ *
+ * @param palloc  the allocator context for ALLOC_TYPE_SHAREDMEM; unused (may be NULL) for the other types
+ * @param type    ALLOC_TYPE_SHAREDMEM, ALLOC_TYPE_PROCESS or ALLOC_TYPE_PROCESS_PERSISTENT
+ * @param addr    the memory to free, not NULL
+ */
+static void alloc_free(alloc_context* palloc, unsigned int type, void* addr) {
     _ASSERT(addr != NULL);
 
-    switch(type)
-    {
+    switch (type) {
         case ALLOC_TYPE_SHAREDMEM:
             free_memory(palloc, addr);
             break;
@@ -614,39 +899,44 @@ static void alloc_free(alloc_context * palloc, unsigned int type, void * addr)
     return;
 }
 
-int alloc_create(alloc_context ** ppalloc)
-{
+/**
+ * Allocates an allocator context in persistent process memory, with a new id and no segment yet (see
+ * alloc_initialize).
+ *
+ * @param ppalloc  out: the new context, NULL on failure
+ * @return NONFATAL on success, FATAL_OUT_OF_LMEMORY if the context could not be allocated
+ */
+int alloc_create(alloc_context** ppalloc) {
     int             result = NONFATAL;
-    alloc_context * palloc = NULL;
+    alloc_context*  palloc = NULL;
 
     dprintverbose("start alloc_create");
     _ASSERT(ppalloc != NULL);
 
     *ppalloc = NULL;
 
-    /* Allocate memory for context */
-    palloc = (alloc_context *)alloc_pemalloc(sizeof(alloc_context));
-    if(palloc == NULL)
-    {
+    // Allocate memory for context
+    palloc = (alloc_context*)alloc_pemalloc(sizeof(alloc_context));
+    if (palloc == NULL) {
         result = FATAL_OUT_OF_LMEMORY;
         goto Finished;
     }
 
-    /* Initialize member variables */
-    palloc->id        = gallocid++;
-    palloc->islocal   = 0;
-    palloc->hinitdone = NULL;
-    palloc->memaddr   = NULL;
-    palloc->size      = 0;
-    palloc->lock      = NULL;
-    palloc->header    = NULL;
+    // Initialize member variables
+    palloc->id = gallocid++;
+    palloc->memaddr = NULL;
+    palloc->size = 0;
+    palloc->lock = NULL;
+    palloc->header = NULL;
+    palloc->held = 0;
+    palloc->heldfrees = 0;
+    memset(&palloc->undo, 0, sizeof(palloc->undo));
 
     *ppalloc = palloc;
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in alloc_create", result);
     }
 
@@ -654,12 +944,16 @@ Finished:
     return result;
 }
 
-void alloc_destroy(alloc_context * palloc)
-{
+/**
+ * Frees a context that alloc_create() allocated.  The lock that alloc_initialize() created is released by
+ * alloc_terminate(), not here.
+ *
+ * @param palloc  the context, may be NULL
+ */
+void alloc_destroy(alloc_context* palloc) {
     dprintverbose("start alloc_destroy");
 
-    if(palloc != NULL)
-    {
+    if (palloc != NULL) {
         alloc_pefree(palloc);
         palloc = NULL;
     }
@@ -669,141 +963,140 @@ void alloc_destroy(alloc_context * palloc)
     return;
 }
 
-/* initmemory should be 1 for all non file backed shared memory allocators and 0 */
-/* for file backed shared memory allocators when filemap->existing is set to 1 */
-int alloc_initialize(alloc_context * palloc, unsigned short islocal, char * name, unsigned short cachekey, void * staddr, size_t size, unsigned char initmemory)
-{
-    int                    result   = NONFATAL;
-    unsigned short         locktype = LOCK_TYPE_SHARED;
-    alloc_segment_header * header   = NULL;
-    alloc_free_header *    frestart = NULL;
-    alloc_free_header *    fremid   = NULL;
-    alloc_free_header *    freend   = NULL;
-    unsigned char          isfirst  = 1;
-    DWORD                  ret      = 0;
+/**
+ * *pinitmemory is 1 for a segment in a file mapping object that the caller has just created, 0 for one that it
+ * opened. An opened segment is used as it is only once a process has completed its initialization (alloc_initdone):
+ * otherwise the process that was initializing it died before it was done, and the segment is initialized again,
+ * which *pinitmemory then tells the caller. The caller holds the init mutex of the cache throughout (ZVCACHE_INIT),
+ * so no other process initializes or opens the segment meanwhile, and no process uses a segment that is not marked
+ *
+ * @param palloc       the context from alloc_create()
+ * @param name         the name prefix of the allocator lock (lock_initialize)
+ * @param cachekey     the key of the cache, not 0, also for the name of the lock
+ * @param staddr       the start of the segment's view in this process
+ * @param size         the size of the segment in bytes
+ * @param pinitmemory  in: 1 for a segment just created, 0 for one opened; out: 1 if the segment was
+ *                     initialized here (also an opened one whose initialization was not completed)
+ * @return NONFATAL on success; the failure of lock_create() or lock_initialize() (FATAL_OUT_OF_LMEMORY,
+ *         FATAL_LOCK_*); FATAL_ALLOC_SEGMENT_CORRUPT if an opened, initialized segment records another size.
+ *         On failure the lock is destroyed and the context holds no segment
+ */
+int alloc_initialize(alloc_context* palloc, char* name, unsigned short cachekey, void* staddr, size_t size, unsigned char* pinitmemory) {
+    int                    result = NONFATAL;
+    alloc_segment_header*  header = NULL;
+    alloc_free_header*     frestart = NULL;
+    alloc_free_header*     fremid = NULL;
+    alloc_free_header*     freend = NULL;
 
     dprintverbose("start alloc_initialize");
 
-    _ASSERT(palloc   != NULL);
+    _ASSERT(palloc != NULL);
     _ASSERT(cachekey != 0);
-    _ASSERT(staddr   != NULL);
-    _ASSERT(size     >  0);
+    _ASSERT(staddr != NULL);
+    _ASSERT(size > 0);
+    _ASSERT(pinitmemory != NULL);
 
-    palloc->memaddr   = staddr;
-    palloc->size      = size;
-    palloc->header    = (alloc_segment_header *)staddr;
-    header            = palloc->header;
+    palloc->memaddr = staddr;
+    palloc->size = size;
+    palloc->header = (alloc_segment_header*)staddr;
+    header = palloc->header;
+
+    // The undo log of the allocator, in the segment header (see alloc_lock)
+    lock_undo_initialize(&palloc->undo, staddr, size, &header->undocount, header->undo);
 
     result = lock_create(&palloc->lock);
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         goto Finished;
     }
 
-    if(islocal)
-    {
-        locktype = LOCK_TYPE_LOCAL;
-        palloc->islocal = islocal;
-    }
-
-    result = lock_initialize(palloc->lock, name, cachekey, locktype, &header->last_owner);
-    if(FAILED(result))
-    {
+    result = lock_initialize(palloc->lock, name, cachekey, LOCK_TYPE_SHARED, &header->last_owner);
+    if (FAILED(result)) {
         goto Finished;
     }
 
-    result = utils_create_init_event(palloc->lock->nameprefix, "ALLOC_INIT", &palloc->hinitdone, &isfirst);
-    if (FAILED(result))
-    {
-        result = FATAL_ALLOC_INIT_EVENT;
+    // Opened, but the process that initialized it died before it marked it
+    if (*pinitmemory == 0 && header->initdone != ALLOC_SEGMENT_INITDONE) {
+        dprintimportant("alloc_initialize: the initialization of segment %s was not completed: initializing it again", palloc->lock->nameprefix);
+        *pinitmemory = 1;
+    }
+
+    // A safety net: the caller maps a segment it opens at the size it has (filemap_initialize), which
+    // the process that initialized it recorded. No cache is better than a free list past the view
+    if (*pinitmemory == 0 && header->total_size != size) {
+        dprintimportant("alloc_initialize: segment %s records %Iu bytes, not %Iu", palloc->lock->nameprefix, header->total_size, size);
+        result = FATAL_ALLOC_SEGMENT_CORRUPT;
         goto Finished;
     }
 
-    /* If the segment is not initialized, set */
-    /* header on the shared memory segment start */
-    if(islocal || isfirst)
-    {
-        /* No need to get a lock as other processes */
-        /* are blocked waiting for hinitdone event */
+    if (*pinitmemory) {
+        // No lock needed: the other processes wait for the init mutex of the cache. The segment is
+        // not initialized until the caller marks it (alloc_initdone): clear a mark that the file of
+        // a file-backed segment can hold from an earlier cache
+        InterlockedExchange((volatile LONG*)&header->initdone, 0);
 
-        if(initmemory)
-        {
-            /* Put the start header of size 0 */
-            /* followed by the first free block of size free_size */
-            frestart = (alloc_free_header *)(header + 1);
-            fremid   = (alloc_free_header *)((char *)frestart + ALLOC_FREE_BLOCK_OVERHEAD);
+        // Put the start block of size 0, then one free block of size free_size,
+        // then the end block of size 0: the start and end blocks are never free,
+        // so a free block is never combined past them
+        frestart = (alloc_free_header*)(header + 1);
+        fremid = (alloc_free_header*)((char*)frestart + ALLOC_FREE_BLOCK_OVERHEAD);
 
-            /* Set start of doubly circular linked list */
-            frestart->size      = 0;
-            frestart->is_free   = BLOCK_ISFREE_FIRST;
-            frestart->prev_free = 0;
-            frestart->next_free = POINTER_OFFSET(staddr, fremid);
-            *((size_t *)((char *)(frestart + 1))) = frestart->size;
+        frestart->size = 0;
+        frestart->is_free = BLOCK_ISFREE_FIRST;
+        frestart->prev_free = 0;
+        frestart->next_free = 0;
+        *((size_t*)((char*)(frestart + 1))) = frestart->size;
 
-            /* Set mid of doubly linked list */
-            fremid->size      = size - ALLOC_SEGMENT_HEADER_SIZE - ALLOC_FREE_BLOCK_OVERHEAD - ALLOC_FREE_BLOCK_OVERHEAD - ALLOC_FREE_BLOCK_OVERHEAD;
-            freend   = (alloc_free_header *)((char *)fremid + ALLOC_FREE_BLOCK_OVERHEAD + fremid->size);
+        fremid->size = size - ALLOC_SEGMENT_HEADER_SIZE - ALLOC_FREE_BLOCK_OVERHEAD - ALLOC_FREE_BLOCK_OVERHEAD - ALLOC_FREE_BLOCK_OVERHEAD;
+        freend = (alloc_free_header*)((char*)fremid + ALLOC_FREE_BLOCK_OVERHEAD + fremid->size);
 
-            fremid->is_free   = BLOCK_ISFREE_FREE;
-            fremid->prev_free = POINTER_OFFSET(staddr, frestart);
-            fremid->next_free = POINTER_OFFSET(staddr, freend);
-            *((size_t *)(((char *)(fremid + 1)) + fremid->size)) = fremid->size;
+        fremid->is_free = BLOCK_ISFREE_FREE;
+        *((size_t*)(((char*)(fremid + 1)) + fremid->size)) = fremid->size;
 
-            freend->size      = 0;
-            freend->is_free   = BLOCK_ISFREE_LAST;
-            freend->next_free = 0;
-            freend->prev_free = POINTER_OFFSET(staddr, fremid);
-            *((size_t *)((char *)(freend + 1))) = freend->size;
+        freend->size = 0;
+        freend->is_free = BLOCK_ISFREE_LAST;
+        freend->next_free = 0;
+        freend->prev_free = 0;
+        *((size_t*)((char*)(freend + 1))) = freend->size;
 
-            /* Set segment header */
-            header->total_size = size;
-            header->free_size  = fremid->size;
+        // Set segment header. Every field of alloc_segment_header, fields added later included, must
+        // be set in this branch: the caller marks the segment after it (alloc_initdone), and the
+        // processes that open it from then on use it as it is
+        header->total_size = size;
+        header->free_size = fremid->size;
 
-            header->cacheheader1 = 0;
-            header->usedcount    = 0;
-            header->freecount    = 1;
-        }
+        header->cacheheader1 = 0;
+        header->usedcount = 0;
+        header->freecount = 1;
+        header->last_owner = 0;
+        header->undocount = 0;
+        header->abandoned = 0;
 
-        header->mapcount = 1;
-    }
-    else
-    {
-        /* TODO: perform integrity check of segment.  If it fails, re-init. */
-        InterlockedIncrement(&header->mapcount);
+        // Empty free lists, then the free block in the list of its class (logged as in any update,
+        // and committed: the log is empty when the segment is marked)
+        memset(header->freemap, 0, sizeof(header->freemap));
+        memset(header->freelists, 0, sizeof(header->freelists));
+        link_free_block(palloc, fremid, 0);
+        lock_undo_commit(&palloc->undo);
     }
 
     _ASSERT(SUCCEEDED(result));
 
 Finished:
 
-    if (palloc->hinitdone)
-    {
-        ReleaseMutex(palloc->hinitdone);
-    }
-
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in alloc_initialize", result);
 
-        if(palloc != NULL)
-        {
-            if(palloc->lock != NULL)
-            {
+        if (palloc != NULL) {
+            if (palloc->lock != NULL) {
                 lock_terminate(palloc->lock);
                 lock_destroy(palloc->lock);
 
                 palloc->lock = NULL;
             }
 
-            if(palloc->hinitdone != NULL)
-            {
-                CloseHandle(palloc->hinitdone);
-                palloc->hinitdone = NULL;
-            }
-
             palloc->memaddr = NULL;
-            palloc->size    = 0;
-            palloc->header  = NULL;
+            palloc->size = 0;
+            palloc->header = NULL;
         }
     }
 
@@ -812,34 +1105,42 @@ Finished:
     return result;
 }
 
-void alloc_terminate(alloc_context * palloc)
-{
+/**
+ * Marks the segment initialized, once the caller has also initialized what it keeps in it (the cache
+ * header): the processes that open the segment from then on use it as it is (see alloc_initialize). The
+ * interlocked write keeps the mark after every write of the initialization
+ *
+ * @param palloc  the context, its segment set up by alloc_initialize()
+ */
+void alloc_initdone(alloc_context* palloc) {
+    _ASSERT(palloc != NULL);
+    _ASSERT(palloc->header != NULL);
+
+    InterlockedExchange((volatile LONG*)&palloc->header->initdone, ALLOC_SEGMENT_INITDONE);
+}
+
+/**
+ * Undoes alloc_initialize() in this process: terminates and destroys the allocator lock and forgets the
+ * segment (address, size, header).  The segment itself is left as it is, and the context is freed by
+ * alloc_destroy().
+ *
+ * @param palloc  the context, may be NULL
+ */
+void alloc_terminate(alloc_context* palloc) {
     dprintverbose("start alloc_terminate");
 
-    if(palloc != NULL)
-    {
-        if(palloc->header != NULL)
-        {
-            InterlockedDecrement(&palloc->header->mapcount);
-            palloc->header = NULL;
-        }
+    if (palloc != NULL) {
+        palloc->header = NULL;
 
-        if(palloc->lock != NULL)
-        {
+        if (palloc->lock != NULL) {
             lock_terminate(palloc->lock);
             lock_destroy(palloc->lock);
 
             palloc->lock = NULL;
         }
 
-        if(palloc->hinitdone != NULL)
-        {
-            CloseHandle(palloc->hinitdone);
-            palloc->hinitdone = NULL;
-        }
-
         palloc->memaddr = NULL;
-        palloc->size    = 0;
+        palloc->size = 0;
     }
 
     dprintverbose("end alloc_terminate");
@@ -847,37 +1148,78 @@ void alloc_terminate(alloc_context * palloc)
     return;
 }
 
-int alloc_create_mpool(alloc_context * palloc, size_t * phoffset)
-{
+/**
+ * A memory pool, which holds every part of a stored array (see copyin_zval in ucache_zvcache.c) and is
+ * freed whole (alloc_free_mpool).  With size > 0, the pool gets one chunk of that size at once, in the
+ * block of its header: the caller counts what the copy will take, so that the parts of one array lie in
+ * one block, without the rest of fixed-size chunks.  If no free block is that large, or size is 0, the
+ * chunks come as the copy needs them (alloc_ommalloc), and alloc_trim_mpool() gives back what they do
+ * not use.
+ *
+ * @param palloc    the allocator context
+ * @param phoffset  out: the offset of the pool header in the segment, 0 on failure
+ * @param size      the bytes that the caller counted for the copy (rounded up to a multiple of size_t
+ *                  here), 0 for chunks as the copy needs them
+ * @return NONFATAL on success, FATAL_OUT_OF_MEMORY if not even the pool header could be allocated
+ */
+int alloc_create_mpool(alloc_context* palloc, size_t* phoffset, size_t size) {
     int                   result = NONFATAL;
-    alloc_mpool_header *  header = NULL;
+    alloc_mpool_header*   header = NULL;
+    alloc_mpool_segment*  pchunk = NULL;
 
     dprintverbose("start alloc_create_mpool");
 
-    _ASSERT(palloc   != NULL);
+    _ASSERT(palloc != NULL);
     _ASSERT(phoffset != NULL);
 
     *phoffset = 0;
 
-    header = (alloc_mpool_header *)alloc_smalloc(palloc, sizeof(alloc_mpool_header));
-    if(header == NULL)
-    {
-        result = FATAL_OUT_OF_MEMORY;
-        goto Finished;
+#ifdef _WIN64
+    size = ALIGNQWORD(size);
+#else // _WIN64
+    size = ALIGNDWORD(size);
+#endif // _WIN64
+
+    if (size > 0) {
+        header = (alloc_mpool_header*)alloc_smalloc(palloc, sizeof(alloc_mpool_header) + sizeof(alloc_mpool_segment) + size);
+        if (header == NULL) {
+            size = 0;
+        }
+    }
+
+    if (header == NULL) {
+        header = (alloc_mpool_header*)alloc_smalloc(palloc, sizeof(alloc_mpool_header));
+        if (header == NULL) {
+            result = FATAL_OUT_OF_MEMORY;
+            goto Finished;
+        }
     }
 
     header->foffset = 0;
     header->loffset = 0;
-    header->socurr  = 0;
-    header->mocurr  = 0;
-    header->locurr  = 0;
+    header->socurr = 0;
+    header->mocurr = 0;
+    header->locurr = 0;
+    header->gocurr = 0;
+
+    if (size > 0) {
+        // The chunk right after the header, its memory right after it, in the same block
+        pchunk = (alloc_mpool_segment*)(header + 1);
+        pchunk->aoffset = POINTER_OFFSET(palloc->memaddr, (pchunk + 1));
+        pchunk->size = size;
+        pchunk->position = 0;
+        pchunk->next = 0;
+
+        header->foffset = POINTER_OFFSET(palloc->memaddr, pchunk);
+        header->loffset = header->foffset;
+        header->gocurr = header->foffset;
+    }
 
     *phoffset = POINTER_OFFSET(palloc->memaddr, header);
 
 Finished:
 
-    if(FAILED(result))
-    {
+    if (FAILED(result)) {
         dprintimportant("failure %d in alloc_create_mpool", result);
     }
 
@@ -886,70 +1228,83 @@ Finished:
     return result;
 }
 
-void alloc_free_mpool(alloc_context * palloc, size_t hoffset)
-{
-    void *                pvoid  = NULL;
-    alloc_mpool_header *  header = NULL;
-    alloc_mpool_segment * pchunk = NULL;
-    alloc_mpool_segment * ptemp  = NULL;
+/**
+ * Once the copy into a pool is done, nothing is allocated from it any more: gives back the end of every
+ * chunk that the copy did not use (of the chunk in the header's block, if the size the caller counted was
+ * too large, and of the last chunks of fixed size), when it is large enough to be a free block.
+ *
+ * @param palloc   the allocator context
+ * @param hoffset  the offset of the pool header in the segment (alloc_create_mpool), not 0
+ */
+void alloc_trim_mpool(alloc_context* palloc, size_t hoffset) {
+    alloc_mpool_header*   header = NULL;
+    alloc_mpool_segment*  pchunk = NULL;
+    size_t                inner = 0;
     size_t                offset = 0;
-    size_t                prev   = 0;
-    size_t                next   = 0;
+
+    _ASSERT(palloc != NULL);
+    _ASSERT(hoffset > 0);
+
+    header = (alloc_mpool_header*)((char*)palloc->memaddr + hoffset);
+    inner = hoffset + sizeof(alloc_mpool_header);
+
+    for (offset = header->foffset; offset != 0; offset = pchunk->next) {
+        pchunk = (alloc_mpool_segment*)((char*)palloc->memaddr + offset);
+        if (pchunk->size - pchunk->position < MIN_FREE_BLOCK_SIZE) {
+            continue;
+        }
+
+        if (offset == inner) {
+            dprintimportant("alloc_trim_mpool: %Iu bytes of the %Iu counted were not used", pchunk->size - pchunk->position, pchunk->size);
+            shrink_memory(palloc, header, sizeof(alloc_mpool_header) + sizeof(alloc_mpool_segment) + pchunk->position);
+        } else {
+            shrink_memory(palloc, (char*)palloc->memaddr + pchunk->aoffset, pchunk->position);
+        }
+
+        pchunk->size = pchunk->position;
+    }
+
+    header->socurr = 0;
+    header->mocurr = 0;
+    header->locurr = 0;
+    header->gocurr = 0;
+}
+
+/**
+ * Frees every chunk of the pool, then its header (with the chunk in its block, see alloc_create_mpool).
+ * The pool is private: nothing else refers to it.  A chunk must not be touched once it is freed.
+ *
+ * @param palloc   the allocator context
+ * @param hoffset  the offset of the pool header in the segment (alloc_create_mpool), not 0
+ */
+void alloc_free_mpool(alloc_context* palloc, size_t hoffset) {
+    alloc_mpool_header*   header = NULL;
+    alloc_mpool_segment*  pchunk = NULL;
+    size_t                inner = 0;
+    size_t                offset = 0;
+    size_t                next = 0;
 
     dprintverbose("start alloc_free_mpool");
 
-    _ASSERT(palloc  != NULL);
-    _ASSERT(hoffset >  0);
+    _ASSERT(palloc != NULL);
+    _ASSERT(hoffset > 0);
 
-    header = (alloc_mpool_header *)((char *)palloc->memaddr + hoffset);
-    if(header->foffset > 0)
-    {
-        /*
-         * free_memory() merges a freed block with a free neighbour in O(1), but a block freed
-         * between two used blocks makes it look for its place in the free list (find_next_free,
-         * which can walk the used blocks after it).  alloc_ommalloc() allocates the chunks one after
-         * the other, each segment header before its data block, so a pool's blocks mostly lie in
-         * increasing order of address: side by side ([header 1][data 1][header 2][data 2]...), or,
-         * when the free list is fragmented, the small headers in holes and the data blocks one
-         * after another.  So free the chunks from the last to the first, each data block before
-         * its header: the block after the one being freed is then usually free already, and only
-         * a block followed by something else makes free_memory() walk.  In the order of the list,
-         * with WinCache's forward walk, every data block walked over the rest of the pool, which
-         * made freeing a pool quadratic in its number of chunks (minutes for a large entry, while
-         * the cache lock was held).
-         * Freeing each header before its data block, in the order of the list, is linear only
-         * while every data block directly follows its header: a header in a hole of its own walks
-         * past its data block, still in use, to the next free block, which slowed the frees of
-         * small entries down in a fragmented segment.  The pool is private and about to be
-         * freed: reverse its list in place first.  A chunk must not be touched once it is freed.
-         */
-        offset = header->foffset;
-        while(offset != 0)
-        {
-            pchunk       = (alloc_mpool_segment *)((char *)palloc->memaddr + offset);
-            next         = pchunk->next;
-            pchunk->next = prev;
-            prev         = offset;
-            offset       = next;
+    header = (alloc_mpool_header*)((char*)palloc->memaddr + hoffset);
+    inner = hoffset + sizeof(alloc_mpool_header);
+
+    for (offset = header->foffset; offset != 0; offset = next) {
+        pchunk = (alloc_mpool_segment*)((char*)palloc->memaddr + offset);
+        next = pchunk->next;
+
+        if (offset == inner) {
+            continue;
         }
 
-        pchunk = (alloc_mpool_segment *)((char *)palloc->memaddr + prev);
-        while(pchunk != NULL)
-        {
-            ptemp  = pchunk;
-            pchunk = ((ptemp->next == 0) ? NULL : (alloc_mpool_segment *)((char *)palloc->memaddr + ptemp->next));
-
-            if(ptemp->aoffset != 0)
-            {
-                pvoid = (void *)((char *)palloc->memaddr + ptemp->aoffset);
-
-                alloc_sfree(palloc, pvoid);
-                pvoid = NULL;
-            }
-
-            alloc_sfree(palloc, ptemp);
-            ptemp = NULL;
+        if (pchunk->aoffset != 0) {
+            alloc_sfree(palloc, (char*)palloc->memaddr + pchunk->aoffset);
         }
+
+        alloc_sfree(palloc, pchunk);
     }
 
     alloc_sfree(palloc, header);
@@ -959,21 +1314,29 @@ void alloc_free_mpool(alloc_context * palloc, size_t hoffset)
     return;
 }
 
-void * alloc_get_cacheheader(alloc_context * palloc, unsigned int msize, unsigned int type)
-{
-    void *                 pvoid   = NULL;
-    alloc_segment_header * header  = NULL;
-    size_t *               pcvalue = NULL;
+/**
+ * The cache header of the given type, whose offset the segment header keeps (cacheheader1): the one that
+ * exists, else a new block of msize bytes, its contents not set here.  If another process set the offset
+ * meanwhile, the new block is freed and that process's header is returned.
+ *
+ * @param palloc  the allocator context
+ * @param msize   the size of the cache header in bytes, not 0, used when it is allocated
+ * @param type    CACHE_TYPE_USERZVALS, the only type
+ * @return the cache header; NULL if it had to be allocated and the allocation or the allocator lock failed
+ */
+void* alloc_get_cacheheader(alloc_context* palloc, unsigned int msize, unsigned int type) {
+    void*                 pvoid = NULL;
+    alloc_segment_header* header = NULL;
+    size_t*               pcvalue = NULL;
 
     dprintverbose("start alloc_get_cacheheader");
 
     _ASSERT(palloc != NULL);
-    _ASSERT(msize  >  0);
+    _ASSERT(msize > 0);
 
     header = palloc->header;
 
-    switch(type)
-    {
+    switch (type) {
         case CACHE_TYPE_USERZVALS:
             pcvalue = &header->cacheheader1;
             break;
@@ -983,28 +1346,28 @@ void * alloc_get_cacheheader(alloc_context * palloc, unsigned int msize, unsigne
             break;
     }
 
-    if(*pcvalue != 0)
-    {
-        pvoid = (void *)((char *)palloc->memaddr + (*pcvalue));
+    if (*pcvalue != 0) {
+        pvoid = (void*)((char*)palloc->memaddr + (*pcvalue));
         goto Finished;
     }
 
-    if(FAILED(allocate_memory(palloc, msize, &pvoid)))
-    {
+    if (FAILED(allocate_memory(palloc, msize, &pvoid))) {
         pvoid = NULL;
         goto Finished;
     }
 
-    lock_lock(palloc->lock);
-    if(*pcvalue != 0)
-    {
-        /* Some other process allocated before this process could do */
+    // One write of an aligned offset: nothing to log. Without the lock (see alloc_lock), the block is lost
+    if (FAILED(alloc_lock(palloc))) {
+        pvoid = NULL;
+        goto Finished;
+    }
+
+    if (*pcvalue != 0) {
+        // Some other process allocated before this process could do
         lock_unlock(palloc->lock);
         free_memory(palloc, pvoid);
-        pvoid = (void *)((char *)palloc->memaddr + (*pcvalue));
-    }
-    else
-    {
+        pvoid = (void*)((char*)palloc->memaddr + (*pcvalue));
+    } else {
         *pcvalue = POINTER_OFFSET(palloc->memaddr, pvoid);
         lock_unlock(palloc->lock);
     }
@@ -1015,266 +1378,349 @@ Finished:
     return pvoid;
 }
 
+/**
+ * Turns an offset in the segment into an address in this process's view.
+ *
+ * @param palloc  the allocator context
+ * @param offset  the offset in the segment, 0 for none
+ * @return the address; NULL if offset is 0 or not below the size of the segment
+ */
 __inline
-void * alloc_get_cachevalue(alloc_context * palloc, size_t offset)
-{
+void* alloc_get_cachevalue(alloc_context* palloc, size_t offset) {
     _ASSERT(palloc != NULL);
     _ASSERT(palloc->memaddr != NULL);
 
-    if(offset != 0 && offset < palloc->size)
-    {
-        return (void *)((char *)palloc->memaddr + offset);
-    }
-    else
-    {
+    if (offset != 0 && offset < palloc->size) {
+        return (void*)((char*)palloc->memaddr + offset);
+    } else {
         return NULL;
     }
 }
 
+/**
+ * Turns an address in this process's view of the segment into an offset in the segment.
+ *
+ * @param palloc  the allocator context
+ * @param pvalue  the address, may be NULL
+ * @return the offset; 0 if pvalue is NULL or below the start of the segment (the end is not checked)
+ */
 __inline
-size_t alloc_get_valueoffset(alloc_context * palloc, void * pvalue)
-{
+size_t alloc_get_valueoffset(alloc_context* palloc, void* pvalue) {
     _ASSERT(palloc != NULL);
     _ASSERT(palloc->memaddr != NULL);
 
-    if(pvalue != NULL && pvalue >= palloc->memaddr)
-    {
+    if (pvalue != NULL && pvalue >= palloc->memaddr) {
         return POINTER_OFFSET(palloc->memaddr, pvalue);
-    }
-    else
-    {
+    } else {
         return 0;
     }
 }
 
-/*
+/**
  * Fills the caller's alloc_info (on its stack).  It must not allocate request memory: the
  * scavenger calls it while it holds the cross-process cache lock, and a memory_limit fatal error
  * there would leave the lock owned by a FastCGI process that survives the error, blocking every
  * other process of the pool.
+ *
+ * @param palloc  the allocator context; its lock is taken here unless the process holds it (alloc_hold)
+ * @param pinfo   out: the sizes and counts of the segment; if the lock cannot be taken, the segment is
+ *                reported all free, with no blocks
  */
-void alloc_getinfo(alloc_context * palloc, alloc_info * pinfo)
-{
+void alloc_getinfo(alloc_context* palloc, alloc_info* pinfo) {
     dprintverbose("start alloc_getinfo");
 
     _ASSERT(palloc != NULL);
-    _ASSERT(pinfo  != NULL);
+    _ASSERT(pinfo != NULL);
 
-    lock_lock(palloc->lock);
+    // Without the lock (see alloc_lock), only the size, which never changes, and the count of the
+    // abandoned locks (one aligned field) are known. Reported all free: no scavenger step or full pass
+    // then removes entries for memory that the allocator could not take back
+    if (palloc->held == 0 && FAILED(alloc_lock(palloc))) {
+        pinfo->total_size = palloc->size;
+        pinfo->free_size = palloc->size;
+        pinfo->usedcount = 0;
+        pinfo->freecount = 0;
+        pinfo->mem_overhead = 0;
+        pinfo->abandoned = palloc->header->abandoned;
+        goto Finished;
+    }
 
-    pinfo->total_size   = palloc->header->total_size;
-    pinfo->free_size    = palloc->header->free_size;
-    pinfo->usedcount    = palloc->header->usedcount;
-    pinfo->freecount    = palloc->header->freecount;
+    pinfo->total_size = palloc->header->total_size;
+    pinfo->free_size = palloc->header->free_size;
+    pinfo->usedcount = palloc->header->usedcount;
+    pinfo->freecount = palloc->header->freecount;
     pinfo->mem_overhead = (palloc->header->usedcount + palloc->header->freecount + 2) * sizeof(alloc_free_header);
+    pinfo->abandoned = palloc->header->abandoned;
 
-    lock_unlock(palloc->lock);
+    if (palloc->held == 0) {
+        lock_unlock(palloc->lock);
+    }
+
+Finished:
 
     dprintverbose("end alloc_getinfo");
 
     return;
 }
 
+/**
+ * The most the segment can hold: the free memory once every block but the cache header is freed.  The
+ * segment is then one free block between the first and the last block (see alloc_initialize), the cache
+ * header being the first block that allocate_memory() took (alloc_get_cacheheader), at the start of
+ * that block.  No allocation can be larger, nor all of them together.  0 before the cache header exists.
+ *
+ * @param palloc  the allocator context; its lock is taken here unless the process holds it (alloc_hold)
+ * @return the capacity in bytes; 0 before the cache header exists or if the lock cannot be taken
+ */
+size_t alloc_capacity(alloc_context* palloc) {
+    size_t              capacity = 0;
+    alloc_used_header*  usedh = NULL;
+
+    _ASSERT(palloc != NULL);
+
+    // Without the lock (see alloc_lock): not known
+    if (palloc->held == 0 && FAILED(alloc_lock(palloc))) {
+        return 0;
+    }
+
+    if (palloc->header->cacheheader1 != 0) {
+        usedh = USED_HEADER(palloc->memaddr, palloc->header->cacheheader1 - sizeof(alloc_used_header));
+        capacity = palloc->header->total_size - ALLOC_SEGMENT_HEADER_SIZE - 3 * ALLOC_FREE_BLOCK_OVERHEAD
+            - (usedh->size + ALLOC_USED_BLOCK_OVERHEAD);
+    }
+
+    if (palloc->held == 0) {
+        lock_unlock(palloc->lock);
+    }
+
+    return capacity;
+}
+
+/**
+ * Allocates request memory (pemalloc(size, 0), see alloc_malloc).
+ *
+ * @param size  the bytes wanted
+ * @return the memory, as pemalloc() returns it
+ */
 __inline
-void * alloc_emalloc(size_t size)
-{
+void* alloc_emalloc(size_t size) {
     return alloc_malloc(NULL, ALLOC_TYPE_PROCESS, size);
 }
 
+/**
+ * Allocates persistent process memory (pemalloc(size, 1), see alloc_malloc).
+ *
+ * @param size  the bytes wanted
+ * @return the memory, as pemalloc() returns it
+ */
 __inline
-void * alloc_pemalloc(size_t size)
-{
+void* alloc_pemalloc(size_t size) {
     return alloc_malloc(NULL, ALLOC_TYPE_PROCESS_PERSISTENT, size);
 }
 
+/**
+ * Allocates size bytes in the shared segment (allocate_memory).
+ *
+ * @param palloc  the allocator context, not NULL
+ * @param size    the bytes wanted
+ * @return the memory; NULL if no free block is large enough or the allocator lock cannot be taken
+ */
 __inline
-void * alloc_smalloc(alloc_context * palloc, size_t size)
-{
+void* alloc_smalloc(alloc_context* palloc, size_t size) {
     _ASSERT(palloc != NULL);
     return alloc_malloc(palloc, ALLOC_TYPE_SHAREDMEM, size);
 }
 
+/**
+ * Copies a NUL-terminated string into request memory (pestrdup(str, 0), see alloc_strdup).
+ *
+ * @param str  the string to copy, not NULL
+ * @return the copy, as pestrdup() returns it
+ */
 __inline
-void * alloc_erealloc(void * addr, size_t size)
-{
-    return alloc_realloc(NULL, ALLOC_TYPE_PROCESS, addr, size);
-}
-
-__inline
-void * alloc_perealloc(void * addr, size_t size)
-{
-    return alloc_realloc(NULL, ALLOC_TYPE_PROCESS_PERSISTENT, addr, size);
-}
-
-__inline
-void * alloc_srealloc(alloc_context * palloc, void * addr, size_t size)
-{
-    _ASSERT(palloc != NULL);
-    return alloc_realloc(palloc, ALLOC_TYPE_SHAREDMEM, addr, size);
-}
-
-__inline
-char * alloc_estrdup(const char * str)
-{
+char* alloc_estrdup(const char* str) {
     return alloc_strdup(NULL, ALLOC_TYPE_PROCESS, str);
 }
 
+/**
+ * Frees request memory (pefree(addr, 0)).
+ *
+ * @param addr  memory from alloc_emalloc() or alloc_estrdup(), not NULL
+ */
 __inline
-char * alloc_pestrdup(const char * str)
-{
-    return alloc_strdup(NULL, ALLOC_TYPE_PROCESS_PERSISTENT, str);
-}
-
-__inline
-char * alloc_sstrdup(alloc_context * palloc, const char * str)
-{
-    _ASSERT(palloc != NULL);
-    return alloc_strdup(palloc, ALLOC_TYPE_SHAREDMEM, str);
-}
-
-__inline
-void alloc_efree(void * addr)
-{
+void alloc_efree(void* addr) {
     alloc_free(NULL, ALLOC_TYPE_PROCESS, addr);
     return;
 }
 
+/**
+ * Frees persistent process memory (pefree(addr, 1)).
+ *
+ * @param addr  memory from alloc_pemalloc(), not NULL
+ */
 __inline
-void alloc_pefree(void * addr)
-{
+void alloc_pefree(void* addr) {
     alloc_free(NULL, ALLOC_TYPE_PROCESS_PERSISTENT, addr);
     return;
 }
 
+/**
+ * Frees a block of the shared segment (free_memory): it stays in use if the allocator lock cannot be
+ * taken, or if addr is not a block in use.
+ *
+ * @param palloc  the allocator context, not NULL
+ * @param addr    memory from alloc_smalloc(), not NULL
+ */
 __inline
-void alloc_sfree(alloc_context * palloc, void * addr)
-{
+void alloc_sfree(alloc_context* palloc, void* addr) {
     _ASSERT(palloc != NULL);
     alloc_free(palloc, ALLOC_TYPE_SHAREDMEM, addr);
     return;
 }
 
-void * alloc_oemalloc(alloc_context * palloc, size_t hoffset, size_t size)
-{
-    _ASSERT(palloc  == NULL);
+/**
+ * An fn_malloc that allocates request memory (alloc_emalloc).
+ *
+ * @param palloc   unused, NULL
+ * @param hoffset  unused, 0
+ * @param size     the bytes wanted
+ * @return the memory, as alloc_emalloc() returns it
+ */
+void* alloc_oemalloc(alloc_context* palloc, size_t hoffset, size_t size) {
+    _ASSERT(palloc == NULL);
     _ASSERT(hoffset == 0);
 
     return alloc_emalloc(size);
 }
 
-void * alloc_osmalloc(alloc_context * palloc, size_t hoffset, size_t size)
-{
-    _ASSERT(palloc  != NULL);
+/**
+ * An fn_malloc that allocates in the shared segment (alloc_smalloc).
+ *
+ * @param palloc   the allocator context, not NULL
+ * @param hoffset  unused, 0
+ * @param size     the bytes wanted
+ * @return the memory; NULL if alloc_smalloc() fails
+ */
+void* alloc_osmalloc(alloc_context* palloc, size_t hoffset, size_t size) {
+    _ASSERT(palloc != NULL);
     _ASSERT(hoffset == 0);
 
     return alloc_smalloc(palloc, size);
 }
 
-void * alloc_ommalloc(alloc_context * palloc, size_t hoffset, size_t size)
-{
-    alloc_mpool_header *  header = NULL;
-    alloc_mpool_segment * pchunk = NULL;
-    alloc_mpool_segment * ptemp  = NULL;
+/**
+ * An fn_malloc that allocates from a memory pool (see alloc_create_mpool): from the chunk the caller
+ * counted while it has room, else from the current chunk of the size (up to POOL_ALLOCATION_SMALL_MAX,
+ * _MEDIUM_MAX or _LARGE_MAX bytes, in chunks of POOL_ALLOCATION_SMALL_BSIZE, _MEDIUM_BSIZE or _LARGE_BSIZE
+ * bytes), else from a new chunk, which a larger request gets of its own size.  Nothing is freed one by
+ * one (alloc_omfree): alloc_free_mpool() frees the whole pool.
+ *
+ * @param palloc   the allocator context, not NULL
+ * @param hoffset  the offset of the pool header in the segment, not 0
+ * @param size     the bytes wanted, not 0, rounded up to a multiple of size_t here
+ * @return the memory; NULL if a new chunk was needed and could not be allocated
+ */
+void* alloc_ommalloc(alloc_context* palloc, size_t hoffset, size_t size) {
+    alloc_mpool_header*  header = NULL;
+    alloc_mpool_segment* pchunk = NULL;
+    alloc_mpool_segment* ptemp = NULL;
 
-    void *                addr   = NULL;
-    void *                pvoid  = NULL;
+    void*                 addr = NULL;
+    void*                 pvoid = NULL;
     size_t                offset = 0;
-    size_t                rsize  = 0;
-    size_t                bsize  = 0;
-    unsigned char         ctype  = 0;
+    size_t                rsize = 0;
+    size_t                bsize = 0;
+    unsigned char         ctype = 0;
 
     dprintdecorate("start alloc_ommalloc");
 
-    _ASSERT(palloc  != NULL);
-    _ASSERT(hoffset >  0);
-    _ASSERT(size    >  0);
+    _ASSERT(palloc != NULL);
+    _ASSERT(hoffset > 0);
+    _ASSERT(size > 0);
 
 #ifdef _WIN64
-    rsize  = ALIGNQWORD(size);
-#else /* _WIN64 */
-    rsize  = ALIGNDWORD(size);
-#endif /* _WIN64 */
-    header = (alloc_mpool_header *)((char *)palloc->memaddr + hoffset);
+    rsize = ALIGNQWORD(size);
+#else // _WIN64
+    rsize = ALIGNDWORD(size);
+#endif // _WIN64
+    header = (alloc_mpool_header*)((char*)palloc->memaddr + hoffset);
 
-    if(rsize <= POOL_ALLOCATION_SMALL_MAX)
-    {
+    // The chunk of the size the caller counted first (see alloc_create_mpool), while it has room
+    if (header->gocurr != 0) {
+        ptemp = (alloc_mpool_segment*)((char*)palloc->memaddr + header->gocurr);
+        if (ptemp->size - ptemp->position >= rsize) {
+            addr = (void*)((char*)palloc->memaddr + ptemp->aoffset + ptemp->position);
+            ptemp->position += rsize;
+            goto Finished;
+        }
+
+        dprintimportant("alloc_ommalloc: %Iu bytes do not fit in the %Iu counted (%Iu used)", rsize, ptemp->size, ptemp->position);
+        ptemp = NULL;
+    }
+
+    if (rsize <= POOL_ALLOCATION_SMALL_MAX) {
         offset = header->socurr;
-        bsize  = POOL_ALLOCATION_SMALL_BSIZE;
-        ctype  = POOL_ALLOCATION_TYPE_SMALL;
-    }
-    else if(rsize <= POOL_ALLOCATION_MEDIUM_MAX)
-    {
+        bsize = POOL_ALLOCATION_SMALL_BSIZE;
+        ctype = POOL_ALLOCATION_TYPE_SMALL;
+    } else if (rsize <= POOL_ALLOCATION_MEDIUM_MAX) {
         offset = header->mocurr;
-        bsize  = POOL_ALLOCATION_MEDIUM_BSIZE;
-        ctype  = POOL_ALLOCATION_TYPE_MEDIUM;
-    }
-    else if(rsize <= POOL_ALLOCATION_LARGE_MAX)
-    {
+        bsize = POOL_ALLOCATION_MEDIUM_BSIZE;
+        ctype = POOL_ALLOCATION_TYPE_MEDIUM;
+    } else if (rsize <= POOL_ALLOCATION_LARGE_MAX) {
         offset = header->locurr;
-        bsize  = POOL_ALLOCATION_LARGE_BSIZE;
-        ctype  = POOL_ALLOCATION_TYPE_LARGE;
-    }
-    else
-    {
+        bsize = POOL_ALLOCATION_LARGE_BSIZE;
+        ctype = POOL_ALLOCATION_TYPE_LARGE;
+    } else {
         offset = 0;
-        bsize  = rsize;
-        ctype  = POOL_ALLOCATION_TYPE_HUGE;
+        bsize = rsize;
+        ctype = POOL_ALLOCATION_TYPE_HUGE;
     }
 
-    /* Check if chunk has enough space for this allocation */
-    /* Else we need to allocate a new chunk and use that */
-    if(offset > 0)
-    {
-        pchunk = (alloc_mpool_segment *)((char *)palloc->memaddr + offset);
-        if(pchunk->size - pchunk->position < rsize)
-        {
+    // Check if chunk has enough space for this allocation
+    // Else we need to allocate a new chunk and use that
+    if (offset > 0) {
+        pchunk = (alloc_mpool_segment*)((char*)palloc->memaddr + offset);
+        if (pchunk->size - pchunk->position < rsize) {
             offset = 0;
             pchunk = NULL;
         }
     }
 
-    if(offset == 0)
-    {
-        pchunk = (alloc_mpool_segment *)alloc_smalloc(palloc, sizeof(alloc_mpool_segment));
-        if(pchunk == NULL)
-        {
+    if (offset == 0) {
+        pchunk = (alloc_mpool_segment*)alloc_smalloc(palloc, sizeof(alloc_mpool_segment));
+        if (pchunk == NULL) {
             goto Finished;
         }
 
-        /* Initialize pchunk */
-        pchunk->aoffset  = 0;
-        pchunk->size     = 0;
+        // Initialize pchunk
+        pchunk->aoffset = 0;
+        pchunk->size = 0;
         pchunk->position = 0;
-        pchunk->next     = 0;
+        pchunk->next = 0;
 
         pvoid = alloc_smalloc(palloc, bsize);
-        if(pvoid == NULL)
-        {
+        if (pvoid == NULL) {
             goto Finished;
         }
 
-        /* Update aoffset to offset of allocated memory */
-        /* Also update size after allocating block */
+        // Update aoffset to offset of allocated memory
+        // Also update size after allocating block
         pchunk->aoffset = POINTER_OFFSET(palloc->memaddr, pvoid);
         pchunk->size = bsize;
 
         offset = POINTER_OFFSET(palloc->memaddr, pchunk);
-        if(header->foffset == 0)
-        {
+        if (header->foffset == 0) {
             _ASSERT(header->loffset == 0);
 
             header->foffset = offset;
             header->loffset = offset;
-        }
-        else
-        {
-            ptemp = (alloc_mpool_segment *)((char *)palloc->memaddr + header->loffset);
-            ptemp->next     = offset;
+        } else {
+            ptemp = (alloc_mpool_segment*)((char*)palloc->memaddr + header->loffset);
+            ptemp->next = offset;
             header->loffset = offset;
         }
 
-        switch(ctype)
-        {
+        switch (ctype) {
             case POOL_ALLOCATION_TYPE_SMALL:
                 header->socurr = offset;
                 break;
@@ -1285,27 +1731,23 @@ void * alloc_ommalloc(alloc_context * palloc, size_t hoffset, size_t size)
                 header->locurr = offset;
                 break;
         }
-    }
-    else
-    {
-        pchunk = (alloc_mpool_segment *)((char *)palloc->memaddr + offset);
+    } else {
+        pchunk = (alloc_mpool_segment*)((char*)palloc->memaddr + offset);
     }
 
     _ASSERT(pchunk != NULL);
     _ASSERT(pchunk->size - pchunk->position >= rsize);
 
-    addr = (void *)((char *)palloc->memaddr + pchunk->aoffset + pchunk->position);
+    addr = (void*)((char*)palloc->memaddr + pchunk->aoffset + pchunk->position);
     pchunk->position += rsize;
 
     pchunk = NULL;
 
 Finished:
 
-    if(pchunk != NULL)
-    {
-        if(pchunk->aoffset != 0)
-        {
-            ptemp = (alloc_mpool_segment *)((char *)palloc->memaddr + pchunk->aoffset);
+    if (pchunk != NULL) {
+        if (pchunk->aoffset != 0) {
+            ptemp = (alloc_mpool_segment*)((char*)palloc->memaddr + pchunk->aoffset);
             alloc_sfree(palloc, ptemp);
             pchunk->aoffset = 0;
         }
@@ -1318,68 +1760,14 @@ Finished:
     return addr;
 }
 
-void * alloc_oerealloc(alloc_context * palloc, size_t hoffset, void * addr, size_t size)
-{
-    _ASSERT(palloc  == NULL);
-    _ASSERT(hoffset == 0);
-
-    return alloc_erealloc(addr, size);
-}
-
-void * alloc_osrealloc(alloc_context * palloc, size_t hoffset, void * addr, size_t size)
-{
-    _ASSERT(palloc  != NULL);
-    _ASSERT(hoffset == 0);
-
-    return alloc_srealloc(palloc, addr, size);
-}
-
-void * alloc_omrealloc(alloc_context * palloc, size_t hoffset, void * addr, size_t size)
-{
-    /* When using pool memory, we don't know the size of a */
-    /* particular block allocation.  So we can't really do a realloc */
-    _ASSERT(FALSE);
-    return NULL;
-}
-
-char * alloc_oestrdup(alloc_context * palloc, size_t hoffset, const char * str)
-{
-    _ASSERT(palloc  == NULL);
-    _ASSERT(hoffset == 0);
-
-    return alloc_estrdup(str);
-}
-
-char * alloc_osstrdup(alloc_context * palloc, size_t hoffset, const char * str)
-{
-    _ASSERT(palloc  != NULL);
-    _ASSERT(hoffset == 0);
-
-    return alloc_sstrdup(palloc, str);
-}
-
-char * alloc_omstrdup(alloc_context * palloc, size_t hoffset, const char * str)
-{
-    char * memaddr = NULL;
-    size_t strl    = 0;
-
-    _ASSERT(palloc  != NULL);
-    _ASSERT(hoffset >  0);
-    _ASSERT(str     != NULL);
-
-    strl = strlen(str) + 1;
-    memaddr = (char *)alloc_ommalloc(palloc, hoffset, strl);
-    if(memaddr == NULL)
-    {
-        return NULL;
-    }
-
-    memcpy_s(memaddr, strl, str, strl);
-    return memaddr;
-}
-
-void alloc_oefree(alloc_context * palloc, size_t hoffset, void * addr)
-{
+/**
+ * An fn_free that frees request memory (alloc_efree).
+ *
+ * @param palloc   unused, NULL
+ * @param hoffset  unused, 0
+ * @param addr     memory from alloc_oemalloc(), not NULL
+ */
+void alloc_oefree(alloc_context* palloc, size_t hoffset, void* addr) {
     _ASSERT(palloc == NULL);
     _ASSERT(hoffset == 0);
 
@@ -1387,171 +1775,29 @@ void alloc_oefree(alloc_context * palloc, size_t hoffset, void * addr)
     return;
 }
 
-void alloc_osfree(alloc_context * palloc, size_t hoffset, void * addr)
-{
-    _ASSERT(palloc  != NULL);
+/**
+ * An fn_free that frees a block of the shared segment (alloc_sfree).
+ *
+ * @param palloc   the allocator context, not NULL
+ * @param hoffset  unused, 0
+ * @param addr     memory from alloc_osmalloc(), not NULL
+ */
+void alloc_osfree(alloc_context* palloc, size_t hoffset, void* addr) {
+    _ASSERT(palloc != NULL);
     _ASSERT(hoffset == 0);
 
     alloc_sfree(palloc, addr);
     return;
 }
 
-void alloc_omfree(alloc_context * palloc, size_t hoffset, void * addr)
-{
-    /* Nothing to do. We will free memory in the pool in one go */
-    return;
-}
-
-void alloc_runtest()
-{
-    int             result  = NONFATAL;
-    void *          memaddr = NULL;
-    unsigned char   islocal = 0;
-
-    void *          mem1    = NULL;
-    void *          mem2    = NULL;
-    void *          mem3    = NULL;
-    void *          mem4    = NULL;
-
-    size_t          freesiz = 0;
-
-    alloc_context *         palloc = NULL;
-    alloc_segment_header *  header = NULL;
-    alloc_free_header *     freeh  = NULL;
-    alloc_used_header *     usedh  = NULL;
-
-    dprintverbose("*** STARTING ALLOC TESTS ***");
-
-    memaddr = malloc(4096);
-    if(memaddr == NULL)
-    {
-        result = FATAL_OUT_OF_LMEMORY;
-        goto Finished;
-    }
-
-    result = alloc_create(&palloc);
-    if(FAILED(result))
-    {
-        goto Finished;
-    }
-
-    result = alloc_initialize(palloc, islocal, "ALLOC_TEST", 1, memaddr, 4096, 1);
-    if(FAILED(result))
-    {
-        goto Finished;
-    }
-
-    /* Verify alloc_context, alloc_segment_header and free blocks */
-    _ASSERT(palloc->lock    != NULL);
-    _ASSERT(palloc->size    == 4096);
-    _ASSERT(palloc->header  != NULL);
-    _ASSERT(palloc->memaddr != NULL);
-
-    freesiz = palloc->header->free_size;
-
-    /* Allocate 128 bytes 4 times and verify segment header, */
-    /* free blocks and used blocks */
-    mem1 = alloc_smalloc(palloc, 128);
-    freesiz = freesiz - ALLOC_USED_BLOCK_OVERHEAD - 128;
-
-    _ASSERT(mem1 != NULL);
-    _ASSERT(POINTER_OFFSET(memaddr, mem1) < 4096);
-    _ASSERT(palloc->header->usedcount == 1);
-    _ASSERT(palloc->header->freecount == 1);
-    _ASSERT(palloc->header->free_size == freesiz);
-
-    mem2 = alloc_smalloc(palloc, 128);
-    freesiz = freesiz - ALLOC_USED_BLOCK_OVERHEAD - 128;
-
-    _ASSERT(mem2 != NULL);
-    _ASSERT(POINTER_OFFSET(memaddr, mem2) < 4096);
-    _ASSERT(palloc->header->usedcount == 2);
-    _ASSERT(palloc->header->freecount == 1);
-    _ASSERT(palloc->header->free_size == freesiz);
-
-    mem3 = alloc_smalloc(palloc, 128);
-    freesiz = freesiz - ALLOC_USED_BLOCK_OVERHEAD - 128;
-
-    _ASSERT(mem3 != NULL);
-    _ASSERT(POINTER_OFFSET(memaddr, mem3) < 4096);
-    _ASSERT(palloc->header->usedcount == 3);
-    _ASSERT(palloc->header->freecount == 1);
-    _ASSERT(palloc->header->free_size == freesiz);
-
-    mem4 = alloc_smalloc(palloc, 128);
-    freesiz = freesiz - ALLOC_USED_BLOCK_OVERHEAD - 128;
-
-    _ASSERT(mem4 != NULL);
-    _ASSERT(POINTER_OFFSET(memaddr, mem4) < 4096);
-    _ASSERT(palloc->header->usedcount == 4);
-    _ASSERT(palloc->header->freecount == 1);
-    _ASSERT(palloc->header->free_size == freesiz);
-
-    /* Verify that free and allocating again reuse the same address */
-    alloc_sfree(palloc, mem4);
-    _ASSERT(mem4 == alloc_smalloc(palloc, 128));
-
-    /* Free 3rd memory block and verify everything */
-    /* Free 4th memory block and verify everything */
-    /* Free 1st memory block and verify everything */
-    /* Free 2nd memory block and verify everything */
-    alloc_sfree(palloc, mem3);
-    _ASSERT(palloc->header->usedcount == 3);
-    _ASSERT(palloc->header->freecount == 2);
-
-    alloc_sfree(palloc, mem4);
-    _ASSERT(palloc->header->usedcount == 2);
-    _ASSERT(palloc->header->freecount == 1);
-
-    alloc_sfree(palloc, mem1);
-    _ASSERT(palloc->header->usedcount == 1);
-    _ASSERT(palloc->header->freecount == 2);
-
-    alloc_sfree(palloc, mem2);
-    _ASSERT(palloc->header->usedcount == 0);
-    _ASSERT(palloc->header->freecount == 1);
-
-    /* Allocate free_size number of bytes so that memory is full */
-    /* Try allocating another block and verify error */
-    /* Free block and allocate 1024 bytes twice and verify */
-    /* Free one block. Verify. Free other block and verify */
-    mem1 = alloc_smalloc(palloc, palloc->header->free_size);
-    mem2 = alloc_smalloc(palloc, 128);
-
-    _ASSERT(mem2 == NULL);
-    _ASSERT(palloc->header->usedcount == 1);
-
-    alloc_sfree(palloc, mem1);
-    mem2 = alloc_smalloc(palloc, 1024);
-    mem3 = alloc_smalloc(palloc, 1024);
-
-    alloc_sfree(palloc, mem2);
-    _ASSERT(palloc->header->usedcount == 1);
-
-    alloc_sfree(palloc, mem3);
-
-    _ASSERT(palloc->header->usedcount == 0);
-    _ASSERT(palloc->header->freecount == 1);
-
-    _ASSERT(SUCCEEDED(result));
-
-Finished:
-
-    if(palloc != NULL)
-    {
-        alloc_terminate(palloc);
-        alloc_destroy(palloc);
-
-        palloc =  NULL;
-    }
-
-    if(memaddr != NULL)
-    {
-        free(memaddr);
-        memaddr = NULL;
-    }
-
-    dprintverbose("*** ENDING ALLOC TESTS ***");
-
+/**
+ * An fn_free for memory from alloc_ommalloc(): does nothing, the pool is freed whole (alloc_free_mpool).
+ *
+ * @param palloc   unused
+ * @param hoffset  unused
+ * @param addr     unused
+ */
+void alloc_omfree(alloc_context* palloc, size_t hoffset, void* addr) {
+    // Nothing to do. We will free memory in the pool in one go
     return;
 }

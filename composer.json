@@ -1,0 +1,23 @@
+{
+    "name": "pkoutsogiannis/ucache",
+    "type": "php-ext",
+    "description": "A shared-memory key-value cache for PHP 7.2 to 8.5 on Windows x64 (IIS, FastCGI).",
+    "keywords": ["cache", "user-cache", "shared-memory", "windows", "iis", "fastcgi", "php-extension"],
+    "homepage": "https://github.com/pkoutsogiannis/ucache",
+    "license": "BSD-3-Clause",
+    "authors": [
+        {
+            "name": "Periklis Koutsogiannis",
+            "email": "pkoutsogiannis@datasteam.com"
+        }
+    ],
+    "require": {
+        "php": ">=7.2 <8.6"
+    },
+    "php-ext": {
+        "extension-name": "ucache",
+        "support-zts": false,
+        "support-nts": true,
+        "os-families": ["windows"]
+    }
+}

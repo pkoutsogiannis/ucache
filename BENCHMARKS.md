@@ -1,46 +1,327 @@
 # UCache benchmarks
 
-How fast ucache 1.0.1 reads and writes, when one process or several call the cache back to back, against 1.0.0. Measured
-on 2026-11-02, on PHP 7.2, the one version 1.0.0 builds for.
+How fast each version of ucache reads and writes, when one process or several call the cache back to back, against the
+version before it (1.0.0, 1.0.1, 1.1.0). Measured on 2026-11-02, on PHP 7.2 and 8.4 (1.0.0 on PHP 7.2 only, the one
+version it builds for).
 
-**Reading the tables:** each figure compares 1.0.1 with 1.0.0. `+12%` means 12% more calls a second, `×2.4` means 2.4
-times as many, `−68%` means 68% fewer, and drops of 20% or more are in bold. The summary tables give the geometric
-mean over the six workloads; the tables folded under the summary give the calls a second of each workload. A difference
-of less than about 15% can be noise (see [How it was measured](#how-it-was-measured)).
+**Reading the tables:** each figure compares a version with the one before it. `+12%` means 12% more calls a second,
+`×2.4` means 2.4 times as many, `−68%` means 68% fewer, and drops of 20% or more are in bold. The summary tables give
+the geometric mean over the six workloads; the tables folded under each summary give the calls a second of each
+workload. A difference of less than about 10% can be noise, and of less than about 15% on PHP 7.2 (see
+[How it was measured](#how-it-was-measured)).
 
 ## At a glance
 
 PHP 7.2, the six workloads together. One process:
 
-| Load | 1.0.0 → 1.0.1 |
-|---|--:|
-| Gets only | +89% |
-| 1% sets | ×4.0 |
-| 5% sets | ×5.8 |
-| 50% sets | ×7.8 |
-| 80% sets | ×8.5 |
-| Sets only | ×7.2 |
+| Load | 1.0.0 → 1.0.1 | 1.0.1 → 1.1.0 |
+|---|--:|--:|
+| Gets only | +89% | +32% |
+| 1% sets | ×4.0 | +39% |
+| 5% sets | ×5.8 | +82% |
+| 50% sets | ×7.8 | ×3.7 |
+| 80% sets | ×8.5 | ×4.2 |
+| Sets only | ×7.2 | ×4.4 |
 
 4 and 8 processes:
 
-| Load | 1.0.0 → 1.0.1 |
-|---|--:|
-| Gets only | +77% |
-| 1% sets | ×3.2 |
-| 5% sets | ×3.9 |
-| One writer beside readers: the readers' gets | ×12 |
-| One writer beside readers: the writer's sets | ×4.5 |
-| 50% sets | ×3.1 |
-| 80% sets | ×2.8 |
-| Sets only | ×2.8 |
-| One reader beside writers: the reader's gets | ×340 |
-| One reader beside writers: the writers' sets | ×2.8 |
+| Load | 1.0.0 → 1.0.1 | 1.0.1 → 1.1.0 |
+|---|--:|--:|
+| Gets only | +77% | +33% |
+| 1% sets | ×3.2 | +30% |
+| 5% sets | ×3.9 | +68% |
+| One writer beside readers: the readers' gets | ×12 | +21% |
+| One writer beside readers: the writer's sets | ×4.5 | +64% |
+| 50% sets | ×3.1 | ×6.6 |
+| 80% sets | ×2.8 | ×7.0 |
+| Sets only | ×2.8 | ×7.0 |
+| One reader beside writers: the reader's gets | ×340 | **−52%** |
+| One reader beside writers: the writers' sets | ×2.8 | ×8.0 |
 
 - **Reads:** 1.0.1 reads integers and strings as fast as 1.0.0, and arrays several times as fast, as 1.0.0 leaks a copy
-  of every array it reads.
-- **Writes:** with one process, 1.0.1 makes 7.2 times as many sets as 1.0.0 (the geometric mean over the workloads).
-- **A reader beside writers** that write back to back makes 340 times as many gets with 1.0.1: 1.0.0's writers held the
-  cache lock while they replaced entries (6.6 ms for a row among 20,000).
+  of every array it reads. 1.1.0 reads about a third faster on PHP 7.2 (60% on PHP 8.4), with 82 times as many hash
+  buckets.
+- **Writes:** on average, each version writes several times as fast as the one before it: with one process, 7.2 times as
+  many sets with 1.0.1 and 4.4 times with 1.1.0.
+- **A reader beside writers** that write back to back is the one load that gets slower, from 1.0.1 to 1.1.0 (−52%), as
+  the writers make 8 times as many sets, each of which takes the cache lock. 1.0.0 was far slower there, as its writers
+  held the cache lock while they replaced entries (6.6 ms for a row among 20,000).
+
+## 1.0.1 → 1.1.0
+
+- **Reads:** one hash bucket per 512 bytes of the cache instead of one per 32 to 64 KB: 262,139 buckets instead of 3,203
+  in these caches of 128 MB, so that with 100,000 keys a bucket holds 31 entries on average instead of less than one.
+  Gets were 53 to 82% faster with the 100,000 integers and the mix, 27 to 56% with the 20,000 rows and the 50,000
+  strings, and about as fast (−9% to +10%) with the 2,000 lists and the 200 arrays of 100 rows, whose chains were
+  already short. On PHP 8.4, gets were 60 to 63% faster on average.
+- **Writes:** arrays take fewer blocks of shared memory (4 instead of 12 for a row, 4 instead of 148 for an array of 100
+  rows) and less memory (a row 1,948 bytes instead of 6,396). One process made 4.4 times as many sets (geometric mean),
+  4 and 8 processes 7 times as many. With arrays of 100 rows, 4 or 8 processes made 53 to 77 times as many sets: in
+  1.0.1, each of the 148 blocks of such an array takes the allocator's lock, and processes that store them at once queue
+  on it (4,380 sets a second with one process, 475 with 4).
+- **A reader beside writers:** a process that reads back to back beside 3 or 7 processes that set back to back made 52%
+  fewer gets (53% on PHP 8.4), its median get taking 2 to 58 µs instead of 1 to 47, while the writers made 8 times as
+  many sets (5.7 times on PHP 8.4), each of which takes the cache lock.
+- **Memory:** an entry of the mix took 464 bytes on average instead of 765.
+
+The changes from 1.0.1 to 1.1.0:
+
+| Load | 1 process | 4 and 8 processes | PHP 8.4: 1 process | PHP 8.4: 4 and 8 processes |
+|---|--:|--:|--:|--:|
+| Gets only | +32% | +33% | +60% | +63% |
+| 1% sets | +39% | +30% | +67% | +59% |
+| 5% sets | +82% | +68% | ×2.2 | +67% |
+| One writer beside readers: the readers' gets | – | +21% | – | +43% |
+| One writer beside readers: the writer's sets | – | +64% | – | +82% |
+| 50% sets | ×3.7 | ×6.6 | ×4.6 | ×5.2 |
+| 80% sets | ×4.2 | ×7.0 | ×5.1 | ×5.3 |
+| Sets only | ×4.4 | ×7.0 | ×5.5 | ×5.1 |
+| One reader beside writers: the reader's gets | – | **−52%** | – | **−53%** |
+| One reader beside writers: the writers' sets | – | ×8.0 | – | ×5.7 |
+
+<details>
+<summary>Gets only (gets a second)</summary>
+
+| Workload | Processes | 1.0.1 | 1.1.0 | Change | Change on PHP 8.4 |
+|---|--:|--:|--:|--:|--:|
+| integers | 1 | 701 k | 1.11 M | +58% | +72% |
+| integers | 4 | 215 k | 328 k | +53% | +89% |
+| integers | 8 | 198 k | 314 k | +59% | +90% |
+| rows of 14 strings | 1 | 466 k | 613 k | +32% | +31% |
+| rows of 14 strings | 4 | 153 k | 195 k | +27% | +25% |
+| rows of 14 strings | 8 | 146 k | 217 k | +48% | +25% |
+| strings of 1 KB | 1 | 635 k | 871 k | +37% | – |
+| strings of 1 KB | 4 | 212 k | 290 k | +37% | – |
+| strings of 1 KB | 8 | 155 k | 242 k | +56% | – |
+| lists of 1000 integers | 1 | 119 k | 119 k | 0% | – |
+| lists of 1000 integers | 4 | 79.3 k | 72.1 k | −9% | – |
+| lists of 1000 integers | 8 | 71.1 k | 70.2 k | −1% | – |
+| arrays of 100 rows | 1 | 22.3 k | 23.9 k | +7% | – |
+| arrays of 100 rows | 4 | 23.2 k | 25.5 k | +10% | – |
+| arrays of 100 rows | 8 | 22.3 k | 24.1 k | +8% | – |
+| mix | 1 | 495 k | 866 k | +75% | +83% |
+| mix | 4 | 148 k | 270 k | +82% | +83% |
+| mix | 8 | 141 k | 233 k | +65% | +80% |
+
+</details>
+<details>
+<summary>1% sets (calls a second)</summary>
+
+| Workload | Processes | 1.0.1 | 1.1.0 | Change | Change on PHP 8.4 |
+|---|--:|--:|--:|--:|--:|
+| integers | 1 | 635 k | 1.01 M | +59% | +85% |
+| integers | 4 | 186 k | 310 k | +66% | +90% |
+| integers | 8 | 187 k | 322 k | +72% | +78% |
+| rows of 14 strings | 1 | 408 k | 545 k | +34% | +32% |
+| rows of 14 strings | 4 | 148 k | 173 k | +17% | +28% |
+| rows of 14 strings | 8 | 133 k | 160 k | +20% | +29% |
+| strings of 1 KB | 1 | 519 k | 799 k | +54% | – |
+| strings of 1 KB | 4 | 224 k | 288 k | +29% | – |
+| strings of 1 KB | 8 | 188 k | 245 k | +30% | – |
+| lists of 1000 integers | 1 | 110 k | 113 k | +2% | – |
+| lists of 1000 integers | 4 | 73.3 k | 68.4 k | −7% | – |
+| lists of 1000 integers | 8 | 70.4 k | 70.1 k | 0% | – |
+| arrays of 100 rows | 1 | 20.2 k | 23.5 k | +17% | – |
+| arrays of 100 rows | 4 | 21.8 k | 24.0 k | +10% | – |
+| arrays of 100 rows | 8 | 19.5 k | 23.4 k | +20% | – |
+| mix | 1 | 439 k | 822 k | +87% | +90% |
+| mix | 4 | 138 k | 244 k | +76% | +76% |
+| mix | 8 | 131 k | 217 k | +65% | +65% |
+
+</details>
+<details>
+<summary>5% sets (calls a second)</summary>
+
+| Workload | Processes | 1.0.1 | 1.1.0 | Change | Change on PHP 8.4 |
+|---|--:|--:|--:|--:|--:|
+| integers | 1 | 459 k | 910 k | +98% | ×2.3 |
+| integers | 4 | 152 k | 308 k | ×2.0 | +85% |
+| integers | 8 | 139 k | 285 k | ×2.1 | +72% |
+| rows of 14 strings | 1 | 268 k | 448 k | +67% | +65% |
+| rows of 14 strings | 4 | 94.0 k | 152 k | +62% | +53% |
+| rows of 14 strings | 8 | 86.2 k | 162 k | +88% | +63% |
+| strings of 1 KB | 1 | 236 k | 694 k | ×2.9 | – |
+| strings of 1 KB | 4 | 164 k | 254 k | +55% | – |
+| strings of 1 KB | 8 | 156 k | 204 k | +31% | – |
+| lists of 1000 integers | 1 | 101 k | 105 k | +4% | – |
+| lists of 1000 integers | 4 | 69.6 k | 70.5 k | +1% | – |
+| lists of 1000 integers | 8 | 66.0 k | 67.9 k | +3% | – |
+| arrays of 100 rows | 1 | 16.2 k | 22.9 k | +41% | – |
+| arrays of 100 rows | 4 | 9.12 k | 24.2 k | ×2.7 | – |
+| arrays of 100 rows | 8 | 8.25 k | 22.5 k | ×2.7 | – |
+| mix | 1 | 279 k | 709 k | ×2.5 | ×2.7 |
+| mix | 4 | 136 k | 206 k | +52% | +66% |
+| mix | 8 | 119 k | 200 k | +67% | +64% |
+
+</details>
+<details>
+<summary>One writer beside readers: the readers' gets (gets a second of the 3 or 7 readers together)</summary>
+
+| Workload | Processes | 1.0.1 | 1.1.0 | Change | Change on PHP 8.4 |
+|---|--:|--:|--:|--:|--:|
+| integers | 4 | 151 k | 220 k | +46% | +63% |
+| integers | 8 | 155 k | 230 k | +49% | +76% |
+| rows of 14 strings | 4 | 137 k | 156 k | +14% | −1% |
+| rows of 14 strings | 8 | 135 k | 172 k | +27% | +24% |
+| strings of 1 KB | 4 | 176 k | 184 k | +4% | – |
+| strings of 1 KB | 8 | 164 k | 198 k | +21% | – |
+| lists of 1000 integers | 4 | 62.3 k | 62.7 k | +1% | – |
+| lists of 1000 integers | 8 | 65.0 k | 62.6 k | −4% | – |
+| arrays of 100 rows | 4 | 17.6 k | 19.9 k | +13% | – |
+| arrays of 100 rows | 8 | 19.5 k | 21.1 k | +8% | – |
+| mix | 4 | 120 k | 171 k | +42% | +44% |
+| mix | 8 | 127 k | 192 k | +51% | +70% |
+
+</details>
+<details>
+<summary>One writer beside readers: the writer's sets (sets a second of the writer)</summary>
+
+| Workload | Processes | 1.0.1 | 1.1.0 | Change | Change on PHP 8.4 |
+|---|--:|--:|--:|--:|--:|
+| integers | 4 | 18.8 k | 36.6 k | +95% | ×2.0 |
+| integers | 8 | 10.1 k | 16.4 k | +63% | +87% |
+| rows of 14 strings | 4 | 14.1 k | 25.8 k | +84% | +51% |
+| rows of 14 strings | 8 | 8.03 k | 12.2 k | +52% | +42% |
+| strings of 1 KB | 4 | 11.1 k | 30.5 k | ×2.8 | – |
+| strings of 1 KB | 8 | 7.80 k | 14.1 k | +81% | – |
+| lists of 1000 integers | 4 | 10.1 k | 10.3 k | +2% | – |
+| lists of 1000 integers | 8 | 4.53 k | 4.43 k | −2% | – |
+| arrays of 100 rows | 4 | 1.93 k | 3.13 k | +62% | – |
+| arrays of 100 rows | 8 | 1.11 k | 1.45 k | +31% | – |
+| mix | 4 | 12.8 k | 28.3 k | ×2.2 | ×2.2 |
+| mix | 8 | 7.66 k | 13.7 k | +79% | ×2.0 |
+
+</details>
+<details>
+<summary>50% sets (calls a second)</summary>
+
+| Workload | Processes | 1.0.1 | 1.1.0 | Change | Change on PHP 8.4 |
+|---|--:|--:|--:|--:|--:|
+| integers | 1 | 88.0 k | 396 k | ×4.5 | ×4.5 |
+| integers | 4 | 48.0 k | 160 k | ×3.3 | ×3.8 |
+| integers | 8 | 44.6 k | 163 k | ×3.6 | ×3.6 |
+| rows of 14 strings | 1 | 51.7 k | 193 k | ×3.7 | ×3.6 |
+| rows of 14 strings | 4 | 9.47 k | 93.2 k | ×9.8 | ×11 |
+| rows of 14 strings | 8 | 8.30 k | 79.8 k | ×9.6 | ×8.4 |
+| strings of 1 KB | 1 | 30.9 k | 257 k | ×8.3 | – |
+| strings of 1 KB | 4 | 19.8 k | 117 k | ×5.9 | – |
+| strings of 1 KB | 8 | 19.8 k | 94.5 k | ×4.8 | – |
+| lists of 1000 integers | 1 | 68.4 k | 78.4 k | +15% | – |
+| lists of 1000 integers | 4 | 23.0 k | 68.2 k | ×3.0 | – |
+| lists of 1000 integers | 8 | 20.7 k | 66.0 k | ×3.2 | – |
+| arrays of 100 rows | 1 | 7.01 k | 19.4 k | ×2.8 | – |
+| arrays of 100 rows | 4 | 851 | 31.2 k | ×37 | – |
+| arrays of 100 rows | 8 | 827 | 31.7 k | ×38 | – |
+| mix | 1 | 57.1 k | 338 k | ×5.9 | ×5.9 |
+| mix | 4 | 30.7 k | 126 k | ×4.1 | ×4.4 |
+| mix | 8 | 29.5 k | 116 k | ×3.9 | ×3.7 |
+
+</details>
+<details>
+<summary>80% sets (calls a second)</summary>
+
+| Workload | Processes | 1.0.1 | 1.1.0 | Change | Change on PHP 8.4 |
+|---|--:|--:|--:|--:|--:|
+| integers | 1 | 57.4 k | 266 k | ×4.6 | ×4.8 |
+| integers | 4 | 29.3 k | 97.3 k | ×3.3 | ×4.1 |
+| integers | 8 | 27.6 k | 95.5 k | ×3.5 | ×3.8 |
+| rows of 14 strings | 1 | 35.0 k | 134 k | ×3.8 | ×4.3 |
+| rows of 14 strings | 4 | 5.99 k | 51.0 k | ×8.5 | ×8.7 |
+| rows of 14 strings | 8 | 5.05 k | 42.8 k | ×8.5 | ×8.9 |
+| strings of 1 KB | 1 | 20.6 k | 209 k | ×10 | – |
+| strings of 1 KB | 4 | 13.2 k | 71.5 k | ×5.4 | – |
+| strings of 1 KB | 8 | 12.4 k | 65.7 k | ×5.3 | – |
+| lists of 1000 integers | 1 | 58.4 k | 68.8 k | +18% | – |
+| lists of 1000 integers | 4 | 14.9 k | 46.5 k | ×3.1 | – |
+| lists of 1000 integers | 8 | 13.8 k | 39.9 k | ×2.9 | – |
+| arrays of 100 rows | 1 | 4.77 k | 18.7 k | ×3.9 | – |
+| arrays of 100 rows | 4 | 533 | 34.8 k | ×65 | – |
+| arrays of 100 rows | 8 | 535 | 31.3 k | ×59 | – |
+| mix | 1 | 34.4 k | 222 k | ×6.5 | ×6.5 |
+| mix | 4 | 19.0 k | 79.8 k | ×4.2 | ×4.4 |
+| mix | 8 | 17.2 k | 73.6 k | ×4.3 | ×4.0 |
+
+</details>
+<details>
+<summary>Sets only (sets a second)</summary>
+
+| Workload | Processes | 1.0.1 | 1.1.0 | Change | Change on PHP 8.4 |
+|---|--:|--:|--:|--:|--:|
+| integers | 1 | 47.1 k | 239 k | ×5.1 | ×5.2 |
+| integers | 4 | 24.5 k | 80.6 k | ×3.3 | ×3.8 |
+| integers | 8 | 24.6 k | 84.5 k | ×3.4 | ×3.7 |
+| rows of 14 strings | 1 | 29.2 k | 127 k | ×4.4 | ×4.5 |
+| rows of 14 strings | 4 | 4.86 k | 45.1 k | ×9.3 | ×8.7 |
+| rows of 14 strings | 8 | 4.52 k | 42.4 k | ×9.4 | ×8.7 |
+| strings of 1 KB | 1 | 16.6 k | 180 k | ×11 | – |
+| strings of 1 KB | 4 | 10.4 k | 58.4 k | ×5.6 | – |
+| strings of 1 KB | 8 | 10.1 k | 51.7 k | ×5.1 | – |
+| lists of 1000 integers | 1 | 51.6 k | 64.2 k | +24% | – |
+| lists of 1000 integers | 4 | 11.9 k | 33.9 k | ×2.9 | – |
+| lists of 1000 integers | 8 | 11.3 k | 31.9 k | ×2.8 | – |
+| arrays of 100 rows | 1 | 4.38 k | 17.4 k | ×4.0 | – |
+| arrays of 100 rows | 4 | 475 | 36.5 k | ×77 | – |
+| arrays of 100 rows | 8 | 529 | 28.1 k | ×53 | – |
+| mix | 1 | 29.7 k | 194 k | ×6.5 | ×7.0 |
+| mix | 4 | 16.1 k | 62.5 k | ×3.9 | ×4.3 |
+| mix | 8 | 14.2 k | 58.3 k | ×4.1 | ×4.1 |
+
+</details>
+<details>
+<summary>One reader beside writers: the reader's gets (gets a second of the reader)</summary>
+
+| Workload | Processes | 1.0.1 | 1.1.0 | Change | Change on PHP 8.4 |
+|---|--:|--:|--:|--:|--:|
+| integers | 4 | 287 k | 62.0 k | −78% | −77% |
+| integers | 8 | 269 k | 150 k | −44% | −32% |
+| rows of 14 strings | 4 | 449 k | 116 k | −74% | −71% |
+| rows of 14 strings | 8 | 401 k | 317 k | −21% | −24% |
+| strings of 1 KB | 4 | 534 k | 76.0 k | −86% | – |
+| strings of 1 KB | 8 | 498 k | 328 k | −34% | – |
+| lists of 1000 integers | 4 | 84.4 k | 34.2 k | −59% | – |
+| lists of 1000 integers | 8 | 83.3 k | 52.3 k | −37% | – |
+| arrays of 100 rows | 4 | 18.8 k | 19.2 k | +2% | – |
+| arrays of 100 rows | 8 | 18.3 k | 15.0 k | −18% | – |
+| mix | 4 | 251 k | 70.2 k | −72% | −71% |
+| mix | 8 | 253 k | 291 k | +15% | +2% |
+
+The reader's get, median / 99th percentile:
+
+| Workload | Processes | 1.0.1 | 1.1.0 | PHP 8.4: 1.0.1 | PHP 8.4: 1.1.0 |
+|---|--:|--:|--:|--:|--:|
+| integers | 4 | 2 µs / 21 µs | 17 µs / 29 µs | 2.3 µs / 24 µs | 18 µs / 32 µs |
+| integers | 8 | 2 µs / 19 µs | 5 µs / 42 µs | 2.5 µs / 21 µs | 5.2 µs / 39 µs |
+| rows of 14 strings | 4 | 2 µs / 11 µs | 5 µs / 24 µs | 2.6 µs / 15 µs | 9.6 µs / 28 µs |
+| rows of 14 strings | 8 | 2 µs / 13 µs | 2 µs / 12 µs | 2.5 µs / 15 µs | 2.6 µs / 15 µs |
+| strings of 1 KB | 4 | 1 µs / 12 µs | 17 µs / 29 µs | – | – |
+| strings of 1 KB | 8 | 1 µs / 13 µs | 2 µs / 12 µs | – | – |
+| lists of 1000 integers | 4 | 10 µs / 27 µs | 29 µs / 48 µs | – | – |
+| lists of 1000 integers | 8 | 11 µs / 27 µs | 19 µs / 38 µs | – | – |
+| arrays of 100 rows | 4 | 47 µs / 119 µs | 44 µs / 131 µs | – | – |
+| arrays of 100 rows | 8 | 46 µs / 111 µs | 58 µs / 183 µs | – | – |
+| mix | 4 | 3 µs / 21 µs | 16 µs / 27 µs | 2.9 µs / 23 µs | 18 µs / 29 µs |
+| mix | 8 | 3 µs / 21 µs | 2 µs / 15 µs | 2.8 µs / 23 µs | 1.8 µs / 17 µs |
+
+</details>
+<details>
+<summary>One reader beside writers: the writers' sets (sets a second of the 3 or 7 writers together)</summary>
+
+| Workload | Processes | 1.0.1 | 1.1.0 | Change | Change on PHP 8.4 |
+|---|--:|--:|--:|--:|--:|
+| integers | 4 | 22.1 k | 89.1 k | ×4.0 | ×3.8 |
+| integers | 8 | 20.4 k | 80.4 k | ×3.9 | ×3.9 |
+| rows of 14 strings | 4 | 4.97 k | 72.9 k | ×15 | ×13 |
+| rows of 14 strings | 8 | 4.00 k | 38.0 k | ×9.5 | ×8.9 |
+| strings of 1 KB | 4 | 10.6 k | 72.9 k | ×6.9 | – |
+| strings of 1 KB | 8 | 9.85 k | 50.2 k | ×5.1 | – |
+| lists of 1000 integers | 4 | 11.0 k | 48.0 k | ×4.4 | – |
+| lists of 1000 integers | 8 | 9.59 k | 32.8 k | ×3.4 | – |
+| arrays of 100 rows | 4 | 467 | 22.1 k | ×47 | – |
+| arrays of 100 rows | 8 | 482 | 27.2 k | ×56 | – |
+| mix | 4 | 15.7 k | 84.6 k | ×5.4 | ×4.9 |
+| mix | 8 | 15.5 k | 63.7 k | ×4.1 | ×4.0 |
+
+</details>
 
 ## 1.0.0 → 1.0.1
 
@@ -342,10 +623,12 @@ The reader's get, median / 99th percentile:
 ## How it was measured
 
 - **Machine:** AMD Ryzen 7 7840HS (8 cores, 16 threads), Windows 11 Pro 10.0.26200.
-- **PHP:** 7.2.34, NTS x64, from the command line (`ucache.enablecli=1`), the one version 1.0.0 builds for.
-- **Versions:** the DLLs were built from the sources of each version, with the toolset and devel pack that build.bat
-  uses for PHP 7.2 (v141 and the 7.2.34 devel pack).
-- **Runs:** 1.0.0 and 1.0.1 ran in one series with 1.1.0, their runs alternating, so that they were measured together.
+- **PHP:** 7.2.34 and 8.4.14, NTS x64, from the command line (`ucache.enablecli=1`). 1.0.0 builds for PHP 7.2 only, and
+  PHP 8.4 ran three of the six workloads (integers, rows of 14 strings, the mix): the tables give a dash for the others.
+- **Versions:** the DLLs were built from the sources of each version, with the toolsets and devel packs that build.bat
+  uses (v141 and the 7.2.34 devel pack for PHP 7.2, v143 and the 8.4.27 devel pack for PHP 8.4).
+- **Runs:** 1.0.0, 1.0.1 and 1.1.0 ran in one series, their runs alternating, so that each step compares two versions
+  measured together.
 - **Cache:** `ucache.size=128`, every other setting at its default. 1.0.0 ran without a memory_limit
   (`memory_limit=-1`), as it leaks a copy of every array it reads (see [1.0.0 → 1.0.1](#100--101)). Each run has a
   cache of its own (its own `ucache.apppoolid`), which a first process fills with the keys of the workload before the
@@ -378,29 +661,31 @@ The reader's get, median / 99th percentile:
 
   The shared memory that one entry takes, with its key (on average for the mix):
 
-  | Workload | 1.0.0 | 1.0.1 |
-  |---|--:|--:|
-  | integers | 183 bytes | 183 bytes |
-  | rows of 14 strings | 6,396 bytes | 6,396 bytes |
-  | strings of 1 KB | 1,278 bytes | 1,278 bytes |
-  | lists of 1000 integers | 33,056 bytes | 33,056 bytes |
-  | arrays of 100 rows | 94,528 bytes | 94,528 bytes |
-  | mix | 765 bytes | 765 bytes |
+  | Workload | 1.0.0 | 1.0.1 | 1.1.0 |
+  |---|--:|--:|--:|
+  | integers | 183 bytes | 183 bytes | 183 bytes |
+  | rows of 14 strings | 6,396 bytes | 6,396 bytes | 1,948 bytes |
+  | strings of 1 KB | 1,278 bytes | 1,278 bytes | 1,278 bytes |
+  | lists of 1000 integers | 33,056 bytes | 33,056 bytes | 32,416 bytes |
+  | arrays of 100 rows | 94,528 bytes | 94,528 bytes | 83,632 bytes |
+  | mix | 765 bytes | 765 bytes | 464 bytes |
 
   The blocks of shared memory that one entry takes, each allocated under the allocator's lock:
 
-  | Workload | 1.0.0 | 1.0.1 |
-  |---|--:|--:|
-  | integers | 2 | 2 |
-  | rows of 14 strings | 12 | 12 |
-  | strings of 1 KB | 3 | 3 |
-  | lists of 1000 integers | 8 | 8 |
-  | arrays of 100 rows | 148 | 148 |
-  | mix | 3.18 | 3.18 |
+  | Workload | 1.0.0 | 1.0.1 | 1.1.0 |
+  |---|--:|--:|--:|
+  | integers | 2 | 2 | 2 |
+  | rows of 14 strings | 12 | 12 | 4 |
+  | strings of 1 KB | 3 | 3 | 3 |
+  | lists of 1000 integers | 8 | 8 | 4 |
+  | arrays of 100 rows | 148 | 148 | 4 |
+  | mix | 3.18 | 3.18 | 2.54 |
 
-- **Rounds:** every case (load, workload, processes and version) ran 3 times, the versions one after the other, in an
-  order that changed from one case to the next; the tables give the medians of the rounds. One get in 8 is timed, and
-  one set in 8 (every set with 1% and 5% sets), with `microtime()`, to the microsecond.
-- **Noise:** the throughput of a version varied between the rounds of a case by 12% at the median with one process and
-  16% with 4 or 8 (up to 35% in 9 cases out of 10). A difference of less than about 15% in one row of a table can be
-  noise: the geometric means of the summaries are steadier.
+- **Rounds:** every case (load, workload, processes and version) ran 3 times on PHP 7.2 and twice on PHP 8.4, the
+  versions of a series one after the other, in an order that changed from one case to the next; the tables give the
+  medians of the rounds. One get in 8 is timed, and one set in 8 (every set with 1% and 5% sets): with `microtime()` on
+  PHP 7.2, to the microsecond, and with `hrtime()` on PHP 8.4.
+- **Noise:** the throughput of a version varied between the rounds of a case by 2 to 3% at the median on PHP 8.4, and by
+  12% with one process and 16% with 4 or 8 on PHP 7.2 (up to 35% in 9 cases out of 10). A difference of less than about
+  15% in one row of a table of PHP 7.2 can be noise: the geometric means of the summaries, and the runs of PHP 8.4, are
+  steadier.

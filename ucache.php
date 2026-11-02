@@ -39,7 +39,11 @@
 /**
  * ======================== CONFIGURATION SETTINGS ==============================
  * If you do not want to use authentication for this page, set USE_AUTHENTICATION to 0.
- * If you use authentication then replace the default password.
+ * If you use authentication then replace the default username and password.
+ * With IIS authentication (see below) nobody types them, but PASSWORD is still the
+ * only secret behind the Clear All button: make it a long random value (32 hex
+ * characters, for example), and change USERNAME too, because requests that reach
+ * this page without IIS authentication can still log in with the two.
  */
 define('USE_AUTHENTICATION', 1);
 define('USERNAME', 'ucache');
@@ -76,7 +80,9 @@ if (!function_exists(ini_get('ucache.prefix') . 'info')) {
     die('The UCache functions are not available (see the startup warning about ucache.prefix). No statistics to show.');
 }
 
-if (USE_AUTHENTICATION == 1) {
+// On unless USE_AUTHENTICATION is 0, as in every test of it below: a value such as 2 must not skip the authentication
+// and still offer Clear All
+if (USE_AUTHENTICATION) {
     if (!empty($_SERVER['AUTH_TYPE']) && !empty($_SERVER['REMOTE_USER']) && strcasecmp($_SERVER['REMOTE_USER'], 'anonymous')) {
         // IIS authenticated the user: only the users in $user_allowed get in
         $allowed = array_map('strtolower', $user_allowed);
@@ -107,7 +113,8 @@ $settings_to_hide = ['ucache.debuglevel'];
 
 // The groups of the Cache settings card, each in this order; a setting that none lists goes last in the first one
 $setting_groups = [
-    'Cache' => ['ucache.enabled', 'ucache.enablecli', 'ucache.size', 'ucache.prefix', 'ucache.apppoolid', 'ucache.namesalt', 'ucache.filemapdir'],
+    'Cache' => ['ucache.enabled', 'ucache.enablecli', 'ucache.size', 'ucache.bucketbytes', 'ucache.prefix', 'ucache.apppoolid', 'ucache.namesalt',
+                'ucache.filemapdir'],
     'Scavenger' => ['ucache.gc.interval', 'ucache.gc.step', 'ucache.gc.ttl', 'ucache.gc.threshold', 'ucache.gc.evict'],
 ];
 
@@ -122,7 +129,9 @@ if (isset($_GET['page']) && is_numeric($_GET['page']) && $_GET['page'] == UCACHE
 // The list shows CACHE_MAX_ENTRY entries at a time, from position start (0 for the first entry)
 $ucache_start = 0;
 if (isset($_GET['start']) && is_string($_GET['start']) && ctype_digit($_GET['start'])) {
-    $ucache_start = (int)$_GET['start'];
+    // More digits than an int holds start past the last entry (PHP 8.5 warns when it casts such a string to int)
+    $digits = ltrim($_GET['start'], '0');
+    $ucache_start = (strlen($digits) > 18) ? PHP_INT_MAX : (int)$digits;
 }
 
 // Clearing the cache is a POST from the page's own form, never a link
@@ -139,35 +148,69 @@ if ($page == UCACHE_DATA && isset($_GET['key']) && is_string($_GET['key']) && $_
 // example because ucache.filemapdir names a folder that does not exist), ucache_info() and ucache_meminfo() fail.
 $ucache_info = uc('info', true);
 $ucache_mem_info = uc('meminfo');
-$user_cache_available = ini_get('ucache.enabled') === '1' && is_array($ucache_info) && is_array($ucache_mem_info);
+$user_cache_available = ini_bool(ini_get('ucache.enabled')) && is_array($ucache_info) && is_array($ucache_mem_info);
 
-// The clear form must send back the token kept in this cookie. The cookie is SameSite=Strict: another site can
-// neither read the token nor make the browser send the cookie, so it cannot get a logged-in browser to clear the cache.
+// The clear form must send back a token that the page makes from PASSWORD, the random value of this cookie and the
+// path of this script. Another site can neither read the token nor make the browser send the cookie (SameSite=Strict).
+// Another host of the same site can set the cookie, as SameSite does not apply between the hosts of a site, but it
+// cannot make the token of the value it set without guessing the password, and a copy of this page elsewhere, with
+// the same password, makes other tokens. So the page does not clear the cache with the default password or none,
+// which anyone knows. With IIS authentication nobody types PASSWORD, but it is still the only secret behind Clear All:
+// it must be a long random value, and USERNAME should change too, since requests that reach the page without IIS
+// authentication can log in with the two (see the configuration settings).
 define('TOKEN_COOKIE', 'ucache_stats_token');
-$token = null;
+$can_clear = USE_AUTHENTICATION && !in_array((string)PASSWORD, ['', 'ucache'], true);
+$nonce = null;
 if (isset($_COOKIE[TOKEN_COOKIE]) && is_string($_COOKIE[TOKEN_COOKIE]) && preg_match('/^[0-9a-f]{32}$/', $_COOKIE[TOKEN_COOKIE])) {
-    $token = $_COOKIE[TOKEN_COOKIE];
+    $nonce = $_COOKIE[TOKEN_COOKIE];
 }
 
-if (USE_AUTHENTICATION && $user_cache_available && $clear_user_cache) {
-    if ($token === null || !isset($_POST['token']) || !is_string($_POST['token']) || !hash_equals($token, $_POST['token'])) {
+// The token of the clear form for the value of the cookie
+function clear_token($nonce) {
+    return hash_hmac('sha256', 'clear ' . $nonce . __FILE__, (string)PASSWORD);
+}
+
+// Whether the browser says that the clear form comes from a page of another origin (another site, host or port). The
+// token alone refuses such a form; this also refuses one with a token that leaked or was guessed. Sec-Fetch-Site (sent
+// over HTTPS and to localhost) is same-origin for the page's own form, or none for a request the user made. Origin
+// names the origin of the page that sent the form, whose host and port must be those of the Host header (so a reverse
+// proxy must pass that header on), except "null", which names none: a page under Referrer-Policy: no-referrer sends it
+// for its own forms.
+function cross_origin_post() {
+    if (isset($_SERVER['HTTP_SEC_FETCH_SITE']) && !in_array($_SERVER['HTTP_SEC_FETCH_SITE'], ['same-origin', 'none'], true)) {
+        return true;
+    }
+    if (!isset($_SERVER['HTTP_ORIGIN']) || $_SERVER['HTTP_ORIGIN'] === 'null') {
+        return false;
+    }
+    return !isset($_SERVER['HTTP_HOST']) || !preg_match('~^[a-z][a-z0-9+.-]*://([^/]+)$~i', $_SERVER['HTTP_ORIGIN'], $match)
+        || strcasecmp($match[1], $_SERVER['HTTP_HOST']) !== 0;
+}
+
+if ($can_clear && $user_cache_available && $clear_user_cache) {
+    if ($nonce === null || !isset($_POST['token']) || !is_string($_POST['token'])
+        || !hash_equals(clear_token($nonce), $_POST['token']) || cross_origin_post()) {
         http_response_code(403);
         echo 'The request to clear the user cache could not be verified. Reload the page and try again.';
         exit;
     }
     uc('clear');
-    header('Location: ' . $PHP_SELF . '?page=' . UCACHE_DATA);
+    // Relative to the page itself: $PHP_SELF is escaped for HTML, which would break a path with & or non-ASCII characters
+    header('Location: ?page=' . UCACHE_DATA);
     exit;
 }
 
-if ($token === null) {
-    $token = bin2hex(random_bytes(16));
+if ($nonce === null) {
+    $nonce = bin2hex(random_bytes(16));
     $secure = (!empty($_SERVER['HTTPS']) && strcasecmp($_SERVER['HTTPS'], 'off')) ? '; Secure' : '';
-    header('Set-Cookie: ' . TOKEN_COOKIE . '=' . $token . '; HttpOnly; SameSite=Strict' . $secure, false);
+    header('Set-Cookie: ' . TOKEN_COOKIE . '=' . $nonce . '; HttpOnly; SameSite=Strict' . $secure, false);
 }
 // The page can clear the cache: do not let another site load it in a frame and trick a click on the button
 header('X-Frame-Options: DENY');
 header("Content-Security-Policy: frame-ancestors 'none'");
+// Nor let the browser or a proxy keep a copy: it shows cached values, and its token, with the cookie value it was
+// made for (which another host can plant), clears the cache until PASSWORD changes
+header('Cache-Control: no-store');
 
 // The entries of the page, listed with the totals so that they agree with the count above them. Only those are
 // copied: listing all the entries of a large cache would run past memory_limit.
@@ -239,10 +282,23 @@ function notice($html) {
     return '<p class="notice">' . $html . "</p>\n";
 }
 
+// The version of php_ucache.dll in the numbering used since 2026-11-01: the builds released as 1.0.0.0, 1.0.0.1
+// and 1.0.0.2 before that are 1.0.0, 1.0.1 and 1.1.0
+function ucache_version() {
+    $version = (string)phpversion('ucache');
+    $renumbered = ['1.0.0.0' => '1.0.0', '1.0.0.1' => '1.0.1', '1.0.0.2' => '1.1.0'];
+    return isset($renumbered[$version]) ? $renumbered[$version] : $version;
+}
+
 function cache_unavailable_notice() {
+    // Since 1.1.0, the extension says why at startup; an older php_ucache.dll does not
+    $why = version_compare(ucache_version(), '1.1.0', '>=')
+        ? 'the warning that PHP logged when it started says why: see the PHP error log, or the Windows Application '
+            . 'event log (source <strong>PHP-' . html_escape(PHP_VERSION) . '</strong>)'
+        : 'check the other <strong>ucache.*</strong> directives, such as <strong>ucache.filemapdir</strong>';
     return notice('The user cache is not available. Either it is disabled (enable it with the '
-        . '<strong>ucache.enabled</strong> directive in <strong>php.ini</strong>), or it could not be created '
-        . '(check the other <strong>ucache.*</strong> directives, such as <strong>ucache.filemapdir</strong>).');
+        . '<strong>ucache.enabled</strong> directive in <strong>php.ini</strong>), or it could not be created ('
+        . $why . ').');
 }
 
 function server_value($name) {
@@ -252,6 +308,13 @@ function server_value($name) {
 function env_value($name) {
     $value = getenv($name);
     return ($value === false || $value === '') ? null : $value;
+}
+
+// A boolean setting as PHP reads it: "on", "yes" or "true" in any case, or a number other than 0. ini_get() returns the
+// string as it was set, which can be "On" or "2" as well as "1", and "" for Off
+function ini_bool($value) {
+    $value = strtolower((string)$value);
+    return $value === 'on' || $value === 'yes' || $value === 'true' || (int)$value !== 0;
 }
 
 // A row of a two-column table, with a placeholder for a value that is not set
@@ -267,23 +330,49 @@ function kv_group($title) {
 
 // The value of a ucache setting in the Cache settings card (HTML), with what it does under it where needed
 function setting_cell($name, $value) {
+    if ($name === 'ucache.enabled' || $name === 'ucache.enablecli') {
+        return ini_bool($value) ? 'enabled' : 'disabled';
+    }
     if ($value === '') {
         return placeholder('Not set');
-    }
-    if ($name === 'ucache.enabled' || $name === 'ucache.enablecli') {
-        return $value === '1' ? 'enabled' : 'disabled';
     }
     $note = setting_note($name, $value);
     return html_escape($value) . ($note !== null ? '<span class="note">' . html_escape($note) . '</span>' : '');
 }
 
 // What the value of a ucache setting does, or null where the value says it all. Only plain numbers are explained:
-// ini_get() returns the value as written, and "512M" or "-1" would be read differently by the extension.
+// ini_get() returns the value as written, and "512M" or "-1" would be read differently by the extension. Except
+// ucache.size while the cache exists: its note is the size of the cache itself, right whatever the value says and
+// whichever build of php_ucache.dll read it (1.1.0 reads 64M as 64 MB, earlier builds as 930 MB).
 function setting_note($name, $value) {
     $number = ctype_digit($value) ? (int)$value : null;
     switch ($name) {
         case 'ucache.prefix':
             return $value . 'get(), ' . $value . 'set(), …';
+        case 'ucache.size':
+            if (is_array($GLOBALS['ucache_mem_info'])) {
+                $size = intdiv((int)$GLOBALS['ucache_mem_info']['memory_total'], 1048576);
+                $note = format_number($size) . ' MB of shared memory';
+                if ($number !== null && $size != $number) {
+                    // The extension clamps the setting to 5..930: any other difference is a cache that processes with
+                    // another ucache.size created, which keeps its size until every process of the pool has exited
+                    $clamped = min(max($number, 5), 930);
+                    $note .= ($size == $clamped) ? ($size > $number ? ' (the minimum)' : ' (the maximum)')
+                        : ' (the size of the cache in use: a cache keeps the size it was created with until every process of the pool has exited)';
+                }
+                return $note;
+            }
+            break;
+        case 'ucache.bucketbytes':
+            // The table of the cache in use, whichever setting the process that created it had: a cache keeps its table,
+            // as it keeps its size, until every process of the pool has exited
+            if (is_array($GLOBALS['ucache_info']) && isset($GLOBALS['ucache_info']['hash_bucket_count'])
+                && $GLOBALS['ucache_info']['hash_bucket_count'] > 0 && is_array($GLOBALS['ucache_mem_info'])) {
+                $buckets = (int)$GLOBALS['ucache_info']['hash_bucket_count'];
+                return format_number($buckets) . ' hash buckets, one per '
+                    . format_number(intdiv((int)$GLOBALS['ucache_mem_info']['memory_total'], $buckets)) . ' bytes';
+            }
+            break;
     }
     if ($number === null) {
         return null;
@@ -293,6 +382,10 @@ function setting_note($name, $value) {
             // The extension takes 5 to 930
             $size = min(max($number, 5), 930);
             return format_number($size) . ' MB of shared memory' . ($size != $number ? ($size > $number ? ' (the minimum)' : ' (the maximum)') : '');
+        case 'ucache.bucketbytes':
+            // The extension takes 64 to 65536
+            $bytes = min(max($number, 64), 65536);
+            return 'one hash bucket per ' . format_number($bytes) . ' bytes' . ($bytes != $number ? ($bytes > $number ? ' (the minimum)' : ' (the maximum)') : '');
         case 'ucache.gc.interval':
             return $number > 0 ? 'a step every ' . format_duration($number) . ', at the end of a request' : 'off';
         case 'ucache.gc.step':
@@ -399,6 +492,11 @@ function render_overview(array $info, array $mem) {
         } else {
             $facts['Last run'] = format_duration($info['last_scavenge_seconds']) . ' ago';
             $facts['Last run removed'] = format_number($info['last_scavenge_count']);
+        }
+        // Builds before 1.1.0 do not report the locks found abandoned
+        if (isset($info['total_abandoned_lock_count'])) {
+            $facts['Abandoned locks'] = '<span title="Times a process found the cache lock or the allocator lock abandoned by a process that ended while it held it (killed or crashed); what that process was updating was put back">'
+                . format_number($info['total_abandoned_lock_count']) . '</span>';
         }
         echo stat_tile(ICON_SCAVENGER, 'Scavenged entries', format_number($info['total_scavenged_count']), '', $facts);
     }
@@ -1005,7 +1103,7 @@ if ($host === null) {
                         echo kv_row('PHPRC', server_value('PHPRC'), 'Not defined');
                         echo kv_row('Application pool ID', env_value('APP_POOL_ID'), 'Not available');
                         echo kv_row('Site ID', server_value('INSTANCE_ID'), 'Not available');
-                        echo kv_row('FastCGI impersonation', ini_get('fastcgi.impersonate') === '1' ? 'enabled' : 'disabled');
+                        echo kv_row('FastCGI impersonation', ini_bool(ini_get('fastcgi.impersonate')) ? 'enabled' : 'disabled');
                         echo kv_group('Machine');
                         echo kv_row('Machine name', env_value('COMPUTERNAME'));
                         echo kv_row('Operating system', php_uname('s') . ' ' . php_uname('r'));
@@ -1051,12 +1149,14 @@ if ($host === null) {
                 <section class="card" id="entries">
                     <div class="card-header">
                         <h2>Entries<?php if ($ucache_entries !== null) { ?><span class="count"><?= format_number($ucache_info['total_item_count']) ?></span><?php } ?></h2>
-                        <?php if (USE_AUTHENTICATION && $ucache_info['total_item_count'] > 0) { ?>
+                        <?php if ($can_clear && $ucache_info['total_item_count'] > 0) { ?>
                             <form method="post" action="<?= $PHP_SELF ?>?page=<?= UCACHE_DATA ?>">
                                 <input type="hidden" name="clc" value="1">
-                                <input type="hidden" name="token" value="<?= $token ?>">
+                                <input type="hidden" name="token" value="<?= clear_token($nonce) ?>">
                                 <button type="submit" class="danger">Clear All</button>
                             </form>
+                        <?php   } elseif (USE_AUTHENTICATION && $ucache_info['total_item_count'] > 0) { ?>
+                            <span class="note">To clear the cache here, set PASSWORD in this script to a long random value and change USERNAME too: with IIS authentication, PASSWORD is the only secret behind Clear All.</span>
                         <?php   } ?>
                     </div>
                     <?php if ($ucache_entries === null) { ?>

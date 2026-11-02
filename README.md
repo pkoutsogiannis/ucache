@@ -15,7 +15,7 @@ a value that one request stores can be read by the later requests of every proce
 deleted.
 
 - Platform: Windows x64, PHP 7.2, 7.3, 7.4, 8.0, 8.1, 8.2, 8.3, 8.4 and 8.5 NTS.
-- Extension name `ucache`, file `php_ucache.dll`, version 1.0.1.
+- Extension name `ucache`, file `php_ucache.dll`, version 1.1.0.
 - Maintained by [Datasteam Technologies](https://datasteam.com).
 - License: see [LICENSE](LICENSE) (the original Microsoft license, with the copyright of Datasteam Technologies).
 - What each version changed: [CHANGELOG.md](CHANGELOG.md). How fast it reads and writes: [BENCHMARKS.md](BENCHMARKS.md).
@@ -79,23 +79,25 @@ PHP:
 To install and enable the extension, follow these steps:
 
 1. Download the zip of your PHP version from the [releases page](https://github.com/pkoutsogiannis/ucache/releases), for
-   example `php_ucache-v1.0.1-8.4-nts-vs17-x86_64.zip` for PHP 8.4, unzip it, and rename the DLL in it to
-   `php_ucache.dll`. Or build it (see [Building for Windows](#building-for-windows)).
+   example `php_ucache-v1.1.0-8.4-nts-vs17-x86_64.zip` for PHP 8.4, unzip it, and rename the DLL in it to
+   `php_ucache.dll`. Or build it (see [Building for Windows](#building-for-windows)). With
+   [PIE](https://github.com/php/pie), `pie install pkoutsogiannis/ucache` does steps 1 to 3 instead.
 2. Copy php_ucache.dll into the PHP extensions folder: the `ext` folder next to php.exe, or the folder that
    `extension_dir` sets in php.ini. For example: `C:\php84\ext`.
 3. Add the following line to php.ini: `extension=php_ucache.dll`. Add the `ucache.*` settings to change, if any (see
    [Runtime Configuration](#runtime-configuration)).
 4. Recycle the IIS application pools for PHP to pick up the configuration changes, or restart the web server.
-5. To check that the extension has been enabled, look for a section called `ucache` in the output of `phpinfo()`, which
-   lists the `ucache.*` settings. From the command line, `php -m` lists `ucache`.
+5. To check that the extension has been enabled, look for a section called `ucache` in the output of `phpinfo()`: its
+   `User cache` line says `enabled` (`unavailable` means that the cache could not be created: see
+   [Startup warnings](#startup-warnings)). From the command line, `php -m` lists `ucache`.
 
 > **Note:** Under the CLI, the cache is only created when `ucache.enablecli=1`, in php.ini or on the command line:
 > `php -d ucache.enablecli=1 script.php`.
 
 > **Note:** To replace php_ucache.dll by another version or another build, stop the application pool or the web server,
 > wait for its php-cgi processes to exit, replace the DLL, and then start it. An overlapped recycle, the IIS default,
-> starts the new processes while the old ones are still running, and old and new processes would share one cache,
-> although two DLLs can store values differently (an old process can crash on arrays that a new one stored).
+> starts the new processes while the old ones are still running: processes of different UCache versions would each use a
+> cache of their own, and two builds of the same version would share one, although they can store values differently.
 
 ### Runtime Configuration
 
@@ -108,6 +110,7 @@ The following table lists and explains the configuration settings provided by th
 | `ucache.enabled` | "1" | "0" | "1" | PHP_INI_ALL | Available as of UCache 1.0.0 |
 | `ucache.enablecli` | "0" | "0" | "1" | PHP_INI_SYSTEM | Available as of UCache 1.0.0 |
 | `ucache.size` | "8" | "5" | "930" | PHP_INI_SYSTEM | Available as of UCache 1.0.0 |
+| `ucache.bucketbytes` | "512" | "64" | "65536" | PHP_INI_SYSTEM | Available as of UCache 1.1.0 |
 | `ucache.namesalt` | NULL | | | PHP_INI_SYSTEM | Available as of UCache 1.0.0 |
 | `ucache.apppoolid` | NULL | | | PHP_INI_SYSTEM | Available as of UCache 1.0.0 |
 | `ucache.filemapdir` | NULL | | | PHP_INI_SYSTEM | Available as of UCache 1.0.0 |
@@ -139,8 +142,16 @@ the CLI, and the functions fail there.
 
 `ucache.size` *int*
 
-Defines the size of the shared memory segment of the user cache, in megabytes. Values outside 5..930 are clamped to the
-nearest limit. Write it as a plain number: `512M` means 512 x 1048576 megabytes, which is clamped to 930.
+Defines the size of the shared memory segment of the user cache, in megabytes: a number of megabytes (`64`), or a size
+with a `K`, `M` or `G` suffix (`64M`, `1G`). A size outside 5..930 is clamped to the nearest limit, and a value that is
+not written as a size is replaced (by its leading digits, or else the default), each with a startup warning.
+
+`ucache.bucketbytes` *int*
+
+Defines the size of the hash table of the cache: one hash bucket of 8 bytes per this many bytes of `ucache.size` (16381
+buckets for the default 8 MB, which `ucache_info()` reports as `hash_bucket_count`). A smaller value makes lookups a
+little faster and takes more memory; a larger one gives memory back but slows down the lookups of small entries: keep
+the default unless the cache holds mostly large values.
 
 `ucache.namesalt` *string*
 
@@ -149,13 +160,15 @@ otherwise be shared. Only the first 8 characters are used.
 
 `ucache.apppoolid` *string*
 
-Defines the name that decides which processes share a cache, instead of the parent process id. If not set, the
-`APP_POOL_ID` environment variable is used when IIS sets it.
+Defines the name that decides which processes share a cache, instead of the parent process id. If not set, or empty, the
+`APP_POOL_ID` environment variable is used when IIS sets it. Names that differ only in the case of the letters A to Z
+are the same name.
 
 `ucache.filemapdir` *string*
 
-Defines the folder of a file that backs the shared memory instead of the paging file. Only used when the process group
-id (the parent process id, or the hash of the application pool id) is above 99999.
+Defines the folder of a file that backs the shared memory instead of the paging file. Only used for the cache of an IIS
+application pool (named by `ucache.apppoolid` or `APP_POOL_ID`), whose account (`IIS APPPOOL\<name>`) gets access to the
+file. If the file cannot be created in the folder, the cache is not created, with a startup warning.
 
 `ucache.debuglevel` *int*
 
@@ -200,6 +213,25 @@ to 0xff, at most 64 of them, and must not start with a digit. When the prefix is
 extension already uses, PHP starts with a warning and without any of the functions. This manual names the functions with
 the default prefix. ucache.php follows the setting.
 
+#### Startup warnings
+
+UCache raises a startup warning (`E_CORE_WARNING`) when it cannot use a setting as written (`ucache.size`,
+`ucache.bucketbytes`, `ucache.prefix`) and when it cannot create the cache. PHP writes startup warnings to its error log
+and to the Application event log of Windows (source `PHP-<version>`, for example `PHP-8.4.14`, event ID 4; on PHP 8,
+when `log_errors` is on, as in the php.ini files that come with PHP). Every PHP process raises the warning again when it
+starts: fix the setting rather than ignore the warning.
+
+When the cache cannot be created, PHP runs without it: the functions return false (`ucache_meminfo()` returns null), and
+the `User cache` line of `phpinfo()` says `unavailable`. The warning gives the Windows error and names the likely cause:
+
+- the folder of `ucache.filemapdir` does not exist (Windows error 3), or the account of the pool cannot write to it
+  (Windows error 5);
+- processes of another account use the same `ucache.apppoolid` (or `APP_POOL_ID`) and `ucache.namesalt` (Windows error
+  5);
+- the paging file has no room for the cache (Windows error 1455): a cache in the paging file takes its whole
+  `ucache.size` from the commit limit of the system when it is created;
+- a process that shares the cache kept its initialization lock for 30 seconds (Windows error 258).
+
 #### Settings per IIS application pool
 
 Each IIS application pool runs php-cgi processes of its own, and they share a cache of their own. To give a pool its own
@@ -225,8 +257,9 @@ The PHP handler of each site then names its application, as `fullPath|arguments`
 ```
 
 The processes that share a cache must use the same `ucache.*` settings. php-cgi reads them when it starts: after
-changing them, recycle the pool. After changing `ucache.size`, stop the pool, wait for its php-cgi processes to exit and
-start it again: the new processes of an overlapped recycle would open the cache that the old ones created.
+changing them, recycle the pool. After changing `ucache.size` or `ucache.bucketbytes`, stop the pool, wait for its
+php-cgi processes to exit and start it again: a cache keeps its size and its hash table for as long as a process has it
+open, and the new processes of an overlapped recycle would open the cache of the old ones.
 
 ### Resource Types
 
@@ -240,13 +273,14 @@ This extension has no constants defined.
 
 The sources of UCache include a PHP script, ucache.php (WinCache's wincache.php for UCache), that can be used to obtain
 cache information and statistics: the settings, the memory use, the hit and miss counts, what the scavenger removed, the
-list of entries (250 per page) and the value stored under a key; with authentication on, it can also clear the whole
-cache.
+list of entries (250 per page) and the value stored under a key; with authentication on and a password other than the
+default, it can also clear the whole cache.
 
 To use ucache.php, copy it into a folder of a web site that runs with the extension loaded, preferably one that only
 administrators can reach, and replace the values of the `USERNAME` and `PASSWORD` constants at its top: both default to
 `ucache`, and the page refuses to work while the password is `ucache`. If an IIS authentication other than Anonymous is
-enabled on the server, list the users allowed in `$user_allowed` instead, as the comments of the file explain.
+enabled on the server, list the users allowed in `$user_allowed` instead, as the comments of the file explain;
+`PASSWORD` is then still the secret behind the Clear All button, so make it a long random value.
 
 **Example #1 Authentication configuration for ucache.php**
 
@@ -271,9 +305,10 @@ still shows values, so anyone who can reach it can read everything in the cache.
 ### Sharing
 
 Processes share a cache when they have the same `ucache.apppoolid` (by default the `APP_POOL_ID` that IIS sets) or,
-without one, the same parent process, and the same `ucache.namesalt`. Processes of different PHP versions never share a
-cache. The cache is not persistent: it starts empty when the first process creates it, and lasts while a process has it
-open.
+without one, the same parent process, and the same `ucache.namesalt`, and run in the same Windows session: IIS runs
+every application pool in session 0, so a CLI script run in a Remote Desktop session does not see the cache of a pool.
+Processes of different PHP versions never share a cache. The cache is not persistent: it starts empty when the first
+process creates it, and lasts while a process has it open.
 
 ### Values
 
@@ -321,15 +356,20 @@ and `total_evicted_count`.
 When `ucache_set()` or `ucache_add()` runs out of memory, it runs a full pass over the table, which removes what a step
 removes. With `ucache.gc.evict` more than 0, it then evicts the entries that have not been used for the longest time,
 until that percentage of the cache is free, and tries again. With 0, the default, nothing is evicted, and the call fails
-if the value still does not fit.
+if the value still does not fit. A value whose parts take more than the empty cache holds (the `memory_free` of
+`ucache_meminfo()` with no entries) fails at once, without removing anything.
 
-`ucache_clear()` empties the cache for every process, and holds the cache lock until it has freed every entry.
+`ucache_clear()` empties the cache for every process at once, and frees the memory without holding up the other
+processes.
 
 ### The cache lock
 
 Every call takes the cache lock while it looks its key up, and a read also while it copies the value out (a write copies
 its value in before it takes the lock), so processes that call the cache back to back take turns. Requests that do other
-work between their calls rarely find the lock taken. A fatal error in a cache function does not leave the lock held.
+work between their calls rarely find the lock taken: at a thousand calls a second, it is busy about 0.1% of the time. A
+fatal error in a cache function does not leave the lock held, and a process killed while it holds a lock (by an IIS
+FastCGI timeout, for example) leaves the cache consistent: the next process undoes the update that it left half done,
+and `ucache_info()` counts it in `total_abandoned_lock_count`.
 
 ### memory_limit
 
@@ -350,10 +390,11 @@ and `limit`.
 - In a cache where no entry has a ttl and `ucache.gc.ttl` is 0, the scavenger has nothing to remove:
   `ucache.gc.interval=0` turns its steps off.
 - `ucache.gc.step` sets how fast the steps go through the table: in about buckets / `ucache.gc.step` x
-  `ucache.gc.interval` seconds at the end of requests. A fixed value does not grow with the cache: 16 buckets every 10
-  seconds take about 4.5 hours to go through the 25717 buckets of a 930 MB cache.
+  `ucache.gc.interval` seconds at the end of requests. A fixed value does not grow with the cache: 1000 buckets every 10
+  seconds take about 3 hours to go through the 1048573 buckets of a 512 MB cache.
 - `ucache.gc.threshold` makes the scavenger work harder once the cache is that full. It only helps where entries expire
   or go unused (`ucache.gc.ttl`).
+- Keep `ucache.bucketbytes` at its default: a larger value only suits a cache of large values.
 
 ## UCache Functions
 
@@ -408,8 +449,7 @@ Not used in the array form.
 
 Time for the variable to live in the cache in seconds. After the value specified in `ttl` has passed, the stored
 variable can no longer be read, and the scavenger frees it (see [Expiry and the scavenger](#expiry-and-the-scavenger)).
-The default value of 0 means that the variable never expires. A negative `ttl` makes the call fail, and a variable with
-a `ttl` above 4294967 (about 49.7 days) never expires.
+The default value of 0 means that the variable never expires. A negative `ttl` makes the call fail.
 
 #### Return Values
 
@@ -572,7 +612,8 @@ ucache_clear - Deletes the entire content of the user cache
 ucache_clear(): bool
 ```
 
-Clears/deletes all the values stored in the user cache, for every process that shares the cache.
+Clears/deletes all the values stored in the user cache, for every process that shares the cache. The cache is empty for
+every process at once, and the other processes go on using it while the memory of the entries is freed.
 
 #### Parameters
 
@@ -580,7 +621,7 @@ This function has no parameters.
 
 #### Return Values
 
-Returns true.
+Returns true on success or false on failure (the cache is switched off or was not created).
 
 #### Examples
 
@@ -856,7 +897,8 @@ object, or an array containing objects, is returned, then the objects will be un
 `success`
 
 Will be set to true on success and false on failure. It is left as it was when the cache is switched off
-(`ucache.enabled=0`) or was not created (CLI without `ucache.enablecli=1`).
+(`ucache.enabled=0`) or was not created (CLI without `ucache.enablecli=1`, or a cache that could not be created: see
+[Startup warnings](#startup-warnings)).
 
 #### Return Values
 
@@ -1073,15 +1115,18 @@ negative, or memory_limit was reached while the entries were listed). The array 
 - `total_cache_uptime` - total time in seconds that the user cache has been active
 - `is_local_cache` - always false (the user cache is always the shared one)
 - `total_item_count` - total number of elements that are currently in the user cache, expired ones included
+- `hash_bucket_count` - the hash buckets of the cache (see `ucache.bucketbytes`): 16381 for the default 8 MB
 - `total_hit_count` - number of times the data has been served from the cache
 - `total_miss_count` - number of times the data has not been found in the cache
 - `last_scavenge_seconds` - seconds since the scavenger last ran a step (at the end of a request or on a write) or a
-  full pass (when the cache was full), or null if it has not run since the cache was created. A step that
-  `ucache.gc.threshold` skips does not count.
+  full pass (when the cache was full), or null if it has not run since the cache was created.
 - `last_scavenge_count` - the entries that step or pass removed
 - `total_scavenged_count` - the entries that steps and full passes removed since the cache was created, evicted entries
   included
 - `total_evicted_count` - the entries evicted from a full cache since the cache was created
+- `total_abandoned_lock_count` - the times since the cache was created that a process found a lock of the cache
+  abandoned: the process that held it ended without releasing it (killed, for example by an IIS FastCGI timeout, or
+  crashed), and what it had left half updated was put back as it was (see [The cache lock](#the-cache-lock))
 - `ucache_entries` - an array, indexed from 1 (from `offset` + 1 without `key`: the position of the entry in the full
   listing), that contains the information about the cached entries:
   - `key_name` - name of the key which is used to store the data
@@ -1118,25 +1163,17 @@ Array
     [total_cache_uptime] => 0
     [is_local_cache] => 
     [total_item_count] => 2
+    [hash_bucket_count] => 16381
     [total_hit_count] => 1
     [total_miss_count] => 1
     [last_scavenge_seconds] => 
     [last_scavenge_count] => 0
     [total_scavenged_count] => 0
     [total_evicted_count] => 0
+    [total_abandoned_lock_count] => 0
     [ucache_entries] => Array
         (
             [1] => Array
-                (
-                    [key_name] => blue
-                    [value_type] => array
-                    [value_size] => 128
-                    [ttl_seconds] => 300
-                    [age_seconds] => 0
-                    [hitcount] => 0
-                )
-
-            [2] => Array
                 (
                     [key_name] => green
                     [value_type] => long
@@ -1144,6 +1181,16 @@ Array
                     [ttl_seconds] => 0
                     [age_seconds] => 0
                     [hitcount] => 1
+                )
+
+            [2] => Array
+                (
+                    [key_name] => blue
+                    [value_type] => array
+                    [value_size] => 128
+                    [ttl_seconds] => 300
+                    [age_seconds] => 0
+                    [hitcount] => 0
                 )
 
         )
@@ -1200,7 +1247,8 @@ This function has no parameters.
 #### Return Values
 
 Array of meta data about the user cache memory usage, or null if the cache was not created (CLI without
-`ucache.enablecli=1`). It also works with `ucache.enabled=0`. The array contains:
+`ucache.enablecli=1`, or a cache that could not be created: see [Startup warnings](#startup-warnings)). It also works
+with `ucache.enabled=0`. The array contains:
 
 - `memory_total` - amount of memory in bytes allocated for the user cache
 - `memory_free` - amount of free memory in bytes available for the user cache
@@ -1224,7 +1272,7 @@ The above example will output:
 Array
 (
     [memory_total] => 8388608
-    [memory_free] => 8386744
+    [memory_free] => 8253952
     [num_used_blks] => 1
     [num_free_blks] => 1
     [memory_overhead] => 128
@@ -1277,8 +1325,7 @@ Not used in the array form.
 
 Time for the variable to live in the cache in seconds. After the value specified in `ttl` has passed, the stored
 variable can no longer be read, and the scavenger frees it (see [Expiry and the scavenger](#expiry-and-the-scavenger)).
-The default value of 0 means that the variable never expires. A negative `ttl` makes the call fail, and a variable with
-a `ttl` above 4294967 (about 49.7 days) never expires.
+The default value of 0 means that the variable never expires. A negative `ttl` makes the call fail.
 
 #### Return Values
 
@@ -1430,6 +1477,8 @@ WinCache; it starts with an empty cache. Code that defines `ucache_*` functions 
 
 Existing code may notice these differences:
 
+- UCache reads `ucache.size=64M` as 64 MB, and warns about a value that it cannot use. WinCache 2.0.0.8 applied the
+  suffix to the megabytes, so that `64M` gave 930 MB.
 - `ucache_get()` with an array of keys returns numeric keys as integer keys, and integer keys keep their full value in
   the array forms. WinCache 2.0.0.8 returned numeric keys as string keys that neither `$result[5]` nor `$result['5']`
   could read, and cut integer keys to 32 bits.
