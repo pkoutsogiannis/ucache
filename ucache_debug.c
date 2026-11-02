@@ -3,6 +3,7 @@
    | Windows Cache for PHP                                                                        |
    +----------------------------------------------------------------------------------------------+
    | Copyright (c) 2009, Microsoft Corporation. All rights reserved.                              |
+   | Copyright (c) 2018-2026, Datasteam Technologies. All rights reserved.                        |
    |                                                                                              |
    | Redistribution and use in source and binary forms, with or without modification, are         |
    | permitted provided that the following conditions are met:                                    |
@@ -28,6 +29,7 @@
    | Module: ucache_debug.c                                                                       |
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
+   | Modified: Periklis Koutsogiannis <pkoutsogiannis@datasteam.com>                              |
    +----------------------------------------------------------------------------------------------+
 */
 

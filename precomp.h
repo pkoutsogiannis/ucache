@@ -3,6 +3,7 @@
    | Windows Cache for PHP                                                                        |
    +----------------------------------------------------------------------------------------------+
    | Copyright (c) 2009, Microsoft Corporation. All rights reserved.                              |
+   | Copyright (c) 2018-2026, Datasteam Technologies. All rights reserved.                        |
    |                                                                                              |
    | Redistribution and use in source and binary forms, with or without modification, are         |
    | permitted provided that the following conditions are met:                                    |
@@ -29,6 +30,7 @@
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
+   | Modified: Periklis Koutsogiannis <pkoutsogiannis@datasteam.com>                              |
    +----------------------------------------------------------------------------------------------+
 */
 
@@ -36,7 +38,7 @@
 #define _PRECOMP_H_
 
 #define PHP_UCACHE_EXTNAME   "ucache"
-#define PHP_UCACHE_VERSION    "1.0.0"
+#define PHP_UCACHE_VERSION    "1.0.1"
 #define PHP_UCACHE_VERSION_LEN (sizeof(PHP_UCACHE_VERSION)-1)
 
 /* comment following line for release builds */
@@ -62,6 +64,19 @@
 #include "ext/standard/info.h"
 #include "zend_smart_str.h"
 #include "ext/standard/php_var.h"
+#include "ext/standard/basic_functions.h"
+
+/*
+ * ucache is NTS only.  The headers of a thread-safe devel pack do not define ZTS: its
+ * main/config.w32.h differs from the NTS one only in CONFIGURE_COMMAND (and, in 8.4 and 8.5,
+ * OpenSSL defines), because PHP's own build passes /D ZTS=1 on the command line
+ * (script\confutils.js).  So this only catches a build that defines ZTS itself.
+ * php_ucache.vcxproj refuses a thread-safe import library (php7ts.lib, php8ts.lib), and
+ * config.w32 does not build the extension for a ZTS PHP.
+ */
+#ifdef ZTS
+# error ucache requires a non-thread-safe (NTS) build of PHP
+#endif
 
 #include <tlhelp32.h>
 

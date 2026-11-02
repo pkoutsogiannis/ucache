@@ -3,6 +3,7 @@
    | Windows Cache for PHP                                                                        |
    +----------------------------------------------------------------------------------------------+
    | Copyright (c) 2009, Microsoft Corporation. All rights reserved.                              |
+   | Copyright (c) 2018-2026, Datasteam Technologies. All rights reserved.                        |
    |                                                                                              |
    | Redistribution and use in source and binary forms, with or without modification, are         |
    | permitted provided that the following conditions are met:                                    |
@@ -29,6 +30,7 @@
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
+   | Modified: Periklis Koutsogiannis <pkoutsogiannis@datasteam.com>                              |
    +----------------------------------------------------------------------------------------------+
 */
 
@@ -36,7 +38,10 @@
 #include <Sddl.h>
 #include <Aclapi.h>
 
+/* intsafe.h (included by the PHP 8.5 headers) defines DWORD_MAX as 0xffffffffUL */
+#ifndef DWORD_MAX
 #define DWORD_MAX    0xFFFFFFFF
+#endif
 
 /* Temp files are in the format of "ucache_" + suffix + ".tmp" */
 #define TEMP_FILE_PREFIX_CHARS 11
@@ -977,7 +982,9 @@ const char * utils_get_typename(zend_uchar type)
         case IS_REFERENCE:
             valuetype = "reference";
             break;
-        case IS_CONSTANT:
+#if PHP_VERSION_ID < 70300
+        case IS_CONSTANT:   /* removed in PHP 7.3 */
+#endif
         case IS_CONSTANT_AST:
             valuetype = "constant";
             break;

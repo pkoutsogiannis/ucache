@@ -4,6 +4,7 @@
    | Windows Cache for PHP                                                                        |
    +----------------------------------------------------------------------------------------------+
    | Copyright (c) 2009, Microsoft Corporation. All rights reserved.                              |
+   | Copyright (c) 2018-2026, Datasteam Technologies. All rights reserved.                        |
    |                                                                                              |
    | Redistribution and use in source and binary forms, with or without modification, are         |
    | permitted provided that the following conditions are met:                                    |
@@ -31,6 +32,7 @@
    | Authors: Don Venkat Raman <don.raman@microsoft.com>                                          |
    |          Ruslan Yakushev <ruslany@microsoft.com>                                             |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
+   | Modified: Periklis Koutsogiannis <pkoutsogiannis@datasteam.com>                              |
    +----------------------------------------------------------------------------------------------+
 */
 
@@ -61,919 +63,1130 @@ $user_allowed = array('DOMAIN\user1', 'DOMAIN\user2', 'DOMAIN\user3');
 
 /** ===================== END OF CONFIGURATION SETTINGS ========================== */
 
-if ( !extension_loaded( 'ucache' ) )
-{
-    die('The extension UCACHE (php_ucache.dll) is not loaded. No statistics to show.');
+if (!extension_loaded('ucache')) {
+    die('The UCache extension (php_ucache.dll) is not loaded. No statistics to show.');
 }
 
-if ( USE_AUTHENTICATION == 1 ) {
-    if (!empty($_SERVER['AUTH_TYPE']) && !empty($_SERVER['REMOTE_USER']) && strcasecmp($_SERVER['REMOTE_USER'], 'anonymous'))
-    {
-        if (!in_array(strtolower($_SERVER['REMOTE_USER']), array_map('strtolower', $user_allowed))
-        && !in_array('all', array_map('strtolower', $user_allowed)))
-        {
+// The functions are named after ucache.prefix ("ucache_" by default): uc('info', true) calls ucache_info(true)
+function uc($name, ...$args) {
+    return (ini_get('ucache.prefix') . $name)(...$args);
+}
+
+if (!function_exists(ini_get('ucache.prefix') . 'info')) {
+    die('The UCache functions are not available (see the startup warning about ucache.prefix). No statistics to show.');
+}
+
+if (USE_AUTHENTICATION == 1) {
+    if (!empty($_SERVER['AUTH_TYPE']) && !empty($_SERVER['REMOTE_USER']) && strcasecmp($_SERVER['REMOTE_USER'], 'anonymous')) {
+        // IIS authenticated the user: only the users in $user_allowed get in
+        $allowed = array_map('strtolower', $user_allowed);
+        if (!in_array(strtolower($_SERVER['REMOTE_USER']), $allowed, true) && !in_array('all', $allowed, true)) {
             echo 'You are not authorised to view this page. Please contact server admin to get permission. Exiting.';
             exit;
         }
-    }
-    else if ( !isset($_SERVER['PHP_AUTH_USER'] ) || !isset( $_SERVER['PHP_AUTH_PW'] ) ||
-              $_SERVER['PHP_AUTH_USER'] != USERNAME || $_SERVER['PHP_AUTH_PW'] != PASSWORD ) {
-        header( 'WWW-Authenticate: Basic realm="UCACHE Log In!"' );
-        header( 'HTTP/1.0 401 Unauthorized' );
+    } elseif (
+        !isset($_SERVER['PHP_AUTH_USER'], $_SERVER['PHP_AUTH_PW'])
+        || !hash_equals((string)USERNAME, (string)$_SERVER['PHP_AUTH_USER'])
+        || !hash_equals((string)PASSWORD, (string)$_SERVER['PHP_AUTH_PW'])
+    ) {
+        header('WWW-Authenticate: Basic realm="UCache statistics"');
+        http_response_code(401);
         exit;
-    }
-    else if ( $_SERVER['PHP_AUTH_PW'] == 'ucache' )
-    {
-        echo "Please change the default password to get this page working. Exiting.";
+    } elseif ($_SERVER['PHP_AUTH_PW'] === 'ucache') {
+        echo 'Please change the default password to get this page working. Exiting.';
         exit;
     }
 }
 
-define('IMG_WIDTH', 320);
-define('IMG_HEIGHT', 220);
 define('SUMMARY_DATA', 1);
 define('UCACHE_DATA', 4); // User cache
-define('BAR_CHART', 1);
-define('PIE_CHART', 2);
-define('PATH_MAX_LENGTH', 45);
-define('INI_MAX_LENGTH', 45);
 define('CACHE_MAX_ENTRY', 250);
 
 // ucache settings that are used for debugging purposes
-$settings_to_hide = array( 'ucache.localheap', 'ucache.debuglevel' );
+$settings_to_hide = ['ucache.debuglevel'];
+
+// The groups of the Cache settings card, each in this order; a setting that none lists goes last in the first one
+$setting_groups = [
+    'Cache' => ['ucache.enabled', 'ucache.enablecli', 'ucache.size', 'ucache.prefix', 'ucache.apppoolid', 'ucache.namesalt', 'ucache.filemapdir'],
+    'Scavenger' => ['ucache.gc.interval', 'ucache.gc.step', 'ucache.gc.ttl', 'ucache.gc.threshold', 'ucache.gc.evict'],
+];
 
 // Input parameters check
-$PHP_SELF = isset( $_SERVER['PHP_SELF'] ) ? htmlentities( strip_tags( $_SERVER['PHP_SELF'],'' ), ENT_QUOTES, 'UTF-8' ) : '';
-$page = isset( $_GET['page'] ) ? $_GET['page'] : SUMMARY_DATA;
-if ( !is_numeric( $page ) || ( $page != SUMMARY_DATA && $page != UCACHE_DATA ) )
-    $page = SUMMARY_DATA;
+$PHP_SELF = isset($_SERVER['PHP_SELF']) ? htmlentities(strip_tags($_SERVER['PHP_SELF'], ''), ENT_QUOTES, 'UTF-8') : '';
 
-$img = 0;
-if ( isset( $_GET['img'] ) && is_numeric( $_GET['img'] ) ) {
-    $img = $_GET['img'];
-    if ( $img != UCACHE_DATA )
-        $img = 0;
-}
-$chart_type = BAR_CHART;
-if ( isset( $_GET['type'] ) && is_numeric( $_GET['type'] ) ) {
-    $chart_type = $_GET['type'];
-    if ( $chart_type < BAR_CHART || $chart_type > PIE_CHART)
-        $chart_type = BAR_CHART;
-}
-$chart_param1 = 0;
-if ( isset( $_GET['p1'] ) && is_numeric( $_GET['p1'] ) ) {
-    $chart_param1 = $_GET['p1'];
-    if ( $chart_param1 < 0 ) 
-        $chart_param1 = 0;
-    else if ( $chart_param1 > PHP_INT_MAX )
-        $chart_param1 = PHP_INT_MAX;
-}
-$chart_param2 = 0;
-if ( isset( $_GET['p2'] ) && is_numeric( $_GET['p2'] ) ) {
-    $chart_param2 = $_GET['p2'];
-    if ( $chart_param2 < 0 ) 
-        $chart_param2 = 0;
-    else if ( $chart_param2 > PHP_INT_MAX )
-        $chart_param2 = PHP_INT_MAX;
+$page = SUMMARY_DATA;
+if (isset($_GET['page']) && is_numeric($_GET['page']) && $_GET['page'] == UCACHE_DATA) {
+    $page = UCACHE_DATA;
 }
 
-$show_all_ucache_entries = 0;
-if ( isset( $_GET['all'] ) && is_numeric( $_GET['all'] ) ) {
-    $show_all_ucache_entries = $_GET['all'];
-    if ( $show_all_ucache_entries < 0 || $show_all_ucache_entries > 1)
-        $show_all_ucache_entries = 0;
+// The list shows CACHE_MAX_ENTRY entries at a time, from position start (0 for the first entry)
+$ucache_start = 0;
+if (isset($_GET['start']) && is_string($_GET['start']) && ctype_digit($_GET['start'])) {
+    $ucache_start = (int)$_GET['start'];
 }
 
-$clear_user_cache = 0;
-if ( isset( $_GET['clc'] ) && is_numeric( $_GET['clc'] ) ) {
-    $clear_user_cache = $_GET['clc'];
-    if ( $clear_user_cache < 0 || $clear_user_cache > 1)
-        $clear_user_cache = 0;
-}
+// Clearing the cache is a POST from the page's own form, never a link
+$clear_user_cache = isset($_POST['clc']) && $_POST['clc'] === '1';
 
+// The page of an entry shows its value
 $ucache_key = null;
-if ( isset( $_GET['key'] ) )
+if ($page == UCACHE_DATA && isset($_GET['key']) && is_string($_GET['key']) && $_GET['key'] !== '') {
     $ucache_key = $_GET['key'];
+}
 // End of input parameters check
 
-// Initialize global variables
-$user_cache_available = function_exists('ucache_info') && !strcmp( ini_get( 'ucache.enabled' ), "1" );
-$ucache_mem_info = null;
-$ucache_info = null;
+// The user cache is available when it is enabled and the extension could create it. When it could not (for
+// example because ucache.filemapdir names a folder that does not exist), ucache_info() and ucache_meminfo() fail.
+$ucache_info = uc('info', true);
+$ucache_mem_info = uc('meminfo');
+$user_cache_available = ini_get('ucache.enabled') === '1' && is_array($ucache_info) && is_array($ucache_mem_info);
 
-function convert_bytes_to_string( $bytes ) {
-    $units = array( 0 => 'B', 1 => 'kB', 2 => 'MB', 3 => 'GB' );
-    $log = log( $bytes, 1024 );
-    $power = (int) $log;
-    $size = pow(1024, $log - $power);
-    return round($size, 2) . ' ' . $units[$power];
+// The clear form must send back the token kept in this cookie. The cookie is SameSite=Strict: another site can
+// neither read the token nor make the browser send the cookie, so it cannot get a logged-in browser to clear the cache.
+define('TOKEN_COOKIE', 'ucache_stats_token');
+$token = null;
+if (isset($_COOKIE[TOKEN_COOKIE]) && is_string($_COOKIE[TOKEN_COOKIE]) && preg_match('/^[0-9a-f]{32}$/', $_COOKIE[TOKEN_COOKIE])) {
+    $token = $_COOKIE[TOKEN_COOKIE];
 }
 
-function seconds_to_words( $seconds ) {
-    /*** return value ***/
-    $ret = "";
-
-    /*** get the hours ***/
-    $hours = intval(intval( $seconds ) / 3600);
-    if ( $hours > 0 ) {
-        $ret .= "$hours hours ";
+if (USE_AUTHENTICATION && $user_cache_available && $clear_user_cache) {
+    if ($token === null || !isset($_POST['token']) || !is_string($_POST['token']) || !hash_equals($token, $_POST['token'])) {
+        http_response_code(403);
+        echo 'The request to clear the user cache could not be verified. Reload the page and try again.';
+        exit;
     }
-    /*** get the minutes ***/
-    $minutes = bcmod( ( intval( $seconds ) / 60 ), 60 );
-    if( $hours > 0 || $minutes > 0 ) {
-        $ret .= "$minutes minutes ";
-    }
-
-    /*** get the seconds ***/
-    $seconds = bcmod( intval( $seconds ), 60 );
-    $ret .= "$seconds seconds";
-
-    return $ret;
+    uc('clear');
+    header('Location: ' . $PHP_SELF . '?page=' . UCACHE_DATA);
+    exit;
 }
 
-function get_trimmed_string( $input, $max_len ) {
-    if ($max_len <= 3) die ('The maximum allowed length must be bigger than 3');
-    
-    $result = $input;
-    if ( strlen( $result ) > $max_len ) 
-        $result = substr( $result, 0, $max_len - 3 ). '...';
-        
-    return $result;
+if ($token === null) {
+    $token = bin2hex(random_bytes(16));
+    $secure = (!empty($_SERVER['HTTPS']) && strcasecmp($_SERVER['HTTPS'], 'off')) ? '; Secure' : '';
+    header('Set-Cookie: ' . TOKEN_COOKIE . '=' . $token . '; HttpOnly; SameSite=Strict' . $secure, false);
 }
+// The page can clear the cache: do not let another site load it in a frame and trick a click on the button
+header('X-Frame-Options: DENY');
+header("Content-Security-Policy: frame-ancestors 'none'");
 
-function get_trimmed_ini_value( $input, $max_len, $separators = array('|', ',') ) {
-    if ($max_len <= 3) die ('The maximum allowed length must be bigger than 3');
-    
-    $result = $input;
-    $lastindex = 0;
-    if ( strlen( $result ) > $max_len ) {
-        $result = substr( $result, 0, $max_len - 3 ).'...';
-        if ( !is_array( $separators ) ) die( 'The separators must be in an array' );
-        foreach ( $separators as $separator ) {
-            $index = strripos( $result, $separator );
-            if ( $index !== false  && $index > $lastindex )
-                $lastindex = $index;
+// The entries of the page, listed with the totals so that they agree with the count above them. Only those are
+// copied: listing all the entries of a large cache would run past memory_limit.
+$ucache_entries = null;
+$list_error = null;
+if ($user_cache_available && $page == UCACHE_DATA && $ucache_key === null) {
+    // A php_ucache.dll built before ucache_info() took offset and limit reports the same version: tell it by the
+    // number of parameters
+    if ((new ReflectionFunction(ini_get('ucache.prefix') . 'info'))->getNumberOfParameters() < 4) {
+        $list_error = 'the loaded php_ucache.dll is an older build, whose ucache_info() takes no offset and limit. '
+            . 'Install the php_ucache.dll of the current release.';
+    } else {
+        $list_info = uc('info', false, null, $ucache_start, CACHE_MAX_ENTRY);
+        if (is_array($list_info)) {
+            $ucache_info = $list_info;
+            $ucache_entries = $list_info['ucache_entries'];
         }
-        if ( 0 < $lastindex && $lastindex < ( $max_len - 3 ) )
-            $result = substr( $result, 0, $lastindex + 1 ).'...';
     }
-    return $result;
 }
 
-function get_chart_title( $chart_data )
-{
-    $chart_title = '';
-    switch( $chart_data ) {
-        case UCACHE_DATA: {
-            $chart_title = 'User Cache';
+function html_escape($input) {
+    // ENT_SUBSTITUTE: cached keys and values can be binary, and invalid UTF-8 would otherwise escape to ''
+    return htmlspecialchars((string)$input, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
+
+function format_number($number) {
+    return number_format((float)$number);
+}
+
+function format_percent($percent) {
+    return number_format($percent, 1) . '%';
+}
+
+// At most 2 decimals, and none that are 0: 8 MB, 4.2 MB, 287.56 kB
+function format_bytes($bytes) {
+    $units = ['B', 'kB', 'MB', 'GB'];
+    $value = max(0, $bytes);
+    $power = 0;
+    while ($value >= 1024 && $power < count($units) - 1) {
+        $value /= 1024;
+        $power++;
+    }
+    return rtrim(rtrim(number_format($value, 2, '.', ''), '0'), '.') . ' ' . $units[$power];
+}
+
+// The largest unit and the next one, unless it is 0: 1 d 1 h, 2 min 5 s, 45 s
+function format_duration($seconds) {
+    $seconds = max(0, (int)$seconds);
+    $parts = [];
+    foreach (['d' => 86400, 'h' => 3600, 'min' => 60, 's' => 1] as $unit => $size) {
+        $count = intdiv($seconds, $size);
+        $seconds %= $size;
+        $started = !empty($parts);
+        if ($count > 0) {
+            $parts[] = $count . ' ' . $unit;
+        }
+        if ($started) {
             break;
         }
     }
-    return $chart_title;
+    return $parts ? implode(' ', $parts) : '0 s';
 }
 
-function gd_loaded() {
-    return extension_loaded( 'gd' );
+function placeholder($text) {
+    return '<span class="placeholder">' . html_escape($text) . '</span>';
 }
 
-if ( $img > 0 ) {
-    if ( !gd_loaded() )
-        exit( 0 );
-
-    function create_hit_miss_chart( $width, $height, $hits, $misses, $title = 'Hits & Misses (in %)' ) {
-        
-        $hit_percent = 0;
-        $miss_percent = 0;
-        if ( $hits < 0 ) $hits = 0;
-        if ( $misses < 0 ) $misses = 0;
-        if ( $hits > 0 || $misses > 0 ) {
-            $hit_percent = round( $hits / ( $hits + $misses ) * 100, 2 );
-            $miss_percent = round( $misses / ( $hits + $misses ) * 100, 2 );
-        }
-        $data = array( 'Hits' => $hit_percent, 'Misses' => $miss_percent );
-        
-        $image = imagecreate( $width, $height ); 
-
-        // colors 
-        $white = imagecolorallocate( $image, 0xFF, 0xFF, 0xFF );
-        $phpblue = imagecolorallocate( $image, 0x5C, 0x87, 0xB2 ); 
-        $black = imagecolorallocate( $image, 0x00, 0x00, 0x00 ); 
-        $gray = imagecolorallocate( $image, 0xC0, 0xC0, 0xC0 );
-
-        $maxval = max( $data );
-        $nval = sizeof( $data );
-
-        // draw something here
-        $hmargin = 38; // left horizontal margin for y-labels 
-        $vmargin = 20; // top (bottom) vertical margin for title (x-labels) 
-
-        $base = floor( ( $width - $hmargin ) / $nval );
-
-        $xsize = $nval * $base - 1; // x-size of plot
-        $ysize = $height - 2 * $vmargin; // y-size of plot
-    
-        // plot frame 
-        imagerectangle( $image, $hmargin, $vmargin, $hmargin + $xsize, $vmargin + $ysize, $black ); 
-
-        // top label
-        $titlefont = 3;
-        $txtsize = imagefontwidth( $titlefont ) * strlen( $title );
-        $xpos = (int)( $hmargin + ( $xsize - $txtsize ) / 2 );
-        $xpos = max( 1, $xpos ); // force positive coordinates 
-        $ypos = 3; // distance from top 
-        imagestring( $image, $titlefont, $xpos, $ypos, $title , $black ); 
-
-        // grid lines
-        $labelfont = 2;
-        $ngrid = 4;
-
-        $dydat = 100 / $ngrid;
-        $dypix = $ysize / $ngrid;
-
-        for ( $i = 0; $i <= $ngrid; $i++ ) {
-            $ydat = (int)( $i * $dydat );
-            $ypos = $vmargin + $ysize - (int)( $i * $dypix );
-        
-            $txtsize = imagefontwidth( $labelfont ) * strlen( $ydat );
-            $txtheight = imagefontheight( $labelfont );
-        
-            $xpos = (int)( ( $hmargin - $txtsize) / 2 );
-            $xpos = max( 1, $xpos );
-        
-            imagestring( $image, $labelfont, $xpos, $ypos - (int)( $txtheight/2 ), $ydat, $black );
-        
-            if ( !( $i == 0 ) && !( $i >= $ngrid ) ) 
-                imageline( $image, $hmargin - 3, $ypos, $hmargin + $xsize, $ypos, $gray ); 
-                // don't draw at Y=0 and top 
-        }
-
-        // graph bars
-        // columns and x labels 
-        $padding = 30; // half of spacing between columns 
-        $yscale = $ysize / ( $ngrid * $dydat ); // pixels per data unit 
-
-        for ( $i = 0; list( $xval, $yval ) = each( $data ); $i++ ) { 
-
-            // vertical columns 
-            $ymax = $vmargin + $ysize; 
-            $ymin = $ymax - (int)( $yval * $yscale ); 
-            $xmax = $hmargin + ( $i + 1 ) * $base - $padding; 
-            $xmin = $hmargin + $i * $base + $padding; 
-
-            imagefilledrectangle( $image, $xmin, $ymin, $xmax, $ymax, $phpblue ); 
-
-            // x labels 
-            $xlabel = $xval.': '.$yval.'%';
-            $txtsize = imagefontwidth( $labelfont ) * strlen( $xlabel );
-
-            $xpos = ( $xmin + $xmax - $txtsize ) / 2;
-            $xpos = max( $xmin, $xpos ); 
-            $ypos = $ymax + 3; // distance from x axis
-
-            imagestring( $image, $labelfont, $xpos, $ypos, $xlabel, $black ); 
-        }
-        return $image;
-    }
-    
-    function create_used_free_chart( $width, $height, $used_memory, $free_memory, $title = 'Free & Used Memory (in %)' ) {
-        // Check the input parameters to avoid division by zero and weird cases
-        if ( $free_memory <= 0 && $used_memory <= 0 ) {
-            $free_memory = 1;
-            $used_memory = 0;
-        }
-        
-        $centerX = 120;
-        $centerY = 120;
-        $diameter = 120;
-
-        $hmargin = 5; // left (right) horizontal margin
-        $vmargin = 20; // top (bottom) vertical margin
-
-        $image = imagecreate( $width, $height );
-
-        // colors 
-        $white = imagecolorallocate( $image, 0xFF, 0xFF, 0xFF );
-        $black = imagecolorallocate( $image, 0x00, 0x00, 0x00 );
-        $pie_color[1] = imagecolorallocate($image, 0x5C, 0x87, 0xB2);
-        $pie_color[2] = imagecolorallocate($image, 0xCB, 0xE1, 0xEF);
-        $pie_color[3] = imagecolorallocate($image, 0xC0, 0xC0, 0xC0);
-
-        // Label font size
-        $labelfont = 2;
-        $hfw = imagefontwidth( $labelfont );
-        $vfw = imagefontheight( $labelfont );
-
-        // Border
-        imagerectangle( $image, $hmargin, $vmargin, $width - $hmargin, $height - $vmargin, $black ); 
-
-        // Top label
-        $titlefont = 3;
-        $txtsize = imagefontwidth( $titlefont ) * strlen( $title );
-        $hpos = (int)( ($width - $txtsize) / 2 );
-        $vpos = 3; // distance from top 
-        imagestring( $image, $titlefont, $hpos, $vpos, $title , $black );
-
-        $total = 0;
-        $n = 0;
-        $items = array('Used memory' => $used_memory, 'Free memory' => $free_memory);
-
-        //read the arguments into different arrays:
-        foreach( $items as $key => $val ) {
-            $n++;
-            $label[$n] = $key;
-            $value[$n] = $val;
-            $total += $val;
-            $arc_dec[$n] = $total*360;
-            $arc_rad[$n] = $total*2*pi();
-        }
-
-        //the base:
-        $arc_rad[0] = 0;
-        $arc_dec[0] = 0;
-
-        //count the labels:
-        for ( $i = 1; $i <= $n; $i++ ) {
-            
-            //calculate the percents:
-            $perc[$i] = $value[$i] / $total;
-            $percstr[$i] = (string) number_format( $perc[$i] * 100, 2 )."%";
-            //label with percentage:
-            $label[$i] = $percstr[$i];
-
-            //calculate the arc and line positions:
-            $arc_rad[$i] = $arc_rad[$i] / $total;
-            $arc_dec[$i] = $arc_dec[$i] / $total;
-            $hpos = round( $centerX + ( $diameter / 2 ) * sin( $arc_rad[$i] ) );
-            $vpos = round( $centerY + ( $diameter / 2 ) * cos( $arc_rad[$i] ) );
-            imageline( $image, $centerX, $centerY, $hpos, $vpos, $black );
-            imagearc( $image, $centerX, $centerY, $diameter, $diameter, $arc_dec[$i-1], $arc_dec[$i], $black );
-
-            //calculate the positions for the labels:
-            $arc_rad_label = $arc_rad[$i-1] + 0.5 * $perc[$i] * 2 * pi();
-            $hpos = $centerX + 1.1 * ( $diameter / 2 ) * sin( $arc_rad_label );
-            $vpos = $centerY + 1.1 * ( $diameter / 2 ) * cos( $arc_rad_label );
-            if ( ( $arc_rad_label > 0.5 * pi() ) && ( $arc_rad_label < 1.5 * pi() ) ) {
-                $vpos = $vpos - $vfw;
-            }
-            if ( $arc_rad_label > pi() ) {
-                $hpos = $hpos - $hfw * strlen( $label[$i] );
-            }
-            //display the labels:
-            imagestring($image, $labelfont, $hpos, $vpos, $label[$i], $black);
-        }
-
-        //fill the parts with their colors:
-        for ( $i = 1; $i <= $n; $i++ ) {
-            if ( round($arc_dec[$i] - $arc_dec[$i-1]) != 0 ) {
-                $arc_rad_label = $arc_rad[$i - 1] + 0.5 * $perc[$i] * 2 * pi();
-                $hpos = $centerX + 0.8 * ( $diameter / 2 ) * sin( $arc_rad_label );
-                $vpos = $centerY + 0.8 * ( $diameter / 2 ) * cos( $arc_rad_label );
-                imagefilltoborder( $image, $hpos, $vpos, $black, $pie_color[$i] );
-            }
-        }
-
-        // legend
-        $hpos = $centerX + 1.1 * ($diameter / 2) + $hfw * strlen( '50.00%' );
-        $vpos = $centerY - ($diameter / 2);
-        $i = 1;
-        $thumb_size = 5;
-        foreach ($items as $key => $value){
-            imagefilledrectangle( $image, $hpos, $vpos, $hpos + $thumb_size, $vpos + $thumb_size, $pie_color[$i++] );
-            imagestring( $image, $labelfont, $hpos + $thumb_size + 5, $vpos, $key, $black );
-            $vpos += $vfw + 2;
-        }
-        return $image;
-    }
-
-    $png_image = null;
-    $chart_title = get_chart_title($img);
-    
-    if ( $chart_type == PIE_CHART ){
-        $png_image = create_used_free_chart( IMG_WIDTH, IMG_HEIGHT, $chart_param1, $chart_param2, 'Memory Usage by '.$chart_title.' (in %)' );
-    }
-    else{
-        $png_image = create_hit_miss_chart( IMG_WIDTH, IMG_HEIGHT,  $chart_param1, $chart_param2, $chart_title.' Hits & Misses (in %)' );
-    }
-
-    if ( $png_image !== null ) {
-        // flush image 
-        header('Content-type: image/png');
-        imagepng($png_image);
-        imagedestroy($png_image); 
-    }
-    exit;
+function notice($html) {
+    return '<p class="notice">' . $html . "</p>\n";
 }
 
-function get_chart_markup( $data_type, $chart_type, $chart_param1, $chart_param2 ) {
-    global    $PHP_SELF;
+function cache_unavailable_notice() {
+    return notice('The user cache is not available. Either it is disabled (enable it with the '
+        . '<strong>ucache.enabled</strong> directive in <strong>php.ini</strong>), or it could not be created '
+        . '(check the other <strong>ucache.*</strong> directives, such as <strong>ucache.filemapdir</strong>).');
+}
 
-    $result = '';
-    $alt_title = '';
+function server_value($name) {
+    return isset($_SERVER[$name]) ? (string)$_SERVER[$name] : null;
+}
 
-    if ( gd_loaded() ){
-        $alt_title = get_chart_title( $data_type );
-        if ( $alt_title == '' )
-            return '';
+function env_value($name) {
+    $value = getenv($name);
+    return ($value === false || $value === '') ? null : $value;
+}
 
-        if ( $chart_type == BAR_CHART )
-            $alt_title .= ' hit and miss percentage chart';
-        elseif ( $chart_type == PIE_CHART )
-            $alt_title .= ' memory usage percentage chart';
-        else
-            return '';
+// A row of a two-column table, with a placeholder for a value that is not set
+function kv_row($label, $value, $missing = 'Not set') {
+    $cell = ($value === null || $value === '') ? placeholder($missing) : html_escape($value);
+    return '<tr><th scope="row">' . html_escape($label) . '</th><td>' . $cell . "</td></tr>\n";
+}
 
-        $result = '<img src="'.$PHP_SELF;
-        $result .= '?img='.$data_type.'&amp;type='.$chart_type;
-        $result .= '&amp;p1='.$chart_param1.'&amp;p2='.$chart_param2.'" ';
-        $result .= 'alt="'.$alt_title.'" width="'.IMG_WIDTH.'" height="'.IMG_HEIGHT.'" />';
+// The heading row of a group of rows in a two-column table
+function kv_group($title) {
+    return '<tr class="group"><th colspan="2">' . html_escape($title) . "</th></tr>\n";
+}
+
+// The value of a ucache setting in the Cache settings card (HTML), with what it does under it where needed
+function setting_cell($name, $value) {
+    if ($value === '') {
+        return placeholder('Not set');
     }
-    else {
-        $result = '<p class="notice">Enable GD library (<em>php_gd2.dll</em>) in order to see the charts.</p>';
+    if ($name === 'ucache.enabled' || $name === 'ucache.enablecli') {
+        return $value === '1' ? 'enabled' : 'disabled';
+    }
+    $note = setting_note($name, $value);
+    return html_escape($value) . ($note !== null ? '<span class="note">' . html_escape($note) . '</span>' : '');
+}
+
+// What the value of a ucache setting does, or null where the value says it all. Only plain numbers are explained:
+// ini_get() returns the value as written, and "512M" or "-1" would be read differently by the extension.
+function setting_note($name, $value) {
+    $number = ctype_digit($value) ? (int)$value : null;
+    switch ($name) {
+        case 'ucache.prefix':
+            return $value . 'get(), ' . $value . 'set(), …';
+    }
+    if ($number === null) {
+        return null;
+    }
+    switch ($name) {
+        case 'ucache.size':
+            // The extension takes 5 to 930
+            $size = min(max($number, 5), 930);
+            return format_number($size) . ' MB of shared memory' . ($size != $number ? ($size > $number ? ' (the minimum)' : ' (the maximum)') : '');
+        case 'ucache.gc.interval':
+            return $number > 0 ? 'a step every ' . format_duration($number) . ', at the end of a request' : 'off';
+        case 'ucache.gc.step':
+            return $number > 0 ? format_number($number) . ' hash buckets per step' : 'automatic';
+        case 'ucache.gc.ttl':
+            return $number > 0 ? 'removes the entries unused for ' . format_duration($number) : 'off';
+        case 'ucache.gc.threshold':
+            return $number > 0 ? 'steps only at or below ' . min($number, 100) . '% free memory, also on writes' : 'off';
+        case 'ucache.gc.evict':
+            return $number > 0 ? 'a full cache evicts until ' . min($number, 100) . '% is free' : 'off';
+    }
+    return null;
+}
+
+// A ratio against a limit: the fill on a track of the same hue. The numbers are in the text next to it.
+function meter_markup($percent, $label, $text) {
+    $percent = max(0.0, min(100.0, (float)$percent));
+    // A 2px gap in the surface color separates the fill from the track
+    $class = ($percent > 0 && $percent < 100) ? ' class="partial"' : '';
+    return '<div class="meter" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="'
+        . number_format($percent, 1, '.', '') . '" aria-label="' . html_escape($label) . '" aria-valuetext="'
+        . html_escape($text) . '" title="' . html_escape($text) . '"><span' . $class . ' style="width: '
+        . number_format($percent, 2, '.', '') . '%"></span></div>';
+}
+
+// The row under the list of entries that tells which ones it shows, with links to the other pages
+function entries_pager($start, $shown, $total) {
+    global $PHP_SELF;
+
+    $pages = [];
+    if ($start > 0) {
+        $pages['First'] = 0;
+        $pages['Previous'] = max(0, $start - CACHE_MAX_ENTRY);
+    }
+    if ($start + $shown < $total) {
+        $pages['Next'] = $start + $shown;
+        $pages['Last'] = intdiv($total - 1, CACHE_MAX_ENTRY) * CACHE_MAX_ENTRY;
+    }
+    $html = 'Entries ' . format_number($start + 1) . ' to ' . format_number($start + $shown) . ' of ' . format_number($total);
+    foreach ($pages as $label => $from) {
+        $html .= ' &middot; <a href="' . $PHP_SELF . '?page=' . UCACHE_DATA . '&amp;start=' . $from . '#entries">' . $label . '</a>';
+    }
+    return '<tr class="more"><td colspan="6">' . $html . "</td></tr>\n";
+}
+
+// A formatted quantity, escaped, with its units set smaller: 4.8 MB, 2 min 5 s
+function with_units($text) {
+    return preg_replace('/ ([^\d\s,.]+)/', ' <span class="unit">$1</span>', html_escape($text));
+}
+
+// The icons of the stat tiles: the path data of a 24 × 24 line drawing
+define('ICON_HITS', 'M20 12a8 8 0 1 1-16 0a8 8 0 1 1 16 0M8.5 12.5l2.5 2.5 4.5-5');
+define('ICON_MEMORY', 'M7 6h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1zM10 3v3M14 3v3M10 18v3M14 18v3M3 10h3M3 14h3M18 10h3M18 14h3');
+define('ICON_ENTRIES', 'M9 7h11M9 12h11M9 17h11M4.5 7h.01M4.5 12h.01M4.5 17h.01');
+define('ICON_UPTIME', 'M20 12a8 8 0 1 1-16 0a8 8 0 1 1 16 0M12 8v4l2.5 2.5');
+define('ICON_SCAVENGER', 'M4 7h16M10 7V4.5h4V7M6.5 7l1 12.5h9l1-12.5M10 11v5M14 11v5');
+
+// A stat tile: the label, the value and what goes under it (HTML), and the facts at its foot (label => HTML)
+function stat_tile($icon, $label, $value, $under, array $facts) {
+    $html = '<div class="tile"><p class="tile-label"><svg class="tile-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="'
+        . $icon . '" /></svg>' . html_escape($label) . '</p><div class="tile-body"><p class="tile-value">' . $value . '</p>' . $under
+        . '</div><dl class="facts">';
+    foreach ($facts as $term => $detail) {
+        $html .= '<div><dt>' . html_escape($term) . '</dt><dd>' . $detail . '</dd></div>';
+    }
+    return $html . "</dl></div>\n";
+}
+
+// The stat tiles at the top of the Summary page
+function render_overview(array $info, array $mem) {
+    global $PHP_SELF;
+
+    $hits = (int)$info['total_hit_count'];
+    $misses = (int)$info['total_miss_count'];
+    $lookups = $hits + $misses;
+    $total = (int)$mem['memory_total'];
+    $free = (int)$mem['memory_free'];
+    $used = max(0, $total - $free);
+    $used_percent = $total > 0 ? $used / $total * 100 : 0;
+    $entries = format_number($info['total_item_count']);
+    $uptime = (int)$info['total_cache_uptime'];
+    $created = time() - $uptime;
+
+    echo '<section class="tiles" aria-label="User cache overview">', "\n";
+
+    if ($lookups > 0) {
+        $hit_rate = $hits / $lookups * 100;
+        echo stat_tile(ICON_HITS, 'Hit rate', number_format($hit_rate, 1) . '<span class="unit">%</span>',
+            meter_markup($hit_rate, 'Hit rate', format_percent($hit_rate) . ' of ' . format_number($lookups) . ' lookups were hits'),
+            ['Hits' => format_number($hits), 'Misses' => format_number($misses)]);
+    } else {
+        echo stat_tile(ICON_HITS, 'Hit rate', '&ndash;', '', ['Hits' => '0', 'Misses' => '0']);
     }
 
-    return $result;
-}
+    echo stat_tile(ICON_MEMORY, 'Memory used', with_units(format_bytes($used)),
+        meter_markup($used_percent, 'Memory used', format_percent($used_percent) . ' of ' . format_bytes($total) . ' used'),
+        ['Used' => format_percent($used_percent) . ' of ' . format_bytes($total), 'Free' => format_bytes($free), 'Overhead' => format_bytes($mem['memory_overhead'])]);
 
-function cache_scope_text( $is_local )
-{
-    return ( $is_local == true ) ? 'local' : 'global';
-}
-
-function init_cache_info( $cache_data = SUMMARY_DATA )
-{
-    global  $ucache_mem_info,
-            $ucache_info,
-            $user_cache_available;
-
-    if ( $user_cache_available && ( $cache_data == SUMMARY_DATA || $cache_data == UCACHE_DATA ) ){
-        $ucache_mem_info = ucache_meminfo();
-        $ucache_info = ucache_info();
+    // Pre-release builds of php_ucache.dll do not report the scavenger
+    if (isset($info['total_scavenged_count'])) {
+        $facts = ['Evicted' => format_number($info['total_evicted_count'])];
+        if ($info['last_scavenge_seconds'] === null) {
+            $facts['Last run'] = placeholder('none yet');
+        } else {
+            $facts['Last run'] = format_duration($info['last_scavenge_seconds']) . ' ago';
+            $facts['Last run removed'] = format_number($info['last_scavenge_count']);
+        }
+        echo stat_tile(ICON_SCAVENGER, 'Scavenged entries', format_number($info['total_scavenged_count']), '', $facts);
     }
+
+    echo stat_tile(ICON_ENTRIES, 'Cached entries', '<a href="' . $PHP_SELF . '?page=' . UCACHE_DATA . '#entries">' . $entries . '</a>', '',
+        ['Scope' => empty($info['is_local_cache']) ? 'global' : 'local']);
+
+    echo stat_tile(ICON_UPTIME, 'Cache uptime', '<span title="' . format_number($uptime) . ' seconds">' . with_units(format_duration($uptime)) . '</span>', '',
+        ['Created' => '<span title="' . html_escape(date('Y-m-d H:i:s T', $created)) . '">' . html_escape(date('j M, H:i T', $created)) . '</span>']);
+
+    echo "</section>\n";
 }
 
-if ( USE_AUTHENTICATION && $user_cache_available && $clear_user_cache ){
-    ucache_clear();
-    header('Location: '.$PHP_SELF.'?page='.UCACHE_DATA);
-    exit;
+$host = server_value('HTTP_HOST');
+if ($host === null) {
+    $host = env_value('COMPUTERNAME');
 }
-
 ?>
-<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
-<html xmlns="http://www.w3.org/1999/xhtml">
+<!DOCTYPE html>
+<html lang="en">
 
 <head>
-<style type="text/css">
-body {
-    background-color: #ffffff;
-    color: #000000;
-    font-family: sans-serif;
-    font-size: 0.8em;
-}
-h1 {
-    font-size: 2em;
-}
-#content {
-    width: 960px;
-    margin: 5px;
-}
-#header {
-    color: #ffffff;
-    border: 1px solid black;
-    background-color: #5C87B2;
-    margin-bottom: 1em;
-    padding: 1em 2em;
-}
-/*The #menu element credits: */
-/*Credits: Dynamic Drive CSS Library */
-/*URL: http://www.dynamicdrive.com/style/ */
-#menu {
-    width: 100%;
-    overflow: hidden;
-    border-bottom: 1px solid black;
-    margin-bottom: 1em; /*bottom horizontal line that runs beneath tabs*/
-}
-#menu ul {
-    margin: 0;
-    padding: 0;
-    padding-left: 10px; /*offset of tabs relative to browser left edge*/;
-    font-weight: bold;
-    font-size: 1.2em;
-    list-style-type: none;
-}
-#menu li {
-    display: inline;
-    margin: 0;
-}
-#menu li a {
-    float: left;
-    display: block;
-    text-decoration: none;
-    margin: 0;
-    padding: 7px 8px;
-    border-right: 1px solid white; /*padding inside each tab*/
-    color: white; /*right divider between tabs*/
-    background: #5C87B2; /*background of tabs (default state)*/
-}
-#menu li a:visited {
-    color: white;
-}
-#menu li a:hover, #menu li.selected a {
-    background: #336699;
-}
-/*The end of the menu elements credits */
-#panel{
-    float: left;
-    width: 100%;
-    margin-bottom: 2em;
-    border: 1px solid black;
-}
-#panel_header{
-    background-color: #5C87B2;
-    font-weight: bold;
-    color: #ffffff;
-    border-bottom: 1px solid black;
-    padding: 0.5em;
-}
-#panel_body{
-    background-color: #E7E7E7;
-    padding: 0.5em;
-    white-space: 
-}
-pre {
-    white-space: pre-wrap; /* css-3 */
-    white-space: -moz-pre-wrap !important; /* Mozilla, since 1999 */
-    white-space: -pre-wrap; /* Opera 4-6 */
-    white-space: -o-pre-wrap; /* Opera 7 */
-    word-wrap: break-word; /* Internet Explorer 5.5+ */
-}
-.overview{
-    float: left;
-    width: inherit;
-    margin-bottom: 2em;
-}
-.list{
-    float: left;
-    width: 100%;
-    margin-bottom: 2em;
-}
-.wideleftpanel{
-    float: left;
-    width: 520px;
-    margin-right: 20px;
-}
-.widerightpanel{
-    float: left;
-    width: 420px;
-}
-.leftpanel{
-    float: left;
-    width: 310px;
-}
-.rightpanel{
-    float:left;
-    width: 320px;
-    margin-left: 5px;
-}
-.extra_margin{
-    margin-top: 20px;
-}
-table {
-    border-collapse: collapse;
-}
-td, th {
-    border: 1px solid black;
-    vertical-align: baseline;
-}
-th {
-    background-color: #5C87B2;
-    font-weight: bold;
-    color: #ffffff;
-}
-.e {
-    background-color: #cbe1ef;
-    font-weight: bold;
-    color: #000000;
-    width: 40%;
-}
-.leftpanel .e{
-    width: 50%;
-}
-.v {
-    background-color: #E7E7E7;
-    color: #000000;
-}
-.n{
-    background-color: #FFFF00;
-    color: #000000;
-    font-weight: bold;
-}
-.notice {
-    display: block;
-    margin-top: 1.5em;
-    padding: 1em;
-    background-color: #ffffe0;
-    border: 1px solid #dddddd;
-}
-.clear{
-    clear: both;
-}
-</style>
-<title>ucache Extension for PHP - Statistics</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <meta name="color-scheme" content="light dark">
+    <title>ucache statistics</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+            --page: #f9f9f7;
+            --surface: #fcfcfb;
+            --ink: #0b0b0b;
+            --ink-2: #52514e;
+            --hairline: #e1e0d9;
+            --border: rgba(11, 11, 11, 0.10);
+            --wash: rgba(11, 11, 11, 0.04);
+            --chip: rgba(11, 11, 11, 0.06);
+            --shadow: 0 1px 2px rgba(11, 11, 11, 0.04), 0 2px 8px rgba(11, 11, 11, 0.04);
+            --accent: #2a78d6;
+            --accent-track: #b7d3f6;
+            --accent-tint: #cde2fb;
+            --link: #1c5cab;
+            --danger: #d03b3b;
+            --danger-hover: #b83030;
+            --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "Liberation Mono", monospace;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --page: #0d0d0d;
+                --surface: #1a1a19;
+                --ink: #f0efec;
+                --ink-2: #c3c2b7;
+                --hairline: #2c2c2a;
+                --border: rgba(255, 255, 255, 0.10);
+                --wash: rgba(255, 255, 255, 0.04);
+                --chip: rgba(255, 255, 255, 0.08);
+                --shadow: none;
+                --accent: #3987e5;
+                --accent-track: #184f95;
+                --accent-tint: #0d366b;
+                --link: #6da7ec;
+            }
+        }
+
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            background: var(--page);
+            color: var(--ink);
+            font: 14px/1.5 var(--sans);
+        }
+
+        a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        a:focus-visible,
+        button:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+            border-radius: 4px;
+        }
+
+        code,
+        pre,
+        .mono {
+            font-family: var(--mono);
+            font-size: 13px;
+        }
+
+        .wrap {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding-left: 24px;
+            padding-right: 24px;
+        }
+
+        .topbar {
+            background: var(--surface);
+            border-bottom: 1px solid var(--hairline);
+        }
+
+        .topbar-inner {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px 24px;
+            padding-top: 20px;
+            padding-bottom: 12px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .logo {
+            width: 42px;
+            height: 42px;
+            padding: 9px;
+            border-radius: 12px;
+            background: var(--accent);
+            fill: none;
+            stroke: #ffffff;
+            stroke-width: 2;
+            stroke-linecap: round;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 20px;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+            line-height: 1.25;
+        }
+
+        h1 span {
+            color: var(--ink-2);
+            font-weight: 400;
+        }
+
+        .subtitle {
+            margin: 2px 0 0;
+            color: var(--ink-2);
+            font-size: 13px;
+        }
+
+        .versions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+
+        .versions li {
+            padding: 3px 11px;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--page);
+            color: var(--ink-2);
+            font-size: 12px;
+        }
+
+        .versions strong {
+            color: var(--ink);
+            font-weight: 600;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 28px;
+        }
+
+        .tabs a {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: -1px;
+            padding: 10px 2px 11px;
+            border-bottom: 2px solid transparent;
+            color: var(--ink-2);
+            font-weight: 500;
+        }
+
+        .tabs a:hover {
+            color: var(--ink);
+            text-decoration: none;
+        }
+
+        .tabs a[aria-current="page"] {
+            border-bottom-color: var(--accent);
+            color: var(--ink);
+            font-weight: 600;
+        }
+
+        .tab-count {
+            min-width: 22px;
+            padding: 0 7px;
+            border-radius: 999px;
+            background: var(--chip);
+            color: var(--ink-2);
+            font-size: 12px;
+            font-weight: 500;
+            line-height: 20px;
+            text-align: center;
+        }
+
+        .tabs a[aria-current="page"] .tab-count {
+            background: var(--accent-tint);
+            color: var(--link);
+        }
+
+        main {
+            display: grid;
+            gap: 20px;
+            padding-top: 24px;
+            padding-bottom: 48px;
+        }
+
+        .tiles {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+            gap: 16px;
+        }
+
+        .tile,
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            box-shadow: var(--shadow);
+        }
+
+        .tile {
+            display: flex;
+            flex-direction: column;
+            padding: 16px 18px;
+        }
+
+        .tile-label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 0;
+            color: var(--ink-2);
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .tile-icon {
+            flex: none;
+            width: 28px;
+            height: 28px;
+            padding: 5px;
+            border-radius: 8px;
+            background: var(--accent-tint);
+            fill: none;
+            stroke: var(--link);
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        /* As tall with a meter as without, so that the facts of all the tiles start at the same height */
+        .tile-body {
+            min-height: 83px;
+            padding-bottom: 14px;
+        }
+
+        .tile-value {
+            margin: 14px 0 0;
+            font-size: 30px;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+            line-height: 1.15;
+        }
+
+        .tile-value a {
+            color: inherit;
+        }
+
+        .unit {
+            color: var(--ink-2);
+            font-size: 17px;
+            font-weight: 500;
+            letter-spacing: 0;
+        }
+
+        .facts {
+            margin: 0;
+            padding-top: 10px;
+            border-top: 1px solid var(--hairline);
+            font-size: 13px;
+        }
+
+        .facts div {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 2px 0;
+        }
+
+        .facts dt {
+            color: var(--ink-2);
+        }
+
+        .facts dd {
+            margin: 0;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .meter {
+            height: 8px;
+            margin-top: 12px;
+            overflow: hidden;
+            border-radius: 4px;
+            background: var(--accent-track);
+        }
+
+        .meter span {
+            display: block;
+            height: 100%;
+            border-radius: 0 4px 4px 0;
+            background: var(--accent);
+        }
+
+        .meter span.partial {
+            box-shadow: 2px 0 0 var(--surface);
+        }
+
+        /* The two cards of the Summary page side by side and as tall as each other; on narrow screens, one above the other */
+        .columns {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 20px;
+        }
+
+        @media (max-width: 760px) {
+            .columns {
+                grid-template-columns: minmax(0, 1fr);
+            }
+        }
+
+        /* Clips the backgrounds of the rows to the rounded corners */
+        .card {
+            overflow: hidden;
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            min-height: 52px;
+            padding: 10px 18px;
+            border-bottom: 1px solid var(--hairline);
+        }
+
+        .card-header h2 {
+            margin: 0;
+            font-size: 15px;
+            font-weight: 600;
+        }
+
+        .count,
+        .hint {
+            margin-left: 8px;
+            color: var(--ink-2);
+            font-weight: 400;
+        }
+
+        .hint {
+            font-family: var(--mono);
+            font-size: 12px;
+        }
+
+        .table-wrap {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th,
+        td {
+            padding: 9px 18px;
+            border-bottom: 1px solid var(--hairline);
+            text-align: left;
+            vertical-align: top;
+        }
+
+        tbody tr:last-child>*,
+        .kv tr:last-child>* {
+            border-bottom: 0;
+        }
+
+        .kv th {
+            width: 40%;
+            color: var(--ink-2);
+            font-weight: 400;
+        }
+
+        .kv td {
+            overflow-wrap: anywhere;
+        }
+
+        /* The names of the settings in one piece: their column takes the width of the longest */
+        .settings th[scope="row"] {
+            width: 1%;
+            white-space: nowrap;
+        }
+
+        .kv .group th {
+            width: auto;
+            padding: 7px 18px;
+            background: var(--wash);
+            color: var(--ink-2);
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }
+
+        .note {
+            display: block;
+            margin-top: 1px;
+            color: var(--ink-2);
+            font-size: 12.5px;
+        }
+
+        .placeholder {
+            color: var(--ink-2);
+            font-style: italic;
+        }
+
+        .entries thead th {
+            background: var(--wash);
+            color: var(--ink-2);
+            font-size: 12px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .entries td {
+            vertical-align: middle;
+        }
+
+        .entries tbody tr:hover {
+            background: var(--wash);
+        }
+
+        .num {
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+
+        .key a,
+        .key span {
+            display: block;
+            max-width: 52ch;
+            overflow: hidden;
+            font-family: var(--mono);
+            font-size: 13px;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .type {
+            padding: 1px 6px;
+            border-radius: 4px;
+            background: var(--chip);
+            color: var(--ink-2);
+            font-family: var(--mono);
+            font-size: 12px;
+        }
+
+        .more td,
+        .empty {
+            padding: 14px 18px;
+            color: var(--ink-2);
+            text-align: center;
+        }
+
+        .empty {
+            margin: 0;
+        }
+
+        .danger {
+            padding: 6px 14px;
+            border: 0;
+            border-radius: 8px;
+            background: var(--danger);
+            color: #ffffff;
+            font: inherit;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .danger:hover {
+            background: var(--danger-hover);
+        }
+
+        .notice {
+            margin: 0;
+            padding: 14px 18px;
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--accent);
+            border-radius: 10px;
+            background: var(--surface);
+            color: var(--ink-2);
+        }
+
+        .notice strong {
+            color: var(--ink);
+            font-weight: 600;
+        }
+
+        .breadcrumb {
+            margin: 0;
+            color: var(--ink-2);
+        }
+
+        pre {
+            max-height: 70vh;
+            margin: 0;
+            padding: 16px 18px;
+            overflow: auto;
+            line-height: 1.55;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+    </style>
 </head>
 
 <body>
-
-<div id="content">
-    <div id="header">
-        <h1>ucache Extension for PHP - Statistics</h1>
-    </div>
-    <div id="menu">
-        <ul>
-            <li <?php echo ($page == SUMMARY_DATA)? 'class="selected"' : ''; ?>><a href="<?php echo $PHP_SELF, '?page=', SUMMARY_DATA; ?>">Summary</a></li>
-            <li <?php echo ($page == UCACHE_DATA)? 'class="selected"' : ''; ?>><a href="<?php echo $PHP_SELF, '?page=', UCACHE_DATA; ?>">User Cache</a></li>
-        </ul>
-    </div>
-<?php if ( $page == SUMMARY_DATA ) { 
-    init_cache_info( SUMMARY_DATA );
-?>
-    <div class="overview">
-        <div class="wideleftpanel">
-            <table style="width: 100%">
-                <tr>
-                    <th colspan="2">General Information</th>
-                </tr>
-                <tr>
-                    <td class="e">ucache version</td>
-                    <td class="v"><?php echo phpversion('ucache'); ?></td>
-                </tr>
-                <tr>
-                    <td class="e">PHP version</td>
-                    <td class="v"><?php echo phpversion(); ?></td>
-                </tr>
-                <tr title="<?php echo $_SERVER['DOCUMENT_ROOT']; ?>">
-                    <td class="e">Document root</td>
-                    <td class="v"><?php echo get_trimmed_string( $_SERVER['DOCUMENT_ROOT'], PATH_MAX_LENGTH ); ?></td>
-                </tr>
-                <tr title="<?php echo isset( $_SERVER['PHPRC'] ) ? $_SERVER['PHPRC'] : 'Not defined'; ?>">
-                    <td class="e">PHPRC</td>
-                    <td class="v"><?php echo isset( $_SERVER['PHPRC'] ) ? get_trimmed_string( $_SERVER['PHPRC'], PATH_MAX_LENGTH ) : 'Not defined'; ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Server software</td>
-                    <td class="v"><?php echo isset( $_SERVER['SERVER_SOFTWARE'] ) ? $_SERVER['SERVER_SOFTWARE']: 'Not set'; ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Operating System</td>
-                    <td class="v"><?php echo php_uname( 's' ), ' ', php_uname( 'r' ); ?></td>
-                </tr>
-                  <tr>
-                    <td class="e">Processor information</td>
-                    <td class="v"><?php echo isset( $_SERVER['PROCESSOR_IDENTIFIER'] ) ? $_SERVER['PROCESSOR_IDENTIFIER']: 'Not set'; ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Number of processors</td>
-                    <td class="v"><?php echo isset( $_SERVER['NUMBER_OF_PROCESSORS'] ) ? $_SERVER['NUMBER_OF_PROCESSORS']: 'Not set'; ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Machine name</td>
-                    <td class="v"><?php echo (getenv( 'COMPUTERNAME' ) != FALSE) ? getenv( 'COMPUTERNAME' ) : 'Not set'; ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Host name</td>
-                    <td class="v"><?php echo isset( $_SERVER['HTTP_HOST'] ) ? $_SERVER['HTTP_HOST'] : 'Not set'; ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Application Pool ID</td>
-                    <td class="v"><?php echo (getenv( 'APP_POOL_ID' ) != FALSE) ? getenv( 'APP_POOL_ID') : 'Not available'; ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Site ID</td>
-                    <td class="v"><?php echo isset( $_SERVER['INSTANCE_ID'] ) ? $_SERVER['INSTANCE_ID'] : 'Not available'; ?></td>
-                </tr>
-                <tr>
-                    <td class="e">FastCGI impersonation</td>
-                    <td class="v"><?php echo (ini_get( 'fastcgi.impersonate' ) === '1') ? 'enabled' : 'disabled'; ?></td>
-                </tr>
-            </table>
+    <header class="topbar">
+        <div class="wrap topbar-inner">
+            <div class="brand">
+                <svg class="logo" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <ellipse cx="12" cy="5.5" rx="7.5" ry="2.75" />
+                    <path d="M4.5 5.5v6.5c0 1.52 3.36 2.75 7.5 2.75s7.5-1.23 7.5-2.75V5.5" />
+                    <path d="M4.5 12v6.5c0 1.52 3.36 2.75 7.5 2.75s7.5-1.23 7.5-2.75V12" />
+                </svg>
+                <div>
+                    <h1>UCache <span>statistics</span></h1>
+                    <p class="subtitle"><?= $host !== null ? html_escape($host) : 'UCache extension for PHP' ?></p>
+                </div>
+            </div>
+            <ul class="versions" aria-label="Versions">
+                <li>UCache <strong><?= html_escape(phpversion('ucache')) ?></strong></li>
+                <li>PHP <strong><?= html_escape(phpversion()) ?></strong></li>
+            </ul>
         </div>
-        <div class="widerightpanel">
-            <table style="width:100%">
-                <tr>
-                    <th colspan="2">Cache Settings</th>
-                </tr>
-<?php 
-foreach ( ini_get_all( 'ucache' ) as $ini_name => $ini_value) {
-    // Do not show the settings used for debugging
-    if ( in_array( $ini_name, $settings_to_hide ) )
-        continue;
-    echo '<tr title="', $ini_value['local_value'], '"><td class="e">', $ini_name, '</td><td class="v">';
-    if ( !is_numeric( $ini_value['local_value'] ) )
-        echo get_trimmed_ini_value( $ini_value['local_value'], INI_MAX_LENGTH );
-    else
-        echo $ini_value['local_value'];
-    echo '</td></tr>', "\n";
-} 
-?>
-            </table>
-        </div>
-    </div>
-    <div class="overview">
-        <?php if ( $user_cache_available ) {?>
-        <div class="leftpanel extra_margin">
-            <table style="width: 100%">
-                <tr>
-                    <th colspan="2">User Cache Overview</th>
-                </tr>
-                <tr>
-                    <td class="e">Cache scope</td>
-                    <td class="v"><?php echo ( isset( $ucache_info['is_local_cache'] ) ) ? cache_scope_text( $ucache_info['is_local_cache'] ) : 'Unknown'; ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Cache uptime</td>
-                    <td class="v"><?php echo ( isset( $ucache_info['total_cache_uptime'] ) ) ? seconds_to_words( $ucache_info['total_cache_uptime'] ) : 'Unknown'; ?></td>
-                </tr>                
-                <tr>
-                    <td class="e">Cached entries</td>
-                    <td class="v"><a href="<?php echo $PHP_SELF, '?page=', UCACHE_DATA, '#filelist'; ?>"><?php echo $ucache_info['total_item_count']; ?></a></td>
-                </tr>
-                <tr>
-                    <td class="e">Hits</td>
-                    <td class="v"><?php echo $ucache_info['total_hit_count']; ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Misses</td>
-                    <td class="v"><?php echo $ucache_info['total_miss_count']; ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Total memory</td>
-                    <td class="v"><?php echo convert_bytes_to_string( $ucache_mem_info['memory_total'] ); ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Available memory</td>
-                    <td class="v"><?php echo convert_bytes_to_string( $ucache_mem_info['memory_free'] ); ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Memory overhead</td>
-                    <td class="v"><?php echo convert_bytes_to_string( $ucache_mem_info['memory_overhead'] ); ?></td>
-                </tr>
-            </table> 
-        </div>
-        <div class="rightpanel">
-            <?php echo get_chart_markup( UCACHE_DATA, BAR_CHART, $ucache_info['total_hit_count'], $ucache_info['total_miss_count'] ); ?>
-        </div>
-        <div class="rightpanel">
-            <?php echo get_chart_markup( UCACHE_DATA, PIE_CHART, $ucache_mem_info['memory_total'] - $ucache_mem_info['memory_free'], $ucache_mem_info['memory_free'] ); ?>
-        </div>
-        <?php } ?>
-    </div>
-<?php } else if ( $page == UCACHE_DATA && $ucache_key == null ) {
-    if ( $user_cache_available ) { 
-        init_cache_info( UCACHE_DATA );
-?>
-    <div class="overview">
-        <div class="leftpanel extra_margin">
-            <table style="width: 100%">
-                <tr>
-                    <th colspan="2">User Cache Overview</th>
-                </tr>
-                <tr>
-                    <td class="e">Cache scope</td>
-                    <td class="v"><?php echo ( isset( $ucache_info['is_local_cache'] ) ) ? cache_scope_text( $ucache_info['is_local_cache'] ) : 'Unknown'; ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Cache uptime</td>
-                    <td class="v"><?php echo ( isset( $ucache_info['total_cache_uptime'] ) ) ? seconds_to_words( $ucache_info['total_cache_uptime'] ) : 'Unknown'; ?></td>
-                </tr>                
-                <tr>
-                    <td class="e">Cached entries</td>
-                    <td class="v"><?php echo $ucache_info['total_item_count'];
-                    if ( USE_AUTHENTICATION && $ucache_info['total_item_count'] > 0 ) 
-                        echo ' (<a href="', $PHP_SELF, '?page=', UCACHE_DATA, '&amp;clc=1">Clear All</a>)'; ?>
-                    </td>
-                </tr>
-                <tr>
-                    <td class="e">Hits</td>
-                    <td class="v"><?php echo $ucache_info['total_hit_count']; ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Misses</td>
-                    <td class="v"><?php echo $ucache_info['total_miss_count']; ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Total memory</td>
-                    <td class="v"><?php echo convert_bytes_to_string( $ucache_mem_info['memory_total'] ); ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Available memory</td>
-                    <td class="v"><?php echo convert_bytes_to_string( $ucache_mem_info['memory_free'] ); ?></td>
-                </tr>
-                <tr>
-                    <td class="e">Memory overhead</td>
-                    <td class="v"><?php echo convert_bytes_to_string( $ucache_mem_info['memory_overhead'] ); ?></td>
-                </tr>
-            </table> 
-        </div>
-        <div class="rightpanel">
-            <?php echo get_chart_markup( UCACHE_DATA, BAR_CHART, $ucache_info['total_hit_count'], $ucache_info['total_miss_count'] ); ?>
-        </div>
-        <div class="rightpanel">
-            <?php echo get_chart_markup( UCACHE_DATA, PIE_CHART, $ucache_mem_info['memory_total'] - $ucache_mem_info['memory_free'], $ucache_mem_info['memory_free'] ); ?>
-        </div>
-    </div>
-    <div class="list" id="filelist">
-        <table style="width:100%">
-            <tr>
-                <th colspan="6">User cache entries</th>
-            </tr>
-            <tr>
-                <th title="Object Key Name">Key name</th>
-                <th title="Type of the object stored">Value type</th>
-                <th title="Size of the object stored">Value size</th>
-                <th title="Total amount of time in seconds which remains until the object is removed from the cache">Total TTL</th>
-                <th title="Total amount of time in seconds which has elapsed since the object was added to the cache">Total age</th>
-                <th title="Number of times the object has been served from the cache">Hit Count</th>
-        </tr>
-<?php
-    $count = 0;
-    foreach ( $ucache_info['ucache_entries'] as $entry ) {
-        echo '<tr title="', $entry['key_name'] ,'">', "\n";
-        if ( USE_AUTHENTICATION )
-            echo '<td class="e"><a href="', $PHP_SELF, '?page=', UCACHE_DATA, '&key=', urlencode( $entry['key_name'] ), '">', get_trimmed_string( $entry['key_name'], PATH_MAX_LENGTH ),'</a></td>', "\n";
-        else
-            echo '<td class="e">', get_trimmed_string( $entry['key_name'], PATH_MAX_LENGTH ),'</td>', "\n";
-        echo '<td class="v">', $entry['value_type'], '</td>', "\n";
-        echo '<td class="v">', convert_bytes_to_string( $entry['value_size']), '</td>', "\n";        
-        echo '<td class="v">', $entry['ttl_seconds'],'</td>', "\n";
-        echo '<td class="v">', $entry['age_seconds'],'</td>', "\n";
-        echo '<td class="v">', $entry['hitcount'],'</td>', "\n";
-        echo "</tr>\n";
-        if ($count++ > CACHE_MAX_ENTRY && !$show_all_ucache_entries){
-            echo '<tr><td colspan="6"><a href="', $PHP_SELF, '?page=', UCACHE_DATA, '&amp;all=1">Show all entries</td></tr>';
-            break;
+        <nav class="wrap tabs" aria-label="Pages">
+            <?php foreach ([SUMMARY_DATA => 'Summary', UCACHE_DATA => 'User cache'] as $id => $label) { ?>
+                <a href="<?= $PHP_SELF ?>?page=<?= $id ?>" <?= $page == $id ? ' aria-current="page"' : '' ?>><?= $label ?><?php if ($id == UCACHE_DATA && $user_cache_available) { ?><span class="tab-count" title="Cached entries"><?= format_number($ucache_info['total_item_count']) ?></span><?php } ?></a>
+            <?php } ?>
+        </nav>
+    </header>
+    <main class="wrap">
+        <?php if ($page == SUMMARY_DATA) {
+            if ($user_cache_available) {
+                render_overview($ucache_info, $ucache_mem_info);
+            } else {
+                echo cache_unavailable_notice();
+            }
+        ?>
+            <div class="columns">
+                <section class="card">
+                    <div class="card-header">
+                        <h2>General information</h2>
+                    </div>
+                    <table class="kv">
+                        <?php
+                        echo kv_group('Versions');
+                        echo kv_row('UCache version', phpversion('ucache'));
+                        echo kv_row('PHP version', phpversion());
+                        echo kv_group('Web server');
+                        echo kv_row('Server software', server_value('SERVER_SOFTWARE'));
+                        echo kv_row('Host name', server_value('HTTP_HOST'));
+                        echo kv_row('Document root', server_value('DOCUMENT_ROOT'));
+                        echo kv_row('PHPRC', server_value('PHPRC'), 'Not defined');
+                        echo kv_row('Application pool ID', env_value('APP_POOL_ID'), 'Not available');
+                        echo kv_row('Site ID', server_value('INSTANCE_ID'), 'Not available');
+                        echo kv_row('FastCGI impersonation', ini_get('fastcgi.impersonate') === '1' ? 'enabled' : 'disabled');
+                        echo kv_group('Machine');
+                        echo kv_row('Machine name', env_value('COMPUTERNAME'));
+                        echo kv_row('Operating system', php_uname('s') . ' ' . php_uname('r'));
+                        echo kv_row('Processor information', server_value('PROCESSOR_IDENTIFIER'));
+                        echo kv_row('Number of processors', server_value('NUMBER_OF_PROCESSORS'));
+                        ?>
+                    </table>
+                </section>
+                <section class="card">
+                    <div class="card-header">
+                        <h2>Cache settings</h2>
+                    </div>
+                    <table class="kv settings">
+                        <?php
+                        // The settings used for debugging are not shown
+                        $settings = array_diff_key(ini_get_all('ucache'), array_flip($settings_to_hide));
+                        foreach (array_keys($settings) as $ini_name) {
+                            if (!in_array($ini_name, array_merge(...array_values($setting_groups)), true)) {
+                                $setting_groups['Cache'][] = $ini_name;
+                            }
+                        }
+                        foreach ($setting_groups as $group => $names) {
+                            $names = array_values(array_intersect($names, array_keys($settings)));
+                            if (!$names) {
+                                continue;
+                            }
+                            echo kv_group($group);
+                            foreach ($names as $ini_name) {
+                                // A string setting that is not set has the value null (PHP 8.1 deprecates passing null to string functions)
+                                echo '<tr><th scope="row"><code>', html_escape($ini_name), '</code></th><td>',
+                                setting_cell($ini_name, (string)$settings[$ini_name]['local_value']), "</td></tr>\n";
+                            }
+                        }
+                        ?>
+                    </table>
+                </section>
+            </div>
+            <?php } elseif ($ucache_key === null) {
+            if (!$user_cache_available) {
+                echo cache_unavailable_notice();
+            } else {
+            ?>
+                <section class="card" id="entries">
+                    <div class="card-header">
+                        <h2>Entries<?php if ($ucache_entries !== null) { ?><span class="count"><?= format_number($ucache_info['total_item_count']) ?></span><?php } ?></h2>
+                        <?php if (USE_AUTHENTICATION && $ucache_info['total_item_count'] > 0) { ?>
+                            <form method="post" action="<?= $PHP_SELF ?>?page=<?= UCACHE_DATA ?>">
+                                <input type="hidden" name="clc" value="1">
+                                <input type="hidden" name="token" value="<?= $token ?>">
+                                <button type="submit" class="danger">Clear All</button>
+                            </form>
+                        <?php   } ?>
+                    </div>
+                    <?php if ($ucache_entries === null) { ?>
+                        <p class="empty">The entries could not be listed<?= $list_error !== null ? ': ' . html_escape($list_error) : '.' ?></p>
+                    <?php   } elseif (!$ucache_entries && $ucache_info['total_item_count'] > 0) { ?>
+                        <p class="empty">The user cache has <?= format_number($ucache_info['total_item_count']) ?> entries, none from entry <?= format_number($ucache_start + 1) ?> on. <a href="<?= $PHP_SELF ?>?page=<?= UCACHE_DATA ?>#entries">First page</a></p>
+                    <?php   } elseif (!$ucache_entries) { ?>
+                        <p class="empty">The user cache is empty.</p>
+                    <?php   } else { ?>
+                        <div class="table-wrap">
+                            <table class="entries">
+                                <thead>
+                                    <tr>
+                                        <th scope="col" title="Name of the key which is used to store the data">Key</th>
+                                        <th scope="col" title="Type of the value stored">Type</th>
+                                        <th scope="col" class="num" title="Memory taken by the value">Size</th>
+                                        <th scope="col" class="num" title="The ttl the entry was stored with">TTL</th>
+                                        <th scope="col" class="num" title="Time elapsed since the entry was added to the cache">Age</th>
+                                        <th scope="col" class="num" title="Number of times the entry has been served from the cache">Hits</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php
+                                    foreach ($ucache_entries as $entry) {
+                                        $key = html_escape($entry['key_name']);
+                                        echo '<tr>';
+                                        echo '<td class="key"><a href="', $PHP_SELF, '?page=', UCACHE_DATA, '&amp;key=', urlencode($entry['key_name']),
+                                        '" title="', $key, '">', $key, '</a></td>';
+                                        echo '<td><span class="type">', html_escape($entry['value_type']), '</span></td>';
+                                        echo '<td class="num" title="', format_number($entry['value_size']), ' bytes">', format_bytes($entry['value_size']), '</td>';
+                                        if ($entry['ttl_seconds'] > 0) {
+                                            echo '<td class="num" title="', format_number($entry['ttl_seconds']), ' seconds">', format_duration($entry['ttl_seconds']), '</td>';
+                                        } else {
+                                            echo '<td class="num">', placeholder('never'), '</td>';
+                                        }
+                                        echo '<td class="num" title="', format_number($entry['age_seconds']), ' seconds">', format_duration($entry['age_seconds']), '</td>';
+                                        echo '<td class="num">', format_number($entry['hitcount']), "</td></tr>\n";
+                                    }
+                                    $shown = count($ucache_entries);
+                                    if ($ucache_start > 0 || $shown < $ucache_info['total_item_count']) {
+                                        echo entries_pager($ucache_start, $shown, $ucache_info['total_item_count']);
+                                    }
+                                    ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php   } ?>
+                </section>
+            <?php
+            }
+        } else {
+            ?>
+            <p class="breadcrumb"><a href="<?= $PHP_SELF ?>?page=<?= UCACHE_DATA ?>">User cache</a> &rsaquo; Entry</p>
+            <?php
+            $entry = null;
+            if ($user_cache_available && uc('exists', $ucache_key)) {
+                $entry_info = uc('info', true, $ucache_key);
+                if (is_array($entry_info) && isset($entry_info['ucache_entries'][1])) {
+                    $entry = $entry_info['ucache_entries'][1];
+                }
+            }
+            if (!$user_cache_available) {
+                echo cache_unavailable_notice();
+            } elseif ($entry === null) {
+                echo notice('The variable with this key does not exist in the user cache.');
+            } else {
+                // An object of the value that this page cannot unserialize (an enum or a class that it does not
+                // define, a class changed since) fails the read with PHP's warning, shown in a notice instead.
+                // Called directly, not through uc(): a by-reference argument does not pass through ...$args
+                $value_errors = [];
+                set_error_handler(function ($errno, $errstr) use (&$value_errors) {
+                    $value_errors[] = $errstr;
+                    return true;
+                });
+                $get = ini_get('ucache.prefix') . 'get';
+                $value_read = false;
+                $value = $get($ucache_key, $value_read);
+                restore_error_handler();
+                ob_start();
+                var_dump($value);
+                $value_dump = ob_get_clean();
+            ?>
+                <section class="card">
+                    <div class="card-header">
+                        <h2>Entry</h2>
+                    </div>
+                    <table class="kv">
+                        <tr>
+                            <th scope="row">Key</th>
+                            <td class="mono"><?= html_escape($entry['key_name']) ?></td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Value type</th>
+                            <td><span class="type"><?= html_escape($entry['value_type']) ?></span></td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Size</th>
+                            <td><?= format_bytes($entry['value_size']) ?> <span class="count">(<?= format_number($entry['value_size']) ?> bytes)</span></td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Time to live</th>
+                            <td><?php if ($entry['ttl_seconds'] > 0) { ?><?= format_duration($entry['ttl_seconds']) ?> <span class="count">(<?= format_number($entry['ttl_seconds']) ?> seconds)</span><?php } else {
+                                                                                                                                                                                                        echo placeholder('never expires');
+                                                                                                                                                                                                    } ?></td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Age</th>
+                            <td><?= format_duration($entry['age_seconds']) ?> <span class="count">(<?= format_number($entry['age_seconds']) ?> seconds)</span></td>
+                        </tr>
+                        <tr>
+                            <th scope="row">Hit count</th>
+                            <td><?= format_number($entry['hitcount']) ?></td>
+                        </tr>
+                    </table>
+                </section>
+                <section class="card">
+                    <div class="card-header">
+                        <h2>Value<span class="hint">var_dump()</span></h2>
+                    </div>
+                    <?php if ($value_read) { ?>
+                    <pre><?= html_escape($value_dump) ?></pre>
+                    <?php } else {
+                        echo notice('The value could not be read here' . ($value_errors ? ': ' . html_escape(implode(' ', $value_errors)) : '') . '.');
+                    } ?>
+                </section>
+        <?php
+            }
         }
-    }
-?>
-        </table>
-    </div>
-<?php } else { ?>
-    <div class="overview">
-        <p class="notice">The user cache is not available. Enable the user cache by using <strong>ucache.enabled</strong>
-            directive in <strong>php.ini</strong> file.</p>
-    </div>
-<?php }?>
-<?php } else if ( $page == UCACHE_DATA && $ucache_key != null && USE_AUTHENTICATION ) {
-            if ( !ucache_exists( $ucache_key ) ){
-?>
-    <div class="overview">
-        <p class="notice">The variable with this key does not exist in the user cache.</p>
-    </div>
-<?php       } 
-            else{
-                $ucache_entry_info = ucache_info( true, $ucache_key );
-?>
-    <div class="list">
-        <table width="60%">
-            <tr>
-                <th colspan="2">User Cache Entry Information</th>
-            </tr>
-            <tr>
-                <td class="e">Key</td>
-                <td class="v"><?php echo $ucache_entry_info['ucache_entries'][1]['key_name']; ?></td>
-            </tr>
-            <tr>
-                <td class="e">Value Type</td>
-                <td class="v"><?php echo $ucache_entry_info['ucache_entries'][1]['value_type']; ?></td>
-            </tr>
-            <tr>
-                <td class="e">Size</td>
-                <td class="v"><?php echo convert_bytes_to_string( $ucache_entry_info['ucache_entries'][1]['value_size'] ); ?></td>
-            </tr>
-            <tr>
-                <td class="e">Total Time To Live (in seconds)</td>
-                <td class="v"><?php echo $ucache_entry_info['ucache_entries'][1]['ttl_seconds']; ?></td>
-            </tr>
-            <tr>
-                <td class="e">Total Age (in seconds)</td>
-                <td class="v"><?php echo $ucache_entry_info['ucache_entries'][1]['age_seconds']; ?></td>
-            </tr>
-            <tr>
-                <td class="e">Hit Count</td>
-                <td class="v"><?php echo $ucache_entry_info['ucache_entries'][1]['hitcount']; ?></td>
-            </tr>
-        </table>
-    </div>
-    <div id="panel">
-        <div id="panel_header">
-            User Cache Entry Content
-        </div>
-        <div id="panel_body">
-            <pre><?php var_dump( ucache_get( $ucache_key ) )?></pre>
-        </div>
-    </div>
-<?php }?>
-<?php } ?>
-<div class="clear"></div>
-</div>
+        ?>
+    </main>
 </body>
 
 </html>

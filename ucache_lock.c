@@ -3,6 +3,7 @@
    | Windows Cache for PHP                                                                        |
    +----------------------------------------------------------------------------------------------+
    | Copyright (c) 2009, Microsoft Corporation. All rights reserved.                              |
+   | Copyright (c) 2018-2026, Datasteam Technologies. All rights reserved.                        |
    |                                                                                              |
    | Redistribution and use in source and binary forms, with or without modification, are         |
    | permitted provided that the following conditions are met:                                    |
@@ -29,6 +30,7 @@
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
+   | Modified: Periklis Koutsogiannis <pkoutsogiannis@datasteam.com>                              |
    +----------------------------------------------------------------------------------------------+
 */
 
@@ -361,12 +363,12 @@ void lock_lock(lock_context * plock)
         last_owner = *plock->last_owner;
     }
 
+    /* The mutex is ours all the same: record it as for WAIT_OBJECT_0 below, so that lock_unlock() finds it locked */
     if (ret == WAIT_ABANDONED)
     {
         error_setlasterror();
         dprintcritical("lock_lock: acquired abandoned mutex %s (last owner pid %u). Something bad happend in another process!",
                         plock->nameprefix, last_owner);
-        goto Finished;
     }
 
     if (ret == WAIT_FAILED)

@@ -3,6 +3,7 @@
    | Windows Cache for PHP                                                                        |
    +----------------------------------------------------------------------------------------------+
    | Copyright (c) 2009, Microsoft Corporation. All rights reserved.                              |
+   | Copyright (c) 2018-2026, Datasteam Technologies. All rights reserved.                        |
    |                                                                                              |
    | Redistribution and use in source and binary forms, with or without modification, are         |
    | permitted provided that the following conditions are met:                                    |
@@ -29,6 +30,7 @@
    +----------------------------------------------------------------------------------------------+
    | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
    | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
+   | Modified: Periklis Koutsogiannis <pkoutsogiannis@datasteam.com>                              |
    +----------------------------------------------------------------------------------------------+
 */
 
@@ -76,13 +78,6 @@ static unsigned int getppid()
     }
 
     pid = GetCurrentProcessId();
-
-    /* If localheap setting is set, set ppid as pid */
-    if(UCG(localheap) != 0)
-    {
-        UCG(parentpid) = pid;
-        goto Finished;
-    }
 
     /* Use CRC of user provided apppoolid as ppid if available */
     poolpid = utils_apoolpid();
