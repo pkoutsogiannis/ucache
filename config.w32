@@ -1,0 +1,66 @@
+/*
+   +----------------------------------------------------------------------------------------------+
+   | Windows Cache for PHP v2                                                                     |
+   +----------------------------------------------------------------------------------------------+
+   | Copyright (c) 2009, Microsoft Corporation. All rights reserved.                              |
+   |                                                                                              |
+   | Redistribution and use in source and binary forms, with or without modification, are         |
+   | permitted provided that the following conditions are met:                                    |
+   | - Redistributions of source code must retain the above copyright notice, this list of        |
+   | conditions and the following disclaimer.                                                     |
+   | - Redistributions in binary form must reproduce the above copyright notice, this list of     |
+   | conditions and the following disclaimer in the documentation and/or other materials provided |
+   | with the distribution.                                                                       |
+   | - Neither the name of the Microsoft Corporation nor the names of its contributors may be     |
+   | used to endorse or promote products derived from this software without specific prior written|
+   | permission.                                                                                  |
+   |                                                                                              |
+   | THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS  |
+   | OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF              |
+   | MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE   |
+   | COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,    |
+   | EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE|
+   | GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED   |
+   | AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING    |
+   | NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED |
+   | OF THE POSSIBILITY OF SUCH DAMAGE.                                                           |
+   +----------------------------------------------------------------------------------------------+
+   | Module: config.w32                                                                           |
+   +----------------------------------------------------------------------------------------------+
+   | Author: Kanwaljeet Singla <ksingla@microsoft.com>                                            |
+   | Updated: Eric Stenson <ericsten@microsoft.com>                                               |
+   +----------------------------------------------------------------------------------------------+
+*/
+
+ARG_ENABLE("ucache", "ucache shared-memory user cache", "no");
+
+if (PHP_UCACHE != "no") {
+    if (PHP_ZTS != "no") {
+        WARNING("ucache module requires --disable-zts build of PHP on windows");
+    } else {
+        EXTENSION('ucache', "php_ucache.c ucache_utils.c ucache_error.c         \
+                             ucache_debug.c ucache_lock.c ucache_filemap.c      \
+                             ucache_alloc.c ucache_zvcache.c",
+                             true,
+                             "/DZEND_ENABLE_STATIC_TSRMLS_CACHE=1");
+
+        AC_DEFINE('HAVE_UCACHE', 1);
+
+        ADD_FLAG('LDFLAGS_UCACHE', '/NXCOMPAT');
+        if (!X64) {
+            ADD_FLAG('LDFLAGS_UCACHE', '/SAFESEH');
+        }
+
+        ADD_FLAG('CFLAGS_UCACHE', '/GS');
+        ADD_FLAG('CFLAGS_UCACHE', '/I' + configure_module_dirname + ' ');
+
+        if (PHP_DEBUG == "yes") {
+            ADD_FLAG('LDFLAGS_UCACHE', '/debug /debugtype:cv,fixup');
+            ADD_FLAG('CFLAGS_UCACHE', '/D UCACHE_DEBUG');
+            ADD_FLAG('CFLAGS_UCACHE', '/Zi');
+            ADD_FLAG('CFLAGS_UCACHE', '/WX');
+        }
+
+        CHECK_LIB("Kernel32.lib", "ucache", PHP_UCACHE);
+    }
+}

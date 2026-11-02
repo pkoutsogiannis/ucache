@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="UserMacros">
+    <PhpSdkRoot>D:\Dev\php-devel\php-devel-pack-7.2.34-nts-Win32-VC15-x64\include</PhpSdkRoot>
+    <PhpLibName>php7.lib</PhpLibName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <Link>
+      <AdditionalLibraryDirectories>D:\Dev\php-devel\php-devel-pack-7.2.34-nts-Win32-VC15-x64\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>
