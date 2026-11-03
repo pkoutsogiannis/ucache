@@ -60,6 +60,7 @@ ZEND_BEGIN_MODULE_GLOBALS(ucache)
     zend_bool                ucenabled;      // User cache enabled or disabled
     zend_long                ucachesize;     // User cache size in MBs (ucache_modify_size, clamped to 5..930 by MINIT)
     unsigned int             bucketbytes;    // Bytes per hash bucket of a cache this process creates (ucache.bucketbytes, read by MINIT)
+    unsigned int             lockedcopy;     // Largest entry, in bytes, whose value this process copies under the cache lock (ucache.lockedcopy, read by MINIT)
     unsigned int             debuglevel;     // Debug dump level (0/101/201/301/401/501)
     char*                    namesalt;       // Salt to use in all the names, NULL when not set or empty
     char*                    prefix;         // Prefix of the PHP function names, in place of "ucache_"

@@ -38,7 +38,7 @@
 #define _PRECOMP_H_
 
 #define PHP_UCACHE_EXTNAME   "ucache"
-#define PHP_UCACHE_VERSION    "1.1.0"
+#define PHP_UCACHE_VERSION    "1.1.1"
 #define PHP_UCACHE_VERSION_LEN (sizeof(PHP_UCACHE_VERSION)-1)
 
 // comment following line for release builds

@@ -113,8 +113,8 @@ $settings_to_hide = ['ucache.debuglevel'];
 
 // The groups of the Cache settings card, each in this order; a setting that none lists goes last in the first one
 $setting_groups = [
-    'Cache' => ['ucache.enabled', 'ucache.enablecli', 'ucache.size', 'ucache.bucketbytes', 'ucache.prefix', 'ucache.apppoolid', 'ucache.namesalt',
-                'ucache.filemapdir'],
+    'Cache' => ['ucache.enabled', 'ucache.enablecli', 'ucache.size', 'ucache.bucketbytes', 'ucache.lockedcopy', 'ucache.prefix', 'ucache.apppoolid',
+                'ucache.namesalt', 'ucache.filemapdir'],
     'Scavenger' => ['ucache.gc.interval', 'ucache.gc.step', 'ucache.gc.ttl', 'ucache.gc.threshold', 'ucache.gc.evict'],
 ];
 
@@ -386,6 +386,11 @@ function setting_note($name, $value) {
             // The extension takes 64 to 65536
             $bytes = min(max($number, 64), 65536);
             return 'one hash bucket per ' . format_number($bytes) . ' bytes' . ($bytes != $number ? ($bytes > $number ? ' (the minimum)' : ' (the maximum)') : '');
+        case 'ucache.lockedcopy':
+            // The extension takes 0 to 65536
+            $bytes = min($number, 65536);
+            return ($bytes > 0 ? 'values whose entry takes up to ' . format_number($bytes) . ' bytes are copied under the cache lock'
+                : 'every value is copied before the cache lock is taken') . ($bytes != $number ? ' (the maximum)' : '');
         case 'ucache.gc.interval':
             return $number > 0 ? 'a step every ' . format_duration($number) . ', at the end of a request' : 'off';
         case 'ucache.gc.step':

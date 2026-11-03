@@ -42,18 +42,24 @@
 #define ZVCACHE_BUCKET_BYTES_MINIMUM  64
 #define ZVCACHE_BUCKET_BYTES_MAXIMUM  65536
 
+// ucache.lockedcopy: a set or add copies a value whose entry takes at most this many bytes under the cache lock (see
+// zvcache_set), the default and the maximum; 0 copies every value before the lock is taken
+#define ZVCACHE_LOCKED_COPY_DEFAULT   2048
+#define ZVCACHE_LOCKED_COPY_MAXIMUM   65536
+
 typedef struct _zvcache_hashtable_pool_tracker zvcache_hashtable_pool_tracker;
 struct _zvcache_hashtable_pool_tracker {
     size_t        val;                   // Hashtable *ht; Offset
-    size_t        hoff;                  // Memory pool offset
+    size_t        hoff;                  // Top-level array: the memory pool of the parts that did not fit in the block of its entry, 0 if none (see copyin_malloc); 0 in a nested one
 };
 
-// An entry.  Its key, with the NUL, follows the structure in the same block (ZVCACHE_KEY in
-// ucache_zvcache.c).  Times are GetTickCount64() values, which do not wrap.
+// An entry: one block of the allocator holds this structure, its key with the NUL (ZVCACHE_KEY in
+// ucache_zvcache.c), its top-level zval and every part of its value (see create_zvcache_data).  Times
+// are GetTickCount64() values, which do not wrap.
 typedef struct zvcache_value zvcache_value;
 struct zvcache_value {
     size_t            zvalue;            // Offset of zval value stored
-    size_t            sizeb;             // Memory allocated for zvalue in bytes
+    size_t            sizeb;             // Bytes of the zval and of the parts of the value, as copied (value_size of ucache_info())
 
     ULONGLONG         add_ticks;         // GetTickCount64() when the entry was created
     ULONGLONG         use_ticks;         // GetTickCount64() when the entry was last used
@@ -105,6 +111,9 @@ typedef struct zvcopy_prepared zvcopy_prepared;
 // The C stack that the walk of a top-level copy may use (see ucache_stack_exhausted in ucache_zvcache.c)
 typedef struct zvcopy_stack zvcopy_stack;
 
+// The block of the entry that phase 2 of a copy-in fills (see create_zvcache_data in ucache_zvcache.c)
+typedef struct zvcopy_block zvcopy_block;
+
 typedef struct zvcopy_context zvcopy_context;
 struct zvcopy_context {
     unsigned int                    oomcode;           // Out of memory error code to use
@@ -119,14 +128,11 @@ struct zvcopy_context {
     // In the private copies of incopy and outcopy that create_zvcache_data() and zvcache_get() use
     zvcopy_stack*                   pstack;            // The C stack of the copy
 
-    // Copy-in only, in the private copy of incopy that create_zvcache_data() uses. The last four
-    // record what the copy has allocated so far, so that a fatal error (zend_bailout) during the
-    // copy can give it back (copyin_rollback).
+    // Copy-in only, in the private copy of incopy that create_zvcache_data() uses. The block records
+    // what the copy has allocated so far, so that a fatal error (zend_bailout) during the copy can
+    // give it back (copyin_rollback).
     zvcopy_prepared*                pprepared;         // Serialized objects and reference values of the value
-    zvcache_value*                  pnewvalue;         // The entry being created
-    zval*                           pnewzval;          // Its top-level zval
-    zvcache_hashtable_pool_tracker* ptracker;          // Pool tracker of a top-level array
-    size_t                          mpool;             // Memory pool of a top-level array (offset)
+    zvcopy_block*                   pblock;            // The block of the entry, where the parts of the value go (see copyin_malloc)
 };
 
 typedef struct zvcache_context zvcache_context;
@@ -135,7 +141,7 @@ struct zvcache_context {
     unsigned short    cachekey;          // unique cache key used in names
     HANDLE            hinitdone;         // init mutex (ZVCACHE_INIT), owned while the process creates or opens the cache
 
-    zvcopy_context*   incopy;            // zvcopy context to use for non-array copyin
+    zvcopy_context*   incopy;            // zvcopy context of the copy-in, which create_zvcache_data() copies (the parts go in the block of the entry, see copyin_malloc)
     zvcopy_context*   outcopy;           // zvcopy context to use for all copyout
 
     char*             zvmemaddr;         // base addr of memory segment
@@ -145,6 +151,7 @@ struct zvcache_context {
     alloc_context*    zvalloc;           // alloc context for zvcache segment
     size_t            freelist;          // Entries unlinked under the lock, freed once it is released (chained by next_value)
     unsigned int      freecount;         // How many entries freelist holds
+    unsigned char     freenow;           // 1 while zvcache_set() holds the allocator's lock under the cache lock (store_locked): an entry of one block is freed when it is removed
     size_t            maxfree;           // The most the cache holds, its free memory when it is empty (alloc_capacity); 0 if not known
     unsigned int      bucketbytes;       // Bytes of the segment per hash bucket in the table the cache has, whatever this process's ucache.bucketbytes
     lock_undo         undo;              // The undo log of the cache, in its header (see zvcache_lock)

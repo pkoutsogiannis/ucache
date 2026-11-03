@@ -64,25 +64,44 @@
 C_ASSERT(SIZEOF_SIZE_T <= SIZEOF_ZEND_LONG);
 
 // By default, one hash bucket per this many bytes of the cache (ucache.bucketbytes; the largest prime up
-// to that number of buckets).  An entry takes 168 bytes or more (208 with a key of 40 characters and an
-// integer value), so the chains of a cache full of small entries hold 2 to 3 entries on average, and the
+// to that number of buckets).  An entry takes 128 bytes or more (168 with a key of 40 characters and an
+// integer value), so the chains of a cache full of small entries hold 3 to 4 entries on average, and the
 // buckets (8 bytes each) take about 1.6% of the cache.  WinCache had one bucket per 32 to 64 KB: 197 for
 // 8 MB, whose chains could hold hundreds of small entries each.  The work that is counted in buckets (the
 // batches of the sweep of the cleared entries, the reads of the clock in a scavenger step) is counted in
 // buckets of this size, and scaled to the buckets of the cache (see buckets_scaled)
 #define ZVCACHE_BUCKET_BYTES         ZVCACHE_BUCKET_BYTES_DEFAULT
 
-// The bytes above: a zvcache_value of 64 bytes, its key and the top-level zval, each in a block of
-// the allocator (x64; config.w32 also allows an x86 build, where the structure is smaller)
+// The bytes above: a zvcache_value of 64 bytes, its key and the top-level zval, in one block of the
+// allocator with the parts of the value (x64; config.w32 also allows an x86 build, where the structure
+// is smaller)
 #ifdef _WIN64
 C_ASSERT(sizeof(zvcache_value) == 64);
 #endif
+
+// zvcache_set() copies a value whose entry takes at most ucache.lockedcopy bytes (UCG(lockedcopy), set by
+// MINIT; copyin_minimum_size) under the cache lock, with its insert (see store_locked).  With the default,
+// 2048 (ZVCACHE_LOCKED_COPY_DEFAULT), a set holds the lock about 0.7 microseconds for an integer (the
+// allocator's lock is taken in it), 1 for a row of 14 strings, 2.5 at most (a hash of interned strings,
+// which go through the translation table; PHP 7.2). At 4096 such a hash held it 4.7, and the copies of
+// the writers no longer ran side by side. A larger value is copied before the lock is taken, so that no
+// process waits for its copy. With 0, every value is: a process that only read beside 4 writers of small
+// values at full speed waited 36 microseconds at the 99th percentile instead of 63, while they stored about
+// as much, and writers alone stored 17 to 27% less (1, 4 and 6 writers; as much with 2; PHP 7.2)
 
 // Sizes of the blocks of the allocator, which rounds every request up to this (see allocate_memory, alloc_ommalloc)
 #ifdef _WIN64
 # define UCACHE_BLOCK_SIZE(size)     ALIGNQWORD(size)
 #else
 # define UCACHE_BLOCK_SIZE(size)     ALIGNDWORD(size)
+#endif
+
+// ALLOC_SMALLEST_REQUEST (see ucache_alloc.h) is the block of the smallest entry: the empty key, which the array
+// forms of ucache_set() and ucache_add() store (on x64 a key of up to 7 characters takes the same block), and a
+// value that its zval holds. An entry stored in pieces also asks for the smaller blocks of a memory pool (see
+// copyin_malloc)
+#ifdef _WIN64
+C_ASSERT(UCACHE_BLOCK_SIZE(sizeof(zvcache_value) + 1) + UCACHE_BLOCK_SIZE(sizeof(zval)) == ALLOC_SMALLEST_REQUEST);
 #endif
 
 #ifndef UCACHE_MAX_ZVKEY_LENGTH
@@ -122,6 +141,7 @@ static void   copyin_free_serialized(zvcopy_prepared* pprep);
 static void   copyin_release(zvcopy_prepared* pprep);
 static size_t copyin_minimum_size(zvcopy_prepared* pprep, const char* key);
 static void   copyin_rollback(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* pxlate);
+static void*  copyin_malloc(zvcopy_context* pcopy, size_t size);
 static int    copyin_memory(zvcopy_context* pcopy, HashTable* phtable, void* src, size_t size, void** ppdest, zend_uchar* pallocated);
 static int    copyin_zval(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* phtable, zval* poriginal, zval** ppcopied);
 static int    copyin_hashtable(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* phtable, HashTable* poriginal, HashTable** ppcopied);
@@ -165,7 +185,7 @@ C_ASSERT(FIELD_OFFSET(zvcache_header, undocount) / 8 == FIELD_OFFSET(zvcache_hea
 static int            zvcache_lock(zvcache_context* pcache);
 static zvcache_value* find_zvcache_entry(zvcache_context* pcache, const char* key, unsigned int index, unsigned char prune);
 static int            create_zvcache_data(zvcache_context* pcache, const char* key, zvcopy_prepared* pprep, unsigned int ttl, zvcache_value** ppvalue);
-static void           destroy_cached_zval(zvcache_context* pcache, zval* pzval);
+static size_t         entry_pool(zvcache_context* pcache, zvcache_value* pvalue);
 static void           destroy_zvcache_data(zvcache_context* pcache, zvcache_value* pvalue);
 static void           add_zvcache_entry(zvcache_context* pcache, unsigned int index, zvcache_value* pvalue);
 static void           remove_zvcache_entry(zvcache_context* pcache, unsigned int index, zvcache_value* pvalue);
@@ -207,11 +227,22 @@ struct zvcopy_prepared
                                          // without IS_INDIRECT slots, held (see copyin_prepare_walk); before PHP 8.1 only
     zvcopy_stack      stack;             // The C stack of the walk
 
-    // What phase 2 will allocate in the memory pool of a top-level array (see copyin_count_string)
+    // What phase 2 will take for the parts of a top-level array, after its tracker (see copyin_count_string)
     size_t            poolsize;          // Bytes, counted by the walk, and the serializations of the objects
     unsigned char     counted;           // 1 while poolsize is what phase 2 takes, 0 once the walk met a table it cannot count
     HashTable         strings;           // Address -> NULL, for each string counted that phase 2 copies once wherever it occurs
     const void*       seen[64];          // The last of those strings, by bits of their address, in front of strings
+};
+
+// The block of the entry that phase 2 fills (see create_zvcache_data), on its C stack: the zvcache_value, the
+// key, the top-level zval, then the parts of the value in the order of the copy (see copyin_malloc)
+struct zvcopy_block
+{
+    char*             pstart;            // The block, NULL until it is allocated
+    char*             pnext;             // Where the next part of the value goes
+    char*             pend;              // The end of the block
+    size_t            mpool;             // Memory pool of the parts that did not fit in the block (offset), 0 if none
+    unsigned char     pieces;            // 1 if the block ends with the tracker of a top-level array, whose parts go in the pool
 };
 
 // PHP's serializer state, as the code that called ucache left it (see serializer_isolate)
@@ -429,9 +460,10 @@ static void copyin_object_dtor(zval* pzval) {
  * memory.  If a fatal error interrupted it, the half-built entry would be lost for every process
  * of the pool: nothing references it, so neither ucache_clear() nor the scavenger can free it.
  * So phase 2 runs no user code and allocates no request memory: the objects are serialized here,
- * and its translation table is persistent memory.  The zend_try around phase 2 is only a safety
- * net: the CVE-patched PHP 7.2 that runs in production ends the process with _exit(1) when
- * memory_limit is reached, which no zend_try can intercept.
+ * and its translation table is persistent memory.  That also lets a small value's phase 2 run
+ * under the cache lock (see store_locked).  The zend_try around phase 2 is only a safety net,
+ * which also releases the locks: the CVE-patched PHP 7.2 that runs in production ends the
+ * process with _exit(1) when memory_limit is reached, which no zend_try can intercept.
  *
  * Serializing runs user code (__sleep(), __serialize(), Serializable::serialize()), which can
  * change or free the parts of the value that are still to be copied.  So the walk first takes a
@@ -545,7 +577,7 @@ static int copyin_prepare(zvcopy_prepared* pprep, zval* pzval) {
         zend_bailout();
     }
 
-    // The objects of an array go into its pool, each once (see copyin_zval)
+    // The objects of an array go into the block of its entry, each once (see copyin_zval)
     if (SUCCEEDED(result) && Z_TYPE(pprep->value) == IS_ARRAY) {
         ZEND_HASH_FOREACH_VAL(&pprep->objects, pentry) {
             if (Z_TYPE_P(pentry) == IS_STRING && Z_STRLEN_P(pentry) != 0) {
@@ -653,10 +685,10 @@ static size_t copyin_data_size(HashTable* ptable, uint32_t* pmask) {
 }
 
 /**
- * The walk of phase 1 counts what phase 2 will allocate in the memory pool of a top-level array
- * (pprep->poolsize), so that the pool takes one block of that size (see alloc_create_mpool) instead of
- * chunks of fixed sizes, which small tables left mostly empty: each table once (held has each one
- * once), its data part, a tracker for each place of an array, each reference once, and the strings,
+ * The walk of phase 1 counts what phase 2 will take for the parts of a top-level array
+ * (pprep->poolsize), so that the entry takes one block of that size with them (see create_zvcache_data)
+ * instead of chunks of fixed sizes, which small tables left mostly empty: each table once (held has each
+ * one once), its data part, a tracker for each place of an array, each reference once, and the strings,
  * here.  Phase 2 copies a string with one reference once for its place, which it has only one of, and
  * any other one (interned, or held by more than one place) once, wherever it occurs (see
  * copyin_string): such strings are counted once, by their address, in a table of persistent memory
@@ -940,14 +972,15 @@ static void copyin_release(zvcopy_prepared* pprep) {
 }
 
 /**
- * Phase 1 is done (see copyin_prepare): the shared memory that phase 2 will allocate for the value,
- * without the allocator's overheads, so a lower bound of what the entry takes; 0 if the walk could not
- * count it (see copyin_count_string).  The entry and its key, the top-level zval, and a string, the
- * serialization of an object, or the tracker of an array and what its pool holds.
+ * Phase 1 is done (see copyin_prepare): the size of the block that phase 2 will allocate for the entry,
+ * every part rounded up as the allocator rounds a block (see create_zvcache_data); 0 if the walk could
+ * not count the value (see copyin_count_string).  The entry and its key, the top-level zval, and a string,
+ * the serialization of an object, or the tracker of an array and its parts.  Only the header of the block
+ * is left out: a value of this size fits in the empty cache if this is at most its free memory.
  *
  * @param pprep  the state of phase 1, once copyin_prepare() has succeeded
  * @param key    the key of the entry
- * @return the lower bound in bytes, 0 for an array that the walk could not count
+ * @return the size in bytes, 0 for an array that the walk could not count
  */
 static size_t copyin_minimum_size(zvcopy_prepared* pprep, const char* key) {
     size_t size = UCACHE_BLOCK_SIZE(sizeof(zvcache_value) + strlen(key) + 1) + UCACHE_BLOCK_SIZE(sizeof(zval));
@@ -986,37 +1019,28 @@ static size_t copyin_minimum_size(zvcopy_prepared* pprep, const char* key) {
 /**
  * A fatal error (zend_bailout) interrupted phase 2.  None is expected (phase 2 runs no user code
  * and allocates no request memory), this is a safety net: give back what the new entry took, then
- * the caller re-raises the error.  Every nested part of a top-level array lives in its memory
- * pool, so that is the pool, its tracker, the top-level zval and the zvcache_value.  A top-level
- * string or serialized object is the last thing its copy allocates, nothing can fail after it.
- * No lock is held here.
+ * the caller re-raises the error.  That is the block of the entry and, for an array whose parts did
+ * not all fit in it, their memory pool (see copyin_malloc).  The frees take the allocator's lock, or
+ * use the hold of the caller (see store_locked).
  *
  * @param pcache  the cache
- * @param pcopy   the private copy context of create_zvcache_data(), which records what the entry took (mpool,
- *                ptracker, pnewzval, pnewvalue); those fields are reset
+ * @param pcopy   the private copy context of create_zvcache_data(), whose block records what the entry took
+ *                (pstart, mpool); those fields are reset
  * @param pxlate  the translation table of phase 2 (persistent memory), destroyed
  */
 static void copyin_rollback(zvcache_context* pcache, zvcopy_context* pcopy, HashTable* pxlate) {
+    zvcopy_block* pblock = pcopy->pblock;
+
     dprintimportant("copyin_rollback: a fatal error interrupted the copy-in, freeing the new entry");
 
-    if (pcopy->mpool != 0) {
-        alloc_free_mpool(pcache->zvalloc, pcopy->mpool);
-        pcopy->mpool = 0;
+    if (pblock->mpool != 0) {
+        alloc_free_mpool(pcache->zvalloc, pblock->mpool);
+        pblock->mpool = 0;
     }
 
-    if (pcopy->ptracker != NULL) {
-        ZFREE(pcopy, pcopy->ptracker);
-        pcopy->ptracker = NULL;
-    }
-
-    if (pcopy->pnewzval != NULL) {
-        ZFREE(pcopy, pcopy->pnewzval);
-        pcopy->pnewzval = NULL;
-    }
-
-    if (pcopy->pnewvalue != NULL) {
-        ZFREE(pcopy, pcopy->pnewvalue);
-        pcopy->pnewvalue = NULL;
+    if (pblock->pstart != NULL) {
+        alloc_sfree(pcache->zvalloc, pblock->pstart);
+        pblock->pstart = NULL;
     }
 
     // Persistent memory
@@ -1024,11 +1048,58 @@ static void copyin_rollback(zvcache_context* pcache, zvcopy_context* pcopy, Hash
 }
 
 /**
- * Copies size bytes from src into memory allocated with pcopy->fnmalloc, and adds size to pcopy->allocsize.
+ * Copy-in, phase 2: memory for a part of the value, taken in the order of the copy from the block of the
+ * entry (see create_zvcache_data), each part rounded up as phase 1 counted it (see copyin_count_string).
+ * Once the block is used up, from a memory pool of the entry, created then, whose chunks come as the copy
+ * needs them (alloc_ommalloc): the parts of an array that phase 1 could not count (before PHP 8.1, see
+ * copyin_prepare_walk), or that no free block held whole (see create_zvcache_data), or of a count that fell
+ * short, which no value is known to do.  Nothing is freed part by part: the block and the pool are freed
+ * whole (see destroy_zvcache_data).
+ *
+ * @param pcopy  the copy context of phase 2 (pblock set)
+ * @param size   the bytes wanted, not 0
+ * @return the memory (an address in this process); NULL if the pool or a chunk of it could not be allocated
+ */
+static void* copyin_malloc(zvcopy_context* pcopy, size_t size) {
+    zvcopy_block* pblock = pcopy->pblock;
+    size_t        rsize = UCACHE_BLOCK_SIZE(size);
+    char*         paddr = NULL;
+
+    _ASSERT(pblock != NULL && pblock->pstart != NULL);
+
+    if ((size_t)(pblock->pend - pblock->pnext) >= rsize) {
+        paddr = pblock->pnext;
+        pblock->pnext += rsize;
+        return paddr;
+    }
+
+    if (pblock->mpool == 0) {
+        // Only the tracker of a top-level array can record a pool (see create_zvcache_data): the block of a string or
+        // an object holds it whole, by construction
+        if (Z_TYPE(pcopy->pprepared->value) != IS_ARRAY) {
+            _ASSERT(FALSE);
+            return NULL;
+        }
+
+        // A block that phase 1 counted holds the whole value (see copyin_minimum_size)
+        _ASSERT(pblock->pieces);
+        dprintimportant("copyin_malloc: %Iu bytes do not fit in the %Iu left in the block of the entry", rsize, (size_t)(pblock->pend - pblock->pnext));
+
+        if (FAILED(alloc_create_mpool(pcopy->palloc, &pblock->mpool))) {
+            pblock->mpool = 0;
+            return NULL;
+        }
+    }
+
+    return alloc_ommalloc(pcopy->palloc, pblock->mpool, size);
+}
+
+/**
+ * Copies size bytes from src into memory taken with copyin_malloc(), and adds size to pcopy->allocsize.
  * With a translation table, a src copied before is not copied again: its copy is returned; a new copy is
  * recorded in the table.
  *
- * @param pcopy       the copy context (allocator, memory pool, oomcode)
+ * @param pcopy       the copy context of phase 2 (block of the entry, oomcode)
  * @param phtable     the translation table, may be NULL (no lookup, nothing recorded)
  * @param src         what to copy
  * @param size        its size in bytes
@@ -1056,7 +1127,7 @@ static int copyin_memory(zvcopy_context* pcopy, HashTable* phtable, void* src, s
     }
 
     // Allocate cache memory & copy the original into the cache.
-    pdest = ZMALLOC(pcopy, size);
+    pdest = copyin_malloc(pcopy, size);
     if (pdest == NULL) {
         result = pcopy->oomcode;
         goto Finished;
@@ -1100,12 +1171,12 @@ static zend_always_inline HashTable* copyin_flattened(zvcopy_context* pcopy, Has
 /**
  * Copy-in, phase 2 (see copyin_prepare): copies *poriginal into the cache zval *ppcopied, which
  * the caller allocated, and turns its pointers into cache offsets.  phtable is the translation
- * table of the top-level copy.  The top-level value is copied with pcopy->hoffset 0; a top-level
- * array gets a memory pool, and everything nested in it is copied into that pool.
+ * table of the top-level copy.  Every part of the value, at any depth, is taken from the block of
+ * the entry (see copyin_malloc).
  *
  * @param pcache     the cache
- * @param pcopy      the copy context: create_zvcache_data()'s private copy of pcache->incopy for the
- *                   top-level value (hoffset 0), the one of the memory pool for what an array holds
+ * @param pcopy      the copy context: create_zvcache_data()'s private copy of pcache->incopy, with the
+ *                   block of the entry
  * @param phtable    the translation table of the top-level copy (persistent memory)
  * @param poriginal  the zval to copy, a part of the value that phase 1 held
  * @param ppcopied   in/out: *ppcopied is the cache zval that receives the copy, which may be poriginal itself
@@ -1119,8 +1190,6 @@ static int copyin_zval(zvcache_context* pcache, zvcopy_context* pcopy, HashTable
     zval*                           pnewzv = NULL;
     zend_uchar                      allocated = 0;
     HashTable*                      phashtable = NULL;
-    zvcopy_context                  poolcopy;
-    size_t                          offset = 0;
     zend_string*                    pzstr = NULL;
     zvcache_hashtable_pool_tracker* table_tracker = NULL;
     zend_reference*                 pzref = NULL;
@@ -1166,59 +1235,17 @@ static int copyin_zval(zvcache_context* pcache, zvcopy_context* pcopy, HashTable
             break;
 
         case IS_ARRAY:
-            // Because we need to remember the offset of the memory pool, all
-            // HashTables that are copied into shared memory will use the *ptr
-            // field, instead of the *arr field.
-            // The *ptr will point at a zvcache_hashtable_pool_tracker structure.
-
-            table_tracker = (zvcache_hashtable_pool_tracker*)ZMALLOC(pcopy, sizeof(zvcache_hashtable_pool_tracker));
+            // A cached array zval points at a tracker (*ptr), which points at the table; the tracker
+            // of the top-level array also records the memory pool of the parts that did not fit in
+            // the block of the entry, if any (create_zvcache_data sets it once the copy is done)
+            table_tracker = (zvcache_hashtable_pool_tracker*)copyin_malloc(pcopy, sizeof(zvcache_hashtable_pool_tracker));
             if (table_tracker == NULL) {
                 result = pcopy->oomcode;
                 goto Finished;
             }
             pcopy->allocsize += sizeof(zvcache_hashtable_pool_tracker);
 
-            // If pcopy is not set to use memory pool, use a different copy context
-            if (pcopy->hoffset == 0) {
-                // Top-level array: record its tracker and pool for copyin_rollback()
-                pcopy->ptracker = table_tracker;
-
-                // A pool of the size the walk of phase 1 counted, in one block (see copyin_count_string)
-                result = alloc_create_mpool(pcache->zvalloc, &offset, pcopy->pprepared->counted ? pcopy->pprepared->poolsize : 0);
-                if (FAILED(result)) {
-                    // Its FATAL_OUT_OF_MEMORY is the code of request memory: say the cache is full,
-                    // so that zvcache_set() makes room (reclaim_entries)
-                    result = pcopy->oomcode;
-                    goto Finished;
-                }
-
-                pcopy->mpool = offset;
-
-                // On the C stack: the copy must not allocate request memory
-                poolcopy = *pcopy;
-                poolcopy.oomcode = FATAL_OUT_OF_SMEMORY;
-                poolcopy.palloc = pcache->zvalloc;
-                poolcopy.pbaseadr = pcache->zvmemaddr;
-                poolcopy.hoffset = offset;
-                poolcopy.allocsize = 0;
-                poolcopy.fnmalloc = alloc_ommalloc;
-                poolcopy.fnfree = alloc_omfree;
-                poolcopy.pnewvalue = NULL;
-                poolcopy.pnewzval = NULL;
-                poolcopy.ptracker = NULL;
-                poolcopy.mpool = 0;
-
-                result = copyin_hashtable(pcache, &poolcopy, phtable, copyin_flattened(pcopy, Z_ARR_P(poriginal)), &phashtable);
-                pcopy->allocsize += poolcopy.allocsize;
-
-                // Nothing is allocated from the pool any more: what its chunks did not use goes back
-                if (SUCCEEDED(result)) {
-                    alloc_trim_mpool(pcache->zvalloc, offset);
-                }
-            } else {
-                result = copyin_hashtable(pcache, pcopy, phtable, copyin_flattened(pcopy, Z_ARR_P(poriginal)), &phashtable);
-            }
-
+            result = copyin_hashtable(pcache, pcopy, phtable, copyin_flattened(pcopy, Z_ARR_P(poriginal)), &phashtable);
             if (FAILED(result)) {
                 goto Finished;
             }
@@ -1226,13 +1253,11 @@ static int copyin_zval(zvcache_context* pcache, zvcopy_context* pcopy, HashTable
             // fix up the flags on the copied in zval (immutable arrays have no IS_TYPE_REFCOUNTED)
             Z_TYPE_INFO_P(pnewzv) = IS_ARRAY_EX;
 
-            // Keep offset so that freeing shared memory is easy
-            table_tracker->hoff = offset;
+            table_tracker->hoff = 0;
             table_tracker->val = ZOFFSET(pcopy, phashtable);
             phashtable = NULL;
             Z_PTR_P(pnewzv) = (void*)ZOFFSET(pcopy, table_tracker);
             table_tracker = NULL;
-            offset = 0;
             break;
 
         case IS_REFERENCE:
@@ -1284,26 +1309,9 @@ static int copyin_zval(zvcache_context* pcache, zvcopy_context* pcopy, HashTable
 
 Finished:
 
+    // What the copy took stays in the block of the entry, or its pool, which create_zvcache_data() frees whole
     if (FAILED(result)) {
         dprintimportant("failure %d in copyin_zval", result);
-
-        if (table_tracker != NULL) {
-            if (pcopy->ptracker == table_tracker) {
-                pcopy->ptracker = NULL;
-            }
-
-            ZFREE(pcopy, table_tracker);
-            table_tracker = NULL;
-        }
-
-        if (offset != 0) {
-            if (pcopy->mpool == offset) {
-                pcopy->mpool = 0;
-            }
-
-            alloc_free_mpool(pcache->zvalloc, offset);
-            offset = 0;
-        }
     }
 
     dprintverbose("end copyin_zval");
@@ -1570,7 +1578,7 @@ Finished:
  * the segment; copyout_hashtable() sets its header up again.
  *
  * @param pcache     the cache
- * @param pcopy      the copy context (the memory pool of the top-level array)
+ * @param pcopy      the copy context of phase 2 (the block of the entry)
  * @param phtable    the translation table of the top-level copy
  * @param poriginal  the table to copy (phase 1's copy where it has one, see copyin_flattened)
  * @param ppcopied   out: the copy of the header (an address in this process), or the earlier copy of the same
@@ -1657,7 +1665,7 @@ static int copyin_hashtable(zvcache_context* pcache, zvcopy_context* pcopy, Hash
         if (UCACHE_HT_SHOULD_COMPACT(poriginal)) {
             // Sparsely populated: shrink the hash part while copying in (see ucache_compat.h)
             pnew_table->nTableMask = mask;
-            ptemp = ZMALLOC(pcopy, temp_size);
+            ptemp = copyin_malloc(pcopy, temp_size);
             if (!ptemp) {
                 result = pcopy->oomcode;
                 goto Finished;
@@ -2185,7 +2193,8 @@ static int zvcache_lock(zvcache_context* pcache) {
  * Call this method under lock.  Returns the entry of key that has not expired and was not cleared,
  * NULL if there is none.  With prune, the expired and cleared entries it passes in the bucket, of
  * any key, are removed on the way (their memory is freed by free_pending_entries() once the lock is
- * released); ucache_info() looks up without it.
+ * released, or at once in the hold of a small write, see remove_zvcache_entry); ucache_info() looks up
+ * without it.
  *
  * @param pcache  the cache
  * @param key     the key, NUL terminated
@@ -2228,9 +2237,17 @@ static zvcache_value* find_zvcache_entry(zvcache_context* pcache, const char* ke
 }
 
 /**
- * Copy-in, phase 2: builds the new entry in shared memory from what copyin_prepare() collected.
- * Runs no user code and allocates no request memory (see copyin_prepare).  The entry is not
- * reachable by anyone before zvcache_set() adds it to the cache, so no lock is needed.
+ * Copy-in, phase 2: builds the new entry in shared memory from what copyin_prepare() collected, in one
+ * block of the allocator: the zvcache_value, the key with its NUL (ZVCACHE_KEY), the top-level zval
+ * (zvalue), then every part of the value in the order of the copy (see copyin_malloc), each rounded up
+ * to the alignment of a block.  Its size is what phase 1 counted (copyin_minimum_size), so the copy fills
+ * it exactly, and the entry is freed with one free, whatever its size.  An array that phase 1 could not
+ * count, or that takes more than ucache.lockedcopy bytes when no free block is that large (a fragmented
+ * cache), gets a block that ends with its tracker, and its parts go in a memory pool that the tracker
+ * records (hoff), in pieces that smaller free blocks hold.  Runs no user code and allocates no request
+ * memory (see copyin_prepare).  The entry is not reachable by anyone before zvcache_set() adds it to the
+ * cache, so it needs no lock, but a small value is copied under the cache lock, in the hold of the
+ * allocator's lock (see store_locked), which then releases both if a fatal error propagates from here.
  *
  * @param pcache   the cache
  * @param key      the key of the entry, NUL terminated
@@ -2244,16 +2261,19 @@ static zvcache_value* find_zvcache_entry(zvcache_context* pcache, const char* ke
  *         copyin_rollback()
  */
 static int create_zvcache_data(zvcache_context* pcache, const char* key, zvcopy_prepared* pprep, unsigned int ttl, zvcache_value** ppvalue) {
-    int                    result = NONFATAL;
-    zvcache_value*         pvalue = NULL;
-    size_t                 keylen = 0;
-    zval*                  pcopied = NULL;
-    zvcopy_context*        pcopy = NULL;
-    zvcopy_context         incopy;
-    zvcopy_stack           stack;
-    HashTable              xlate;
-    ULONGLONG              cticks = 0;
-    volatile unsigned char bailout = 0;
+    int                             result = NONFATAL;
+    zvcache_value*                  pvalue = NULL;
+    size_t                          keylen = 0;
+    size_t                          size = 0;
+    zval*                           pcopied = NULL;
+    zvcopy_context*                 pcopy = NULL;
+    zvcopy_context                  incopy;
+    zvcopy_block                    block;
+    zvcopy_stack                    stack;
+    zvcache_hashtable_pool_tracker* ptracker = NULL;
+    HashTable                       xlate;
+    ULONGLONG                       cticks = 0;
+    volatile unsigned char          bailout = 0;
 
     dprintverbose("start create_zvcache_data");
 
@@ -2265,16 +2285,14 @@ static int create_zvcache_data(zvcache_context* pcache, const char* key, zvcopy_
 
     *ppvalue = NULL;
 
-    // Private copy of the context: it records what this copy allocates (see copyin_rollback),
-    // and a nested ucache_set() must not reset and mix up allocsize
+    // Private copy of the context, with the block it fills: it records what this copy allocates
+    // (see copyin_rollback), and a nested ucache_set() must not reset and mix up allocsize
+    memset(&block, 0, sizeof(block));
     incopy = *pcache->incopy;
     pcopy = &incopy;
     pcopy->pstack = &stack;
     pcopy->pprepared = pprep;
-    pcopy->pnewvalue = NULL;
-    pcopy->pnewzval = NULL;
-    pcopy->ptracker = NULL;
-    pcopy->mpool = 0;
+    pcopy->pblock = &block;
 
     // One translation table per top-level copy, on the C stack.  Persistent memory: phase 2
     // must not allocate request memory, and a persistent table never bails out (it ends the
@@ -2288,36 +2306,45 @@ static int create_zvcache_data(zvcache_context* pcache, const char* key, zvcopy_
         goto Finished;
     }
 
-    pvalue = (zvcache_value*)ZMALLOC(pcopy, sizeof(zvcache_value) + keylen);
+    // The whole entry as phase 1 counted it. The allocator's lock is taken for it, unless the caller
+    // holds it (store_locked)
+    size = copyin_minimum_size(pprep, key);
+    if (size != 0) {
+        pvalue = (zvcache_value*)alloc_smalloc(pcache->zvalloc, size);
+    }
+
+    // An array that phase 1 could not count, or a large one that no free block holds whole: the block
+    // up to its tracker, the parts in a pool (see copyin_malloc), as 1.1.0 stored the parts of every
+    // array. A value of up to ucache.lockedcopy bytes, which zvcache_set() copies under the cache lock,
+    // is always one block: one that does not fit makes room instead (make_room)
+    if (pvalue == NULL && Z_TYPE(pprep->value) == IS_ARRAY && (size == 0 || size > UCG(lockedcopy))) {
+        size = UCACHE_BLOCK_SIZE(sizeof(zvcache_value) + keylen) + UCACHE_BLOCK_SIZE(sizeof(zval)) + UCACHE_BLOCK_SIZE(sizeof(zvcache_hashtable_pool_tracker));
+        pvalue = (zvcache_value*)alloc_smalloc(pcache->zvalloc, size);
+        block.pieces = 1;
+    }
+
     if (pvalue == NULL) {
         result = pcopy->oomcode;
         goto Finished;
     }
 
-    pcopy->pnewvalue = pvalue;
+    block.pstart = (char*)pvalue;
+    block.pend = (char*)pvalue + size;
 
     // Only set zvcache_value to 0. Set keyname after zvcache_value
     memset(pvalue, 0, sizeof(zvcache_value));
     memcpy_s(ZVCACHE_KEY(pvalue), keylen, key, keylen);
 
-    // Reset allocsize before calling copyin
-    pcopy->allocsize = 0;
-
-    // The top-level zval, allocated here so that copyin_rollback() can free it
-    pcopied = (zval*)ZMALLOC(pcopy, sizeof(zval));
-    if (pcopied == NULL) {
-        result = pcopy->oomcode;
-        goto Finished;
-    }
-
-    pcopy->pnewzval = pcopied;
-    pcopy->allocsize += sizeof(zval);
+    // The top-level zval after the key, then the parts of the value
+    pcopied = (zval*)((char*)pvalue + UCACHE_BLOCK_SIZE(sizeof(zvcache_value) + keylen));
+    block.pnext = (char*)pcopied + UCACHE_BLOCK_SIZE(sizeof(zval));
+    pcopy->allocsize = sizeof(zval);
 
     ucache_stack_start(&stack);
 
     // Safety net (see copyin_prepare): if a fatal error interrupts the copy anyway, give back
-    // what the entry took and the serializations before propagating the error.  No goto or
-    // return may leave the zend_try block.
+    // what the entry took and the serializations before propagating the error (store_locked
+    // then releases its locks).  No goto or return may leave the zend_try block.
     zend_try
     {
         result = copyin_zval(pcache, pcopy, &xlate, &pprep->value, &pcopied);
@@ -2336,6 +2363,23 @@ static int create_zvcache_data(zvcache_context* pcache, const char* key, zvcopy_
 
     if (FAILED(result)) {
         goto Finished;
+    }
+
+    // The parts that did not fit in the block: their pool goes with the entry (see destroy_zvcache_data),
+    // and what its chunks did not use goes back
+    if (block.mpool != 0) {
+        ptracker = (zvcache_hashtable_pool_tracker*)ZVALUE(pcopy, (size_t)Z_PTR_P(pcopied));
+        ptracker->hoff = block.mpool;
+        block.mpool = 0;
+
+        alloc_trim_mpool(pcache->zvalloc, ptracker->hoff);
+    }
+
+    // The count of phase 1 is exact: a larger one would only leave the end of the block unused until
+    // the entry is freed
+    _ASSERT(block.pnext == block.pend);
+    if (block.pnext != block.pend) {
+        dprintimportant("create_zvcache_data: %Iu bytes of the block of the entry were not used", (size_t)(block.pend - block.pnext));
     }
 
     pvalue->sizeb = pcopy->allocsize;
@@ -2360,14 +2404,14 @@ Finished:
     if (FAILED(result)) {
         dprintimportant("failure %d in create_zvcache_data", result);
 
-        // copyin_zval() freed what it allocated for the value itself
-        if (pcopied != NULL) {
-            ZFREE(pcopy, pcopied);
-            pcopied = NULL;
+        // What the copy took: the pool of the parts that did not fit, and the block
+        if (block.mpool != 0) {
+            alloc_free_mpool(pcache->zvalloc, block.mpool);
+            block.mpool = 0;
         }
 
         if (pvalue != NULL) {
-            ZFREE(pcopy, pvalue);
+            alloc_sfree(pcache->zvalloc, pvalue);
             pvalue = NULL;
         }
     }
@@ -2378,86 +2422,48 @@ Finished:
 }
 
 /**
- * Free what a top-level cached zval points to.  Everything was allocated with
- * pcache->incopy, except the contents of arrays, which live in one memory pool.
+ * The memory pool of the parts of an entry's value that did not fit in its block (see copyin_malloc): only a
+ * top-level array has one, recorded in its tracker, if phase 1 could not count it or no free block held it whole
+ * (see create_zvcache_data)
  *
  * @param pcache  the cache
- * @param pzval   the top-level cached zval (an address in this process); the pointer it holds is set to NULL
+ * @param pvalue  the entry
+ * @return the offset of the pool, 0 if none (the entry is one block)
  */
-static void destroy_cached_zval(zvcache_context* pcache, zval* pzval) {
-    zvcache_hashtable_pool_tracker* table_tracker = NULL;
-    zend_reference*                 pzref = NULL;
+static size_t entry_pool(zvcache_context* pcache, zvcache_value* pvalue) {
+    zval*                           pzval = NULL;
+    zvcache_hashtable_pool_tracker* ptracker = NULL;
 
-    switch (Z_TYPE_P(pzval)) {
-        case IS_UNDEF:
-        case IS_NULL:
-        case IS_TRUE:
-        case IS_FALSE:
-        case IS_LONG:
-        case IS_DOUBLE:
-            break;
-
-        case IS_STRING:
-            ZFREE(pcache->incopy, ZVALUE(pcache->incopy, (size_t)Z_STR_P(pzval)));
-            Z_STR_P(pzval) = NULL;
-            break;
-
-        case IS_ARRAY:
-            table_tracker = (zvcache_hashtable_pool_tracker*)ZVALUE(pcache->incopy, (size_t)Z_PTR_P(pzval));
-            if (table_tracker->hoff != 0) {
-                alloc_free_mpool(pcache->zvalloc, table_tracker->hoff);
-            }
-            table_tracker->hoff = 0;
-            table_tracker->val = 0;
-            ZFREE(pcache->incopy, table_tracker);
-            Z_PTR_P(pzval) = NULL;
-            table_tracker = NULL;
-            break;
-
-        case IS_REFERENCE:
-            // Top-level references are dereferenced by zvcache_set(); free the referenced
-            // value too, in case an entry holds one anyway.
-            pzref = (zend_reference*)ZVALUE(pcache->incopy, (size_t)Z_REF_P(pzval));
-            destroy_cached_zval(pcache, &pzref->val);
-            ZFREE(pcache->incopy, pzref);
-            Z_REF_P(pzval) = NULL;
-            break;
-
-        case IS_OBJECT:
-            ZFREE(pcache->incopy, ZVALUE(pcache->incopy, (size_t)Z_PTR_P(pzval)));
-            Z_PTR_P(pzval) = NULL;
-            break;
-
-        default:
-            dprintimportant("destroy_cached_zval: Can't free unsupported type %d", Z_TYPE_P(pzval));
+    pzval = (zval*)ZVALUE(pcache->incopy, pvalue->zvalue);
+    if (pzval == NULL || Z_TYPE_P(pzval) != IS_ARRAY) {
+        return 0;
     }
+
+    ptracker = (zvcache_hashtable_pool_tracker*)ZVALUE(pcache->incopy, (size_t)Z_PTR_P(pzval));
+    return (ptracker != NULL) ? ptracker->hoff : 0;
 }
 
 /**
- * Frees an entry: what its top-level zval points to (destroy_cached_zval), that zval, and the block of the
- * entry, which holds its key. The entry must not be reachable from the cache (never added, or removed).
+ * Frees an entry: its block, which holds the entry, its key, its zval and the parts of its value (see
+ * create_zvcache_data), with one free, after the memory pool of the parts that did not fit, if any. The
+ * entry must not be reachable from the cache (never added, or removed). The frees take the allocator's
+ * lock, unless the process holds it (alloc_hold).
  *
  * @param pcache  the cache
  * @param pvalue  the entry, may be NULL
  */
 static void destroy_zvcache_data(zvcache_context* pcache, zvcache_value* pvalue) {
-    zval* pzval;
+    size_t pool = 0;
 
     dprintverbose("start destroy_zvcache_data");
 
     if (pvalue != NULL) {
-        if (pvalue->zvalue != 0) {
-            pzval = (zval*)ZVALUE(pcache->incopy, pvalue->zvalue);
-
-            destroy_cached_zval(pcache, pzval);
-
-            ZFREE(pcache->incopy, pzval);
-            pvalue->zvalue = 0;
-            pzval = NULL;
+        pool = entry_pool(pcache, pvalue);
+        if (pool != 0) {
+            alloc_free_mpool(pcache->zvalloc, pool);
         }
 
-        // The key is in the block of the entry (see ZVCACHE_KEY)
-        ZFREE(pcache->incopy, pvalue);
+        alloc_sfree(pcache->zvalloc, pvalue);
         pvalue = NULL;
     }
 
@@ -2519,14 +2525,17 @@ static void add_zvcache_entry(zvcache_context* pcache, unsigned int index, zvcac
 /**
  * Call this method under write lock.  It unlinks the entry, which no other process can reach from
  * then on, and queues it in the process's free list: free_pending_entries() frees it once the lock
- * is released, so that freeing a big entry does not hold up the other processes.  A process killed
- * in between (an IIS FastCGI timeout) leaves the memory of the queued entries lost until every
- * process of the pool has exited, so the list holds at most FREELIST_MAXIMUM entries: beyond that
- * (a step or a full pass that removes many entries), the entry is freed at once, under the lock,
- * where a kill loses at most the entry being freed.  The sweep of a ucache_clear() stops a batch
- * before that (see sweep_cleared_entries).  The unlink is one update (see ZVCACHE_SET), which logs 3
- * fields at most (the count, the 2 links to the entry): a kill before its end leaves the entry in its
- * chain, and the queue reuses the entry's links only after it.
+ * is released, so that the other processes do not wait for the allocator's lock meanwhile.  A
+ * process killed in between (an IIS FastCGI timeout) leaves the memory of the queued entries lost
+ * until every process of the pool has exited, so the list holds at most FREELIST_MAXIMUM entries:
+ * beyond that (a step or a full pass that removes many entries), the entry is freed at once, under
+ * the lock, where a kill loses at most the entry being freed.  The sweep of a ucache_clear() stops a
+ * batch before that (see sweep_cleared_entries).  While zvcache_set() holds the allocator's lock for
+ * the copy of a small value (pcache->freenow, see store_locked), an entry of one block is freed at
+ * once instead: that takes no lock and does not depend on its size, and leaves nothing for the other
+ * writers to wait for.  The unlink is one update (see ZVCACHE_SET), which logs 3 fields at most (the
+ * count, the 2 links to the entry): a kill before its end leaves the entry in its chain, and the
+ * queue reuses the entry's links only after it.
  *
  * @param pcache  the cache
  * @param index   the bucket whose chain holds the entry
@@ -2574,7 +2583,9 @@ static void remove_zvcache_entry(zvcache_context* pcache, unsigned int index, zv
     // The entry is out of the cache from here on: its links are free for the queue
     lock_undo_commit(&pcache->undo);
 
-    if (pcache->freecount < FREELIST_MAXIMUM) {
+    if (pcache->freenow && entry_pool(pcache, pvalue) == 0) {
+        destroy_zvcache_data(pcache, pvalue);
+    } else if (pcache->freecount < FREELIST_MAXIMUM) {
         // Freed by free_pending_entries(), chained through next_value
         pvalue->prev_value = 0;
         pvalue->next_value = pcache->freelist;
@@ -2590,14 +2601,27 @@ static void remove_zvcache_entry(zvcache_context* pcache, unsigned int index, zv
 }
 
 /**
- * Frees the entries that remove_zvcache_entry() queued.  Call it right after releasing the cache
- * lock, before any user code can run: the frees take only the allocator's lock, and allocate no
- * request memory, so nothing in here can bail out.
+ * Frees the entries that remove_zvcache_entry() queued, under one hold of the allocator's lock (see
+ * alloc_hold) instead of taking it for each block.  Call it right after releasing the cache lock,
+ * before any user code can run, or under it in a full pass (reclaim_entries), where the memory must be
+ * free before the pass reads the free memory: the lock of the allocator is taken after the cache lock,
+ * as everywhere.  The frees allocate no request memory, so nothing in here can bail out.
  *
  * @param pcache  the cache; its free list is emptied
  */
 static void free_pending_entries(zvcache_context* pcache) {
     zvcache_value* pvalue = NULL;
+    unsigned char  held = 0;
+
+    if (pcache->freelist == 0) {
+        pcache->freecount = 0;
+        return;
+    }
+
+    // The allocator's lock once for the batch, not for each block: a lock taken outside the cache lock is one
+    // that a write holding the cache lock may wait for (see store_locked). If it cannot be taken, each free
+    // tries to
+    held = SUCCEEDED(alloc_hold(pcache->zvalloc));
 
     while (pcache->freelist != 0) {
         pvalue = ZVCACHE_VALUE(pcache->zvalloc, pcache->freelist);
@@ -2607,6 +2631,10 @@ static void free_pending_entries(zvcache_context* pcache) {
     }
 
     pcache->freecount = 0;
+
+    if (held) {
+        alloc_release(pcache->zvalloc);
+    }
 }
 
 /**
@@ -2693,7 +2721,6 @@ static void sweep_cleared_entries(zvcache_context* pcache, LONGLONG budget, unsi
     unsigned int     clockevery = buckets_scaled(pcache, 256);
     size_t           bytes = 0;
     unsigned char    full = 0;
-    unsigned char    held = 0;
     LARGE_INTEGER    started;
 
     dprintverbose("start sweep_cleared_entries");
@@ -2771,16 +2798,9 @@ static void sweep_cleared_entries(zvcache_context* pcache, LONGLONG budget, unsi
         lock_undo_commit(&pcache->undo);
         lock_unlock(pcache->zvlock);
 
-        // The allocator's lock once for the batch, not for each block: with several processes sweeping,
-        // taking it for each block made them queue for it at every free (see alloc_hold). If it cannot
-        // be taken, each free tries to
-        if (pcache->freelist != 0) {
-            held = SUCCEEDED(alloc_hold(palloc));
-            free_pending_entries(pcache);
-            if (held) {
-                alloc_release(palloc);
-            }
-        }
+        // The allocator's lock once for the batch, not for each block (free_pending_entries): with several
+        // processes sweeping, taking it for each block made them queue for it at every free
+        free_pending_entries(pcache);
     }
 
     dprintverbose("end sweep_cleared_entries");
@@ -2985,27 +3005,6 @@ static unsigned int eviction_group(unsigned int idle) {
 }
 
 /**
- * Frees the entries that remove_zvcache_entry() queued, under one hold of the allocator's lock (see
- * alloc_hold) instead of taking it for each block.  The caller holds the cache lock (reclaim_entries):
- * the lock of the allocator is taken after it, as everywhere, and is free while the pass goes through
- * the table, for the copies into the cache that other processes make meanwhile.
- *
- * @param pcache  the cache
- */
-static void reclaim_free(zvcache_context* pcache) {
-    unsigned char held = 0;
-
-    if (pcache->freelist != 0) {
-        // If the lock cannot be taken, each free tries to
-        held = SUCCEEDED(alloc_hold(pcache->zvalloc));
-        free_pending_entries(pcache);
-        if (held) {
-            alloc_release(pcache->zvalloc);
-        }
-    }
-}
-
-/**
  * Call this method under lock.  A write ran out of shared memory: remove what a scavenger step
  * would remove, over the whole table and without its time limit, then, with *ppercent > 0, evict the
  * entries unused for the longest time until *ppercent percent of the cache is free (make_room()
@@ -3017,7 +3016,7 @@ static void reclaim_free(zvcache_context* pcache) {
  * memory is freed here, under the lock: the write that waits for it, and the next process that runs
  * out, must see what is really free (an estimate of what entries take, or frees still pending in
  * another process, would make processes evict again and again).  The entries are freed a batch of
- * FREELIST_MAXIMUM at a time, each batch under one hold of the allocator's lock (see reclaim_free),
+ * FREELIST_MAXIMUM at a time, each batch under one hold of the allocator's lock (see free_pending_entries),
  * and the free memory is read once the entries evicted since the last reading could have freed what
  * was missing, by what their values took, or every RECLAIM_EVICT_BATCH evictions, rather than after
  * each one.  Entries left by a ucache_clear() are removed too, uncounted.  Counts as a scavenger step
@@ -3069,12 +3068,12 @@ static unsigned int reclaim_entries(zvcache_context* pcache, zend_long* ppercent
             }
 
             if (pcache->freecount == FREELIST_MAXIMUM) {
-                reclaim_free(pcache);
+                free_pending_entries(pcache);
             }
         }
     }
 
-    reclaim_free(pcache);
+    free_pending_entries(pcache);
 
     if (percent > 0) {
         // On the stack: see zvcache_run_scavenger()
@@ -3124,7 +3123,7 @@ static unsigned int reclaim_entries(zvcache_context* pcache, zend_long* ppercent
                         // What the entries took is less than what freeing them gives back (block
                         // headers, the end of blocks): read the free memory once it could be enough
                         if (freeing >= missing || ++batch == RECLAIM_EVICT_BATCH) {
-                            reclaim_free(pcache);
+                            free_pending_entries(pcache);
                             alloc_getinfo(palloc, &info);
                             if (info.free_size >= target) {
                                 enough = 1;
@@ -3135,7 +3134,7 @@ static unsigned int reclaim_entries(zvcache_context* pcache, zend_long* ppercent
                             freeing = 0;
                             batch = 0;
                         } else if (pcache->freecount == FREELIST_MAXIMUM) {
-                            reclaim_free(pcache);
+                            free_pending_entries(pcache);
                         }
                     }
                 }
@@ -3143,7 +3142,7 @@ static unsigned int reclaim_entries(zvcache_context* pcache, zend_long* ppercent
         }
     }
 
-    reclaim_free(pcache);
+    free_pending_entries(pcache);
 
     *ppercent = percent;
 
@@ -3388,6 +3387,7 @@ int zvcache_create(zvcache_context** ppcache) {
     pcache->zvalloc = NULL;
     pcache->freelist = 0;
     pcache->freecount = 0;
+    pcache->freenow = 0;
     pcache->maxfree = 0;
     pcache->bucketbytes = ZVCACHE_BUCKET_BYTES;
     memset(&pcache->undo, 0, sizeof(pcache->undo));
@@ -3879,6 +3879,40 @@ Finished:
 }
 
 /**
+ * zvcache_set() of a value copied without the cache lock, whose copy found no room: a set looks its key up
+ * only to store the value (see zvcache_set), so the expired entry of key, and the other expired or cleared
+ * entries of its bucket, held their memory during the copy.  Removes them under the cache lock
+ * (find_zvcache_entry with prune) and frees them once it is released, so that the copy can run once more
+ * in that memory before make_room() runs a full pass or evicts entries: a value stored again under its key
+ * after it expired takes the memory of its old entry.
+ *
+ * @param pcache  the cache; call it without the cache lock
+ * @param key     the key, NUL terminated
+ * @param index   the bucket of key (utils_getindex)
+ * @return 1 if entries were removed, 0 if none were or the cache lock could not be taken
+ */
+static unsigned char prune_bucket(zvcache_context* pcache, const char* key, unsigned int index) {
+    zvcache_header* header = pcache->zvheader;
+    unsigned int    count = 0;
+    unsigned char   removed = 0;
+
+    if (FAILED(zvcache_lock(pcache))) {
+        return 0;
+    }
+
+    // One of the two counts goes down with each removal (see remove_zvcache_entry)
+    count = header->itemcount + header->clearitems;
+    find_zvcache_entry(pcache, key, index, 1);
+    removed = (header->itemcount + header->clearitems != count);
+
+    lock_unlock(pcache->zvlock);
+
+    free_pending_entries(pcache);
+
+    return removed;
+}
+
+/**
  * zvcache_set(): phase 2 ran out of shared memory, the cache is full (a value larger than the empty
  * cache was refused before phase 2, see zvcache_set).  Each round takes the cache lock, runs a full
  * pass (reclaim_entries) and runs phase 2 again, until the value fits.  Without ucache.gc.evict, one
@@ -3989,10 +4023,122 @@ static int make_room(zvcache_context* pcache, const char* key, zvcopy_prepared* 
 }
 
 /**
+ * zvcache_set() of a value whose entry takes at most ucache.lockedcopy bytes: phase 2 and the insert under
+ * the cache lock, in one hold of the allocator's lock (alloc_hold), as WinCache copied every value under
+ * the cache lock.  So a set that replaces an entry takes two cross-process locks, once each: the block of
+ * the new entry is allocated, and the block of the entry it replaces, or of the expired and cleared ones
+ * its lookup passes, freed, in that hold (pcache->freenow, see remove_zvcache_entry), where the allocator's
+ * lock is wanted only by the copies of larger values and the frees after other calls.  Phase 2 runs no user
+ * code and allocates no request memory (see copyin_prepare), and takes about as long as a ucache_get() of
+ * the value holds the lock to copy it out, several times as long for a table of interned strings (see
+ * ucache.lockedcopy at the top of this file).  The scavenger step, if one is due, runs before the hold, as on
+ * any write: what it removes is freed as everywhere else.  The entry is built before the entry of key is
+ * removed, so that a set that fails leaves it as it was.  A fatal error during the copy (none is expected)
+ * releases both locks before it propagates, as zvcache_get() does.  Both locks are released here.
+ *
+ * @param pcache  the cache; call it without the cache lock
+ * @param key     the key, NUL terminated
+ * @param index   the bucket of key (utils_getindex)
+ * @param pprep   what phase 1 collected (copyin_prepare)
+ * @param ttl     the time to live in seconds, 0 for none
+ * @param isadd   1 for an add, which fails if key has an entry, 0 for a set
+ * @param pgen    out: zvcache_header.rcgen when the copy began, for make_room(); set only if the copy ran
+ * @param pfreed  out: 1 if entries removed under the lock were freed only once it was released (those of a
+ *                scavenger step, and those with a memory pool), whose memory the copy could not use; else 0
+ * @return NONFATAL, else WARNING_ZVCACHE_EXISTS (an add, and key has an entry), FATAL_OUT_OF_SMEMORY (no free
+ *         block holds the entry: a live entry of key stays as it was, the caller makes room, see make_room),
+ *         another failure of create_zvcache_data(), or the failure of zvcache_lock() or alloc_hold()
+ */
+static int store_locked(zvcache_context* pcache, const char* key, unsigned int index, zvcopy_prepared* pprep, unsigned int ttl, unsigned char isadd, unsigned int* pgen, unsigned char* pfreed) {
+    int                    result = NONFATAL;
+    zvcache_value*         pentry = NULL;
+    zvcache_value*         pnewval = NULL;
+    volatile unsigned char bailout = 0;
+
+    *pfreed = 0;
+
+    result = zvcache_lock(pcache);
+    if (FAILED(result)) {
+        return result;
+    }
+
+    zvcache_run_scavenger(pcache, 0);
+
+    result = alloc_hold(pcache->zvalloc);
+    if (FAILED(result)) {
+        goto Finished;
+    }
+
+    pcache->freenow = 1;
+
+    pentry = find_zvcache_entry(pcache, key, index, 1);
+    if (pentry != NULL && isadd == 1) {
+        result = WARNING_ZVCACHE_EXISTS;
+        goto Finished;
+    }
+
+    // Read under the lock: a full pass that another process runs from here on may free room (see make_room)
+    *pgen = pcache->zvheader->rcgen;
+
+    // A fatal error (none is expected) must not leave the locks held: a FastCGI process survives it (see
+    // zvcache_get). create_zvcache_data() has given back what the copy took. No goto or return may leave
+    // the zend_try block
+    zend_try
+    {
+        result = create_zvcache_data(pcache, key, pprep, ttl, &pnewval);
+    }
+        zend_catch
+    {
+        bailout = 1;
+    }
+    zend_end_try();
+
+    if (bailout) {
+        if (pcache->freenow) {
+            pcache->freenow = 0;
+            alloc_release(pcache->zvalloc);
+        }
+
+        lock_unlock(pcache->zvlock);
+        free_pending_entries(pcache);
+        zend_bailout();
+    }
+
+    if (FAILED(result)) {
+        goto Finished;
+    }
+
+    if (pentry != NULL) {
+        remove_zvcache_entry(pcache, index, pentry);
+        pentry = NULL;
+    }
+
+    add_zvcache_entry(pcache, index, pnewval);
+    pnewval = NULL;
+
+Finished:
+
+    if (pcache->freenow) {
+        pcache->freenow = 0;
+        alloc_release(pcache->zvalloc);
+    }
+
+    lock_unlock(pcache->zvlock);
+
+    // What the step removed, if one ran, and the entries with a pool that the lookup removed
+    *pfreed = (pcache->freelist != 0);
+    free_pending_entries(pcache);
+
+    return result;
+}
+
+/**
  * Stores a copy of the value under key (ucache_set()), or with isadd only if key has no entry (ucache_add()).
- * Phase 1 (copyin_prepare) and phase 2 (create_zvcache_data, and make_room when the cache is full) run
- * without the cache lock; the new entry then replaces the entry of key, if any, under the lock, after a
- * scavenger step if one is due (zvcache_run_scavenger). Nothing is stored on failure.
+ * Phase 1 (copyin_prepare) runs without the cache lock.  Phase 2 (create_zvcache_data) of a value whose
+ * entry takes at most ucache.lockedcopy bytes runs under it, with the insert (store_locked); a larger value
+ * is copied without it (when the cache is full, prune_bucket and make_room), then replaces the entry of key,
+ * if any, under the lock, after a scavenger step if one is due (zvcache_run_scavenger). A small value that
+ * does not fit goes the way of a larger one. Nothing is stored on failure.
  *
  * @param pcache  the cache
  * @param key     the key, NUL terminated
@@ -4002,7 +4148,7 @@ static int make_room(zvcache_context* pcache, const char* key, zvcopy_prepared* 
  * @return NONFATAL, else WARNING_ZVCACHE_EXISTS (an add, and key has an entry), FATAL_ZVCACHE_INVALID_ZVAL (a
  *         value that cannot be stored, see copyin_prepare), FATAL_ZVCACHE_INVALID_KEY_LENGTH,
  *         FATAL_OUT_OF_LMEMORY (memory_limit reached or passed during the call), FATAL_OUT_OF_SMEMORY (the
- *         value does not fit in the cache), or the failure of zvcache_lock()
+ *         value does not fit in the cache), or the failure of zvcache_lock() or alloc_hold()
  */
 int zvcache_set(zvcache_context* pcache, const char* key, zval* pzval, unsigned int ttl, unsigned char isadd) {
     int             result = NONFATAL;
@@ -4012,6 +4158,7 @@ int zvcache_set(zvcache_context* pcache, const char* key, zval* pzval, unsigned 
     size_t          peak0 = 0;
     size_t          minimum = 0;
     unsigned int    gen = 0;
+    unsigned char   freed = 0;
     zvcache_value*  pentry = NULL;
     zvcache_value*  pnewval = NULL;
     zvcopy_prepared prep;
@@ -4031,35 +4178,34 @@ int zvcache_set(zvcache_context* pcache, const char* key, zval* pzval, unsigned 
 
     index = utils_getindex(key, pcache->zvheader->valuecount);
 
-    result = zvcache_lock(pcache);
-    if (FAILED(result)) {
-        goto Finished;
+    // An add of a key that has an entry fails before phase 1, which would serialize the objects
+    // of the value (user code) for nothing.  A set looks the key up only when it stores the value,
+    // or when its copy finds no room (see prune_bucket): it is a use of the entry only once it has
+    // stored the new value (a new entry), and a set that fails leaves the old entry as it was
+    if (isadd == 1) {
+        result = zvcache_lock(pcache);
+        if (FAILED(result)) {
+            goto Finished;
+        }
+
+        flock = 1;
+
+        pentry = find_zvcache_entry(pcache, key, index, 1);
+        if (pentry != NULL) {
+            _ASSERT(pentry->zvalue != 0);
+
+            result = WARNING_ZVCACHE_EXISTS;
+            goto Finished;
+        }
+
+        // Phase 1 runs user code, which must not run under the cross-process lock.  The entry of
+        // key is looked up again when the value is stored
+        lock_unlock(pcache->zvlock);
+        flock = 0;
+
+        // The expired entries the lookup removed, before user code runs
+        free_pending_entries(pcache);
     }
-
-    flock = 1;
-
-    pentry = find_zvcache_entry(pcache, key, index, 1);
-
-    // If key already exists, throw error for add.  A set is a use of the entry only once it has
-    // stored the new value (a new entry); a set that fails leaves the old entry as it was
-    if (pentry != NULL && isadd == 1) {
-        _ASSERT(pentry->zvalue != 0);
-
-        result = WARNING_ZVCACHE_EXISTS;
-        goto Finished;
-    }
-
-    // Copy the value in without holding the cache lock: serializing objects runs user code
-    // (__sleep(), __serialize(), Serializable::serialize()), which must not run under the
-    // cross-process lock and may call ucache functions itself.  The shared memory allocator
-    // has its own lock, and the new data is not reachable before add_zvcache_entry().
-    // pentry must not be used past this point; it is looked up again below.
-    lock_unlock(pcache->zvlock);
-    flock = 0;
-    pentry = NULL;
-
-    // The expired entries the lookup removed, before user code runs
-    free_pending_entries(pcache);
 
     // Phase 1: hold the value and serialize its objects, before any shared memory is taken
     prepared = 1;
@@ -4073,10 +4219,9 @@ int zvcache_set(zvcache_context* pcache, const char* key, zval* pzval, unsigned 
         goto Finished;
     }
 
-    // A value that takes more than the empty cache holds, by the count of phase 1 (a lower bound),
-    // fails here, as a full cache does, before phase 2 takes any shared memory: phase 2 would take
-    // all the free memory before it failed, the writes of the other processes would fail meanwhile
-    // and their full passes evict entries for nothing, and make_room() would evict every entry.
+    // A value that takes more than the empty cache holds, by the count of phase 1 (the block of the
+    // entry), fails here, as a full cache does, before phase 2 takes any shared memory: phase 2 would
+    // fail, and make_room() would evict every entry for it first.
     minimum = copyin_minimum_size(&prep, key);
     if (pcache->maxfree != 0 && minimum > pcache->maxfree) {
         dprintimportant("zvcache_set: the value takes at least %Iu bytes, the empty cache holds %Iu", minimum, pcache->maxfree);
@@ -4094,11 +4239,31 @@ int zvcache_set(zvcache_context* pcache, const char* key, zval* pzval, unsigned 
         sweep_cleared_entries(pcache, CLEAR_WRITE_HELP_US, 0);
     }
 
-    // Phase 2: if entry wasn't found or set was called, create new data
+    // Phase 2 of a small value under the cache lock, with the insert. The request memory does not grow
+    // from here on (phase 2 takes none), so the check of memory_limit above covers the whole call
     gen = pcache->zvheader->rcgen;
-    result = create_zvcache_data(pcache, key, &prep, ttl, &pnewval);
+    if (minimum != 0 && minimum <= UCG(lockedcopy)) {
+        result = store_locked(pcache, key, index, &prep, ttl, isadd, &gen, &freed);
+        if (result != FATAL_OUT_OF_SMEMORY) {
+            goto Finished;
+        }
+    } else {
+        // Phase 2 of a larger value, without the cache lock, so that no process waits for its copy
+        result = create_zvcache_data(pcache, key, &prep, ttl, &pnewval);
+        if (result == FATAL_OUT_OF_SMEMORY && isadd == 0) {
+            // The expired entry of key may hold the memory it needs (see prune_bucket)
+            freed = prune_bucket(pcache, key, index);
+        }
+    }
+
+    // Memory that the copy could not use is free now (see store_locked, prune_bucket): once more, before a full pass
+    if (result == FATAL_OUT_OF_SMEMORY && freed) {
+        gen = pcache->zvheader->rcgen;
+        result = create_zvcache_data(pcache, key, &prep, ttl, &pnewval);
+    }
+
     if (result == FATAL_OUT_OF_SMEMORY) {
-        // The cache is full
+        // The cache is full: make room, without the lock, for a small value as for a larger one
         result = make_room(pcache, key, &prep, ttl, gen, minimum, &pnewval);
     }
     if (FAILED(result)) {

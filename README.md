@@ -15,7 +15,7 @@ a value that one request stores can be read by the later requests of every proce
 deleted.
 
 - Platform: Windows x64, PHP 7.2, 7.3, 7.4, 8.0, 8.1, 8.2, 8.3, 8.4 and 8.5 NTS.
-- Extension name `ucache`, file `php_ucache.dll`, version 1.1.0.
+- Extension name `ucache`, file `php_ucache.dll`, version 1.1.1.
 - Maintained by [Datasteam Technologies](https://datasteam.com).
 - License: see [LICENSE](LICENSE) (the original Microsoft license, with the copyright of Datasteam Technologies).
 - What each version changed: [CHANGELOG.md](CHANGELOG.md). How fast it reads and writes: [BENCHMARKS.md](BENCHMARKS.md).
@@ -79,7 +79,7 @@ PHP:
 To install and enable the extension, follow these steps:
 
 1. Download the zip of your PHP version from the [releases page](https://github.com/pkoutsogiannis/ucache/releases), for
-   example `php_ucache-v1.1.0-8.4-nts-vs17-x86_64.zip` for PHP 8.4, unzip it, and rename the DLL in it to
+   example `php_ucache-v1.1.1-8.4-nts-vs17-x86_64.zip` for PHP 8.4, unzip it, and rename the DLL in it to
    `php_ucache.dll`. Or build it (see [Building for Windows](#building-for-windows)). With
    [PIE](https://github.com/php/pie), `pie install pkoutsogiannis/ucache` does steps 1 to 3 instead.
 2. Copy php_ucache.dll into the PHP extensions folder: the `ext` folder next to php.exe, or the folder that
@@ -111,6 +111,7 @@ The following table lists and explains the configuration settings provided by th
 | `ucache.enablecli` | "0" | "0" | "1" | PHP_INI_SYSTEM | Available as of UCache 1.0.0 |
 | `ucache.size` | "8" | "5" | "930" | PHP_INI_SYSTEM | Available as of UCache 1.0.0 |
 | `ucache.bucketbytes` | "512" | "64" | "65536" | PHP_INI_SYSTEM | Available as of UCache 1.1.0 |
+| `ucache.lockedcopy` | "2048" | "0" | "65536" | PHP_INI_SYSTEM | Available as of UCache 1.1.1 |
 | `ucache.namesalt` | NULL | | | PHP_INI_SYSTEM | Available as of UCache 1.0.0 |
 | `ucache.apppoolid` | NULL | | | PHP_INI_SYSTEM | Available as of UCache 1.0.0 |
 | `ucache.filemapdir` | NULL | | | PHP_INI_SYSTEM | Available as of UCache 1.0.0 |
@@ -152,6 +153,13 @@ Defines the size of the hash table of the cache: one hash bucket of 8 bytes per 
 buckets for the default 8 MB, which `ucache_info()` reports as `hash_bucket_count`). A smaller value makes lookups a
 little faster and takes more memory; a larger one gives memory back but slows down the lookups of small entries: keep
 the default unless the cache holds mostly large values.
+
+`ucache.lockedcopy` *int*
+
+Defines the largest entry, in bytes, whose value `ucache_set()` and `ucache_add()` copy into the cache while they hold
+the cache lock, which makes them faster; a larger value is copied before the lock is taken, so that no process waits for
+its copy. With 0, every value is copied before the lock: writes of small values are slower, but a process that reads
+beside processes that write small values back to back waits less (see [Tuning](#tuning)).
 
 `ucache.namesalt` *string*
 
@@ -216,10 +224,10 @@ the default prefix. ucache.php follows the setting.
 #### Startup warnings
 
 UCache raises a startup warning (`E_CORE_WARNING`) when it cannot use a setting as written (`ucache.size`,
-`ucache.bucketbytes`, `ucache.prefix`) and when it cannot create the cache. PHP writes startup warnings to its error log
-and to the Application event log of Windows (source `PHP-<version>`, for example `PHP-8.4.14`, event ID 4; on PHP 8,
-when `log_errors` is on, as in the php.ini files that come with PHP). Every PHP process raises the warning again when it
-starts: fix the setting rather than ignore the warning.
+`ucache.bucketbytes`, `ucache.lockedcopy`, `ucache.prefix`) and when it cannot create the cache. PHP writes startup
+warnings to its error log and to the Application event log of Windows (source `PHP-<version>`, for example `PHP-8.4.14`,
+event ID 4; on PHP 8, when `log_errors` is on, as in the php.ini files that come with PHP). Every PHP process raises the
+warning again when it starts: fix the setting rather than ignore the warning.
 
 When the cache cannot be created, PHP runs without it: the functions return false (`ucache_meminfo()` returns null), and
 the `User cache` line of `phpinfo()` says `unavailable`. The warning gives the Windows error and names the likely cause:
@@ -356,20 +364,20 @@ and `total_evicted_count`.
 When `ucache_set()` or `ucache_add()` runs out of memory, it runs a full pass over the table, which removes what a step
 removes. With `ucache.gc.evict` more than 0, it then evicts the entries that have not been used for the longest time,
 until that percentage of the cache is free, and tries again. With 0, the default, nothing is evicted, and the call fails
-if the value still does not fit. A value whose parts take more than the empty cache holds (the `memory_free` of
-`ucache_meminfo()` with no entries) fails at once, without removing anything.
+if the value still does not fit. A value larger than the empty cache (the `memory_free` of `ucache_meminfo()` with no
+entries) fails at once, without removing anything.
 
 `ucache_clear()` empties the cache for every process at once, and frees the memory without holding up the other
 processes.
 
 ### The cache lock
 
-Every call takes the cache lock while it looks its key up, and a read also while it copies the value out (a write copies
-its value in before it takes the lock), so processes that call the cache back to back take turns. Requests that do other
-work between their calls rarely find the lock taken: at a thousand calls a second, it is busy about 0.1% of the time. A
-fatal error in a cache function does not leave the lock held, and a process killed while it holds a lock (by an IIS
-FastCGI timeout, for example) leaves the cache consistent: the next process undoes the update that it left half done,
-and `ucache_info()` counts it in `total_abandoned_lock_count`.
+Every call takes the cache lock while it looks its key up, while it copies a value out and, for a value of at most
+`ucache.lockedcopy` bytes, while it copies a value in, so processes that call the cache back to back take turns.
+Requests that do other work between their calls rarely find the lock taken: at a thousand calls a second, it is busy
+about 0.1% of the time. A fatal error in a cache function does not leave the lock held, and a process killed while it
+holds a lock (by an IIS FastCGI timeout, for example) leaves the cache consistent: the next process undoes the update
+that it left half done, and `ucache_info()` counts it in `total_abandoned_lock_count`.
 
 ### memory_limit
 
@@ -394,7 +402,9 @@ and `limit`.
   seconds take about 3 hours to go through the 1048573 buckets of a 512 MB cache.
 - `ucache.gc.threshold` makes the scavenger work harder once the cache is that full. It only helps where entries expire
   or go unused (`ucache.gc.ttl`).
-- Keep `ucache.bucketbytes` at its default: a larger value only suits a cache of large values.
+- Keep `ucache.bucketbytes` and `ucache.lockedcopy` at their defaults. A larger `ucache.bucketbytes` only suits a cache
+  of large values. `ucache.lockedcopy=0` only helps where processes that read run beside processes that write small
+  values back to back, and it slows down writes (see [BENCHMARKS.md](BENCHMARKS.md#ucachelockedcopy0-in-111)).
 
 ## UCache Functions
 

@@ -72,6 +72,17 @@ typedef void   (*fn_free)(void* palloc, size_t hoffset, void* addr);
 #define ALLOC_CLASS_COUNT               (ALLOC_CLASS_LINEAR_COUNT + ((32 - ALLOC_CLASS_LINEAR_LOG2) << ALLOC_CLASS_SPLIT_LOG2))
 #define ALLOC_CLASS_WORDS               ((ALLOC_CLASS_COUNT + 31) / 32)
 
+// The block of the smallest entry: the empty key, or a key short enough to take the same block, and a value
+// that its zval holds (a C_ASSERT in ucache_zvcache.c checks it). A free block is split only when the
+// rest can hold that much: a smaller free block would hold no entry and count as free memory that no write
+// can use, and every search would go past it. The pieces of a memory pool (see alloc_ommalloc) are smaller,
+// and take a whole block when what is left of it could not be a free block
+#ifdef _WIN64
+#define ALLOC_SMALLEST_REQUEST          88
+#else  // _WIN64
+#define ALLOC_SMALLEST_REQUEST          68
+#endif // _WIN64
+
 // alloc_segment_header.initdone once a process has initialized the segment and what its caller keeps in it
 // ("DONE" in memory). Any other value, 0 in a new segment, means that it is still to be initialized
 #define ALLOC_SEGMENT_INITDONE          0x454E4F44
@@ -121,7 +132,6 @@ struct alloc_mpool_header {
     size_t       socurr;      // Current chunk for small allocations
     size_t       mocurr;      // Current chunk for medium allocations
     size_t       locurr;      // Current chunk for large allocations
-    size_t       gocurr;      // The chunk of the size the caller asked for, in the block of this header (see alloc_create_mpool), 0 if none
 };
 
 typedef struct alloc_mpool_segment alloc_mpool_segment;
@@ -161,7 +171,7 @@ extern void   alloc_initdone(alloc_context* palloc);
 extern void   alloc_terminate(alloc_context* palloc);
 extern int    alloc_hold(alloc_context* palloc);
 extern void   alloc_release(alloc_context* palloc);
-extern int    alloc_create_mpool(alloc_context* palloc, size_t* phoffset, size_t size);
+extern int    alloc_create_mpool(alloc_context* palloc, size_t* phoffset);
 extern void   alloc_trim_mpool(alloc_context* palloc, size_t hoffset);
 extern void   alloc_free_mpool(alloc_context* palloc, size_t hoffset);
 
